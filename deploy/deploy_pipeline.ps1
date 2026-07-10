@@ -119,13 +119,6 @@ $hasDeployStatusLib = $false
 if ($deployStatusLib) {
     . $deployStatusLib
     Assert-PipelineDeployStatusLib -LibPath $deployStatusLib
-    #region agent log
-    Write-PipelineDebugLog -HypothesisId "B" -Location "deploy_pipeline.ps1:lib-load" `
-        -Message "deploy status lib loaded" -RunId $RunId -Data @{
-            libPath          = $deployStatusLib
-            supportsExtended = (Test-PipelineDeployStatusSupportsExtendedEvents)
-        }
-    #endregion
     $hasDeployStatusLib = $true
 }
 

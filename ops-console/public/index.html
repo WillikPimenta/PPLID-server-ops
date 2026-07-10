@@ -161,6 +161,23 @@
       <div id="db-row-drawer-body" class="drawer-body"></div>
     </aside>
 
+    <div id="monitor-drawer-overlay" class="drawer-overlay hidden" aria-hidden="true"></div>
+    <aside
+      id="monitor-drawer"
+      class="drawer monitor-drawer hidden"
+      aria-hidden="true"
+      aria-labelledby="monitor-drawer-title"
+      role="dialog"
+    >
+      <div class="drawer-header">
+        <h2 id="monitor-drawer-title">Detalhes do incidente</h2>
+        <button type="button" class="drawer-close" id="monitor-drawer-close" aria-label="Fechar">×</button>
+      </div>
+      <div id="monitor-drawer-body" class="drawer-body">
+        <p class="drawer-placeholder">Selecione um incidente.</p>
+      </div>
+    </aside>
+
     <script src="/js/utils.js"></script>
     <script src="/js/status.js"></script>
     <script src="/js/actions.js"></script>
@@ -173,6 +190,7 @@
     <script src="/js/filters.js"></script>
     <script src="/js/drawer.js"></script>
     <script src="/js/monitoring.js"></script>
+    <script src="/js/monitor-drawer.js"></script>
     <script src="/js/render.js"></script>
     <script src="/js/app.js"></script>
   </body>

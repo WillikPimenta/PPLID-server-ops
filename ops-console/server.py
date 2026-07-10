@@ -1574,6 +1574,53 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         parts = [p for p in remainder.split("/") if p]
         query = parse_qs(parsed.query)
         try:
+            if parts and parts[0] == "dashboard":
+                envs_raw = (query.get("envs") or [",".join(ENV_ORDER)])[0]
+                env_names = [e.strip().upper() for e in envs_raw.split(",") if e.strip()]
+                tab = (query.get("tab") or ["summary"])[0].lower()
+                event_hours = int((query.get("eventHours") or query.get("hours") or ["24"])[0])
+                series_hours = int((query.get("seriesHours") or ["168"])[0])
+                event_limit = int((query.get("limit") or ["100"])[0])
+                include_health_series = (query.get("healthSeries") or ["0"])[0] in ("1", "true", "yes")
+                include_deploy = (query.get("deploy") or ["0"])[0] in ("1", "true", "yes")
+                include_api = (query.get("api") or ["0"])[0] in ("1", "true", "yes")
+                severity = (query.get("severity") or [None])[0] or None
+                category = (query.get("category") or [None])[0] or None
+                self._send_json(
+                    server_monitoring.build_monitoring_dashboard(
+                        self.config,
+                        env_names=env_names,
+                        tab=tab,
+                        include_health_series=include_health_series,
+                        include_deploy=include_deploy,
+                        include_api=include_api,
+                        event_hours=event_hours,
+                        series_hours=series_hours,
+                        event_limit=event_limit,
+                        severity=severity,
+                        category=category,
+                    )
+                )
+                return
+
+            if parts and parts[0] == "collector-status":
+                self._send_json(
+                    server_monitoring.build_monitoring_collector_status_detail(self.config)
+                )
+                return
+
+            if len(parts) >= 2 and parts[0] == "events" and parts[1] == "grouped":
+                hours = int(query.get("hours", ["24"])[0])
+                env_filter = (query.get("env") or [None])[0]
+                self._send_json(
+                    server_monitoring.build_monitoring_grouped_events(
+                        self.config,
+                        env_name=env_filter.upper() if env_filter else None,
+                        hours=hours,
+                    )
+                )
+                return
+
             if not parts:
                 self._send_json({"error": "Rota invalida"}, status=400)
                 return
@@ -1594,17 +1641,53 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": "metric obrigatorio"}, status=400)
                     return
                 hours = int(query.get("hours", ["168"])[0])
+                center = (query.get("center") or [None])[0]
                 self._send_json(
                     server_monitoring.build_monitoring_series(
-                        self.config, env_name, metric, hours=hours
+                        self.config, env_name, metric, hours=hours, center=center
                     )
                 )
                 return
             if sub == "events":
+                if len(parts) > 2:
+                    try:
+                        event_id = int(parts[2])
+                    except ValueError:
+                        self._send_json({"error": "ID de evento invalido"}, status=400)
+                        return
+                    self._send_json(
+                        server_monitoring.build_monitoring_event_detail(
+                            self.config, env_name, event_id
+                        )
+                    )
+                    return
                 limit = int(query.get("limit", ["100"])[0])
+                category = (query.get("category") or [None])[0]
+                severity = (query.get("severity") or [None])[0]
+                hours_raw = (query.get("hours") or [None])[0]
+                hours = int(hours_raw) if hours_raw else None
                 self._send_json(
                     server_monitoring.build_monitoring_events(
-                        self.config, env_name, limit=limit
+                        self.config,
+                        env_name,
+                        limit=limit,
+                        category=category,
+                        severity=severity,
+                        hours=hours,
+                    )
+                )
+                return
+            if sub == "logs":
+                since = (query.get("since") or [None])[0]
+                pattern = (query.get("pattern") or ["ERROR"])[0]
+                limit = int(query.get("limit", ["200"])[0])
+                self._send_json(
+                    server_monitoring.build_monitoring_service_logs(
+                        self.config,
+                        env_name,
+                        since=since,
+                        pattern=pattern,
+                        limit=limit,
                     )
                 )
                 return

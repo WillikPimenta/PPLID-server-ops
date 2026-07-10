@@ -4,10 +4,12 @@ Coleta e APIs de monitoramento do ops-console.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -50,6 +52,15 @@ _SERVICE_LOG_OFFSETS: dict[str, int] = {}
 _CONFIG_CACHE: dict[str, Any] | None = None
 _RECENT_EVENT_KEYS: dict[str, float] = {}
 _EVENT_DEDUPE_SEC = 900
+_LATENCY_SPIKE_DEDUPE_SEC = 3600
+_LATENCY_SPIKE_SAMPLES: dict[str, list[float]] = {}
+_LAST_COLLECTOR_TICK_AT: str | None = None
+_COLLECTOR_ERRORS: list[dict[str, Any]] = []
+_COLLECTOR_MAX_ERRORS = 20
+_DASHBOARD_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_DASHBOARD_CACHE_TTL_SEC = 5.0
+
+_logger = logging.getLogger("ops.monitoring")
 
 
 def _utc_now_iso() -> str:
@@ -157,7 +168,9 @@ def probe_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
         }
 
 
-def fetch_backend_api_metrics(config: dict[str, Any], env_name: str, window: str = "24h") -> dict[str, Any]:
+def fetch_backend_api_metrics(
+    config: dict[str, Any], env_name: str, window: str = "24h", *, timeout: float = 5.0
+) -> dict[str, Any]:
     env_cfg = config.get(env_name, {})
     port = int(env_cfg.get("backendPort") or 0)
     if not port:
@@ -165,7 +178,7 @@ def fetch_backend_api_metrics(config: dict[str, Any], env_name: str, window: str
     url = f"http://127.0.0.1:{port}/api/v1/ops-metrics/summary/?window={window}"
     try:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=5.0) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return {"error": f"HTTP {exc.code}", "reachable": False}
@@ -181,10 +194,13 @@ def _record_event(
     category: str,
     title: str,
     detail: str | None = None,
+    *,
+    dedupe_sec: int | None = None,
 ) -> None:
     key = f"{env_name.upper()}:{category}:{title}"
     now = time.time()
-    if key in _RECENT_EVENT_KEYS and now - _RECENT_EVENT_KEYS[key] < _EVENT_DEDUPE_SEC:
+    window = dedupe_sec if dedupe_sec is not None else _EVENT_DEDUPE_SEC
+    if key in _RECENT_EVENT_KEYS and now - _RECENT_EVENT_KEYS[key] < window:
         return
     _RECENT_EVENT_KEYS[key] = now
     try:
@@ -202,6 +218,11 @@ def _detect_health_spike(
     latency_ms: float,
     reachable: bool,
 ) -> None:
+    settings = _CONFIG_CACHE or _DEFAULT_MONITORING
+    slos = settings.get("slos") or _DEFAULT_MONITORING["slos"]
+    warn_ms = float(slos.get("healthP95WarnMs") or 400)
+    critical_ms = float(slos.get("healthP95CriticalMs") or 600)
+
     if not reachable:
         _record_event(
             ops_store,
@@ -212,7 +233,47 @@ def _detect_health_spike(
             "Backend offline",
             "Health check falhou",
         )
+        _LATENCY_SPIKE_SAMPLES.pop(env_name.upper(), None)
         return
+
+    since = _iso_days_ago(1)
+    agg = ops_store.aggregate_monitor_samples(
+        env_name, "health_latency_ms", since=since, db_path=db_path
+    )
+    avg = float(agg.get("avg") or 0)
+    p95 = float(agg.get("p95") or 0)
+
+    if p95 >= critical_ms:
+        _record_event(
+            ops_store,
+            db_path,
+            env_name,
+            "critical",
+            "availability",
+            f"Latencia p95 elevada ({int(p95)}ms)",
+            f"p95 24h acima de {int(critical_ms)}ms",
+        )
+    elif p95 >= warn_ms:
+        _record_event(
+            ops_store,
+            db_path,
+            env_name,
+            "warn",
+            "availability",
+            f"Latencia p95 acima do SLO ({int(p95)}ms)",
+            f"SLO: <= {int(warn_ms)}ms",
+            dedupe_sec=_LATENCY_SPIKE_DEDUPE_SEC,
+        )
+
+    spike_key = env_name.upper()
+    history = _LATENCY_SPIKE_SAMPLES.setdefault(spike_key, [])
+    history.append(latency_ms)
+    if len(history) > 3:
+        history.pop(0)
+
+    spike_threshold = max(500.0, avg * 2 if avg > 0 else 500.0)
+    consecutive_spike = len(history) >= 3 and all(v > spike_threshold for v in history)
+
     if latency_ms > 3000:
         _record_event(
             ops_store,
@@ -222,22 +283,29 @@ def _detect_health_spike(
             "availability",
             f"Health lento ({int(latency_ms)}ms)",
             "Latencia acima de 3s",
+            dedupe_sec=_LATENCY_SPIKE_DEDUPE_SEC,
         )
-        return
-    since = _iso_days_ago(1)
-    agg = ops_store.aggregate_monitor_samples(
-        env_name, "health_latency_ms", since=since, db_path=db_path
-    )
-    avg = float(agg.get("avg") or 0)
-    if avg > 0 and latency_ms > avg * 2 and latency_ms > 500:
+    elif consecutive_spike:
         _record_event(
             ops_store,
             db_path,
             env_name,
-            "warn",
+            "info",
             "availability",
             f"Pico de latencia health ({int(latency_ms)}ms)",
+            f"Media recente: {avg:.0f}ms · 3 amostras consecutivas acima de {int(spike_threshold)}ms",
+            dedupe_sec=_LATENCY_SPIKE_DEDUPE_SEC,
+        )
+    elif avg > 0 and latency_ms > avg * 2 and latency_ms > 500:
+        _record_event(
+            ops_store,
+            db_path,
+            env_name,
+            "info",
+            "availability",
+            f"Pico pontual de latencia ({int(latency_ms)}ms)",
             f"Media recente: {avg:.0f}ms",
+            dedupe_sec=_LATENCY_SPIKE_DEDUPE_SEC,
         )
 
 
@@ -374,7 +442,9 @@ def _collect_service_log_errors(config: dict[str, Any], env_name: str, ops_store
             )
 
 
-def _query_sync_logs(config: dict[str, Any], env_name: str, days: int = 7) -> list[dict[str, Any]]:
+def _query_sync_logs(
+    config: dict[str, Any], env_name: str, days: int = 7
+) -> tuple[list[dict[str, Any]], str | None]:
     since = datetime.now(timezone.utc) - timedelta(days=days)
     results: list[dict[str, Any]] = []
 
@@ -458,17 +528,17 @@ def _query_sync_logs(config: dict[str, Any], env_name: str, days: int = 7) -> li
                             results.append(item)
                     except Exception:
                         continue
-    except Exception:
-        return []
+    except Exception as exc:  # noqa: BLE001
+        return [], str(exc)
 
     results.sort(key=lambda r: r.get("startedAt") or "", reverse=True)
-    return results[:200]
+    return results[:200], None
 
 
 def _check_sync_anomalies(
     config: dict[str, Any], env_name: str, ops_store, db_path: Path
 ) -> None:
-    syncs = _query_sync_logs(config, env_name, days=1)
+    syncs, _error = _query_sync_logs(config, env_name, days=1)
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=3)
     for sync in syncs:
         started_raw = sync.get("startedAt")
@@ -493,14 +563,14 @@ def _check_sync_anomalies(
 
 
 def _collector_tick(config: dict[str, Any]) -> None:
-    global _LAST_PURGE_AT
+    global _LAST_PURGE_AT, _LAST_COLLECTOR_TICK_AT
     settings = get_monitoring_settings(config)
     ops_store = _import_ops_store()
     db_path = resolve_ops_store_path(config)
     try:
         ops_store.init_store(db_path)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("monitoring collector init_store failed: %s", exc)
 
     now = time.time()
     if now - _LAST_PURGE_AT > 24 * 3600:
@@ -508,24 +578,33 @@ def _collector_tick(config: dict[str, Any]) -> None:
             ops_store.purge_monitor_data(
                 retention_days=int(settings.get("retentionDays") or 7), db_path=db_path
             )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("monitoring purge failed: %s", exc)
         _LAST_PURGE_AT = now
 
     categories = settings.get("enabledCategories") or {}
     pg_interval = float(settings.get("pgSnapshotIntervalSec") or 300)
 
     for env_name in ENV_ORDER:
-        if categories.get("availability", True):
-            _collect_availability(config, env_name, ops_store, db_path)
-        last_pg = _LAST_PG_SNAPSHOT.get(env_name, 0.0)
-        if categories.get("postgres", True) and (now - last_pg >= pg_interval):
-            _collect_postgres(config, env_name, ops_store, db_path)
-            _LAST_PG_SNAPSHOT[env_name] = now
-        if categories.get("logs", True):
-            _collect_service_log_errors(config, env_name, ops_store, db_path)
-        if categories.get("syncs", True):
-            _check_sync_anomalies(config, env_name, ops_store, db_path)
+        try:
+            if categories.get("availability", True):
+                _collect_availability(config, env_name, ops_store, db_path)
+            last_pg = _LAST_PG_SNAPSHOT.get(env_name, 0.0)
+            if categories.get("postgres", True) and (now - last_pg >= pg_interval):
+                _collect_postgres(config, env_name, ops_store, db_path)
+                _LAST_PG_SNAPSHOT[env_name] = now
+            if categories.get("logs", True):
+                _collect_service_log_errors(config, env_name, ops_store, db_path)
+            if categories.get("syncs", True):
+                _check_sync_anomalies(config, env_name, ops_store, db_path)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"{env_name}: {exc}"
+            _logger.exception("monitoring collector tick failed for %s", env_name)
+            _COLLECTOR_ERRORS.append({"at": _utc_now_iso(), "message": msg})
+            if len(_COLLECTOR_ERRORS) > _COLLECTOR_MAX_ERRORS:
+                _COLLECTOR_ERRORS.pop(0)
+
+    _LAST_COLLECTOR_TICK_AT = _utc_now_iso()
 
 
 def _collector_loop(config: dict[str, Any]) -> None:
@@ -534,8 +613,11 @@ def _collector_loop(config: dict[str, Any]) -> None:
     while not _COLLECTOR_STOP.wait(interval):
         try:
             _collector_tick(config)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception("monitoring collector loop failed: %s", exc)
+            _COLLECTOR_ERRORS.append({"at": _utc_now_iso(), "message": str(exc)})
+            if len(_COLLECTOR_ERRORS) > _COLLECTOR_MAX_ERRORS:
+                _COLLECTOR_ERRORS.pop(0)
 
 
 def start_monitoring_collector(config: dict[str, Any]) -> None:
@@ -607,27 +689,141 @@ def _collector_status(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _enrich_monitor_event(event: dict[str, Any]) -> dict[str, Any]:
+def build_monitoring_collector_status_detail(config: dict[str, Any]) -> dict[str, Any]:
+    settings = get_monitoring_settings(config)
+    interval = max(15, int(settings.get("collectorIntervalSec") or 60))
+    base = _collector_status(config)
+    ops_store = _import_ops_store()
+    db_path = resolve_ops_store_path(config)
+    since = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    samples_by_env: dict[str, int] = {}
+    try:
+        for env_name in ENV_ORDER:
+            points = ops_store.query_monitor_series(
+                env_name, "health_latency_ms", since=since, limit=500, db_path=db_path
+            )
+            samples_by_env[env_name] = len(points)
+    except Exception:
+        pass
+    thread_alive = _COLLECTOR_THREAD.is_alive() if _COLLECTOR_THREAD else False
+    return {
+        **base,
+        "lastTickAt": _LAST_COLLECTOR_TICK_AT,
+        "threadAlive": thread_alive,
+        "samplesByEnv2h": samples_by_env,
+        "recentErrors": list(_COLLECTOR_ERRORS),
+    }
+
+
+def _event_investigation_link(event: dict[str, Any]) -> tuple[str, str]:
     category = str(event.get("category") or "").lower()
     env = str(event.get("environment") or "").upper()
     title = str(event.get("title") or "")
-    enriched = dict(event)
-    action = "Investigar no painel"
-    link = f"#/monitoring"
+    recorded = str(event.get("recorded_at") or "")
+    at_param = f"&at={urllib.parse.quote(recorded)}" if recorded else ""
+    since_param = f"&since={urllib.parse.quote(recorded)}" if recorded else ""
+
     if category in ("logs", "log"):
-        action = "Verificar logs do serviço"
-        link = f"#/deploy?env={env}" if env else "#/deploy"
-    elif category == "sync":
-        action = "Ver histórico de syncs"
-    elif category in ("health", "availability"):
-        action = "Ver tendência de latência"
-    elif category == "deploy":
-        action = "Ver pipeline de deploy"
-        link = f"#/deploy?env={env}" if env else "#/deploy"
-    elif "pico" in title.lower() or "erro" in title.lower():
-        action = "Ver logs filtrados e correlacionar com deploy recente"
+        return "Verificar logs do serviço", f"#/monitoring/logs?env={env}{since_param}"
+    if category == "sync":
+        highlight = ""
+        if "Sync falhou" in title and "(" in title and ")" in title:
+            inner = title.split("(", 1)[1].rsplit(")", 1)[0]
+            highlight = f"&highlight={urllib.parse.quote(inner)}"
+        return "Ver histórico de syncs", f"#/monitoring/syncs?env={env}{highlight}"
+    if category in ("health", "availability"):
+        return "Ver tendência de latência", f"#/monitoring/latency?env={env}{at_param}"
+    if category == "postgres":
+        return "Investigar painel PG", f"#/database/{env}"
+    if category == "deploy":
+        return "Ver pipeline de deploy", f"#/deploy?env={env}"
+    if "pico" in title.lower() or "erro" in title.lower():
+        return "Ver logs filtrados", f"#/monitoring/logs?env={env}{since_param}"
+    return "Investigar no painel", f"#/monitoring/incidents?env={env}"
+
+
+def _correlate_event(
+    event: dict[str, Any],
+    config: dict[str, Any],
+) -> list[dict[str, str]]:
+    hints: list[dict[str, str]] = []
+    env = str(event.get("environment") or "").upper()
+    recorded_dt = _parse_iso_dt(event.get("recorded_at"))
+    if not recorded_dt or not env:
+        return hints
+
+    window = timedelta(minutes=10)
+    start = recorded_dt - window
+    end = recorded_dt + window
+
+    try:
+        deploy_stats = build_monitoring_deploy_stats(config, env)
+        for run in deploy_stats.get("runs") or []:
+            started = _parse_iso_dt(run.get("started_at"))
+            if started and start <= started <= end:
+                hints.append(
+                    {
+                        "type": "deploy",
+                        "label": f"Possível causa: deploy às {started.strftime('%H:%M')}",
+                    }
+                )
+                break
+    except Exception:
+        pass
+
+    syncs, _err = _query_sync_logs(config, env, days=1)
+    for sync in syncs:
+        if sync.get("success"):
+            continue
+        started = _parse_iso_dt(sync.get("startedAt"))
+        if started and start <= started <= end:
+            src = sync.get("source") or "sync"
+            kind = sync.get("kind") or ""
+            hints.append(
+                {
+                    "type": "sync",
+                    "label": f"Sync falhou antes do incidente ({src}/{kind})",
+                }
+            )
+            break
+
+    category = str(event.get("category") or "").lower()
+    if category in ("health", "availability"):
+        ops_store = _import_ops_store()
+        db_path = resolve_ops_store_path(config)
+        since_iso = start.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        until_iso = end.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        try:
+            log_events = ops_store.query_monitor_events(
+                env,
+                since=since_iso,
+                until=until_iso,
+                category="logs",
+                limit=5,
+                db_path=db_path,
+            )
+            if log_events:
+                hints.append(
+                    {
+                        "type": "logs",
+                        "label": "Erros em service_log_lines no mesmo intervalo",
+                    }
+                )
+        except Exception:
+            pass
+
+    return hints
+
+
+def _enrich_monitor_event(event: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
+    enriched = dict(event)
+    action, link = _event_investigation_link(event)
     enriched["recommendedAction"] = action
     enriched["investigationLink"] = link
+    if config is not None:
+        enriched["correlations"] = _correlate_event(event, config)
+    else:
+        enriched["correlations"] = []
     return enriched
 
 
@@ -699,6 +895,31 @@ def build_monitoring_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_data_fresh(config: dict[str, Any], env_name: str | None = None) -> bool:
+    collector = _collector_status(config)
+    if collector.get("status") != "ok":
+        latest_at = collector.get("lastSampleAt")
+        latest_dt = _parse_iso_dt(latest_at)
+        if latest_dt:
+            stale_sec = (datetime.now(timezone.utc) - latest_dt).total_seconds()
+            if stale_sec > 3600:
+                return False
+        if collector.get("status") in ("stale", "no_data"):
+            return False
+    if env_name:
+        ops_store = _import_ops_store()
+        db_path = resolve_ops_store_path(config)
+        since = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        health = ops_store.aggregate_monitor_samples(
+            env_name.upper(), "health_latency_ms", since=since, db_path=db_path
+        )
+        if health.get("latestAt"):
+            latest_dt = _parse_iso_dt(health.get("latestAt"))
+            if latest_dt and (datetime.now(timezone.utc) - latest_dt).total_seconds() > 3600:
+                return False
+    return True
+
+
 def build_monitoring_summary(
     config: dict[str, Any], env_name: str, *, window_hours: int = 24
 ) -> dict[str, Any]:
@@ -720,7 +941,7 @@ def build_monitoring_summary(
     )
     api_metrics = fetch_backend_api_metrics(config, env_name, window="24h")
 
-    syncs = _query_sync_logs(config, env_name, days=7)
+    syncs, sync_error = _query_sync_logs(config, env_name, days=7)
     sync_failures_24h = sum(
         1
         for s in syncs
@@ -729,12 +950,18 @@ def build_monitoring_summary(
     )
 
     uptime_samples = ops_store.query_monitor_series(
-        env_name, "health_reachable", since=since, limit=5000, db_path=db_path
+        env_name, "health_reachable", since=since, limit=1000, db_path=db_path
     )
     uptime_pct = 100.0
     if uptime_samples:
         ok = sum(1 for s in uptime_samples if float(s.get("value") or 0) >= 1.0)
         uptime_pct = round(100.0 * ok / len(uptime_samples), 1)
+
+    latest_reachable = 1.0
+    if uptime_samples:
+        latest_reachable = float(uptime_samples[-1].get("value") or 0)
+
+    data_fresh = _is_data_fresh(config, env_name)
 
     return {
         "environment": env_name,
@@ -742,10 +969,13 @@ def build_monitoring_summary(
         "since": since,
         "health": health,
         "uptimePct": uptime_pct,
+        "latestReachable": latest_reachable >= 1.0,
+        "dataFresh": data_fresh,
         "postgres": {"connections": pg_conn},
         "logErrors": log_errors,
         "api": api_metrics,
         "syncFailures24h": sync_failures_24h,
+        "syncQueryError": sync_error,
     }
 
 
@@ -755,19 +985,39 @@ def build_monitoring_series(
     metric_key: str,
     *,
     hours: int = 168,
+    center: str | None = None,
 ) -> dict[str, Any]:
     ops_store = _import_ops_store()
     db_path = resolve_ops_store_path(config)
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
-        "%Y-%m-%dT%H:%M:%S.%f"
-    )[:-3] + "Z"
+    since: str
+    until: str | None = None
+    if center:
+        center_dt = _parse_iso_dt(center)
+        if center_dt:
+            since = (center_dt - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            until = (center_dt + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        else:
+            since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )[:-3] + "Z"
+    else:
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f"
+        )[:-3] + "Z"
     points = ops_store.query_monitor_series(
-        env_name.upper(), metric_key, since=since, limit=5000, db_path=db_path
+        env_name.upper(),
+        metric_key,
+        since=since,
+        until=until,
+        limit=min(max(hours * 4, 200), 1200),
+        db_path=db_path,
     )
     return {
         "environment": env_name.upper(),
         "metricKey": metric_key,
         "since": since,
+        "until": until,
+        "center": center,
         "points": [
             {"t": p["recorded_at"], "v": p["value"], "labels": p.get("labels") or {}}
             for p in points
@@ -780,27 +1030,168 @@ def build_monitoring_events(
     env_name: str | None = None,
     *,
     limit: int = 100,
+    category: str | None = None,
+    severity: str | None = None,
+    hours: int | None = None,
 ) -> dict[str, Any]:
     ops_store = _import_ops_store()
     db_path = resolve_ops_store_path(config)
-    since = _iso_days_ago(int(get_monitoring_settings(config).get("retentionDays") or 7))
+    retention = int(get_monitoring_settings(config).get("retentionDays") or 7)
+    since = _iso_days_ago(retention)
+    if hours is not None:
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f"
+        )[:-3] + "Z"
     events = ops_store.query_monitor_events(
         env_name.upper() if env_name else None,
         since=since,
+        category=category,
+        severity=severity,
         limit=limit,
         db_path=db_path,
     )
-    enriched = [_enrich_monitor_event(dict(e)) for e in events]
+    enriched = [_enrich_monitor_event(dict(e), config) for e in events]
     return {
         "events": enriched,
-        "retentionDays": get_monitoring_settings(config).get("retentionDays", 7),
+        "retentionDays": retention,
     }
+
+
+def build_monitoring_event_detail(
+    config: dict[str, Any], env_name: str, event_id: int
+) -> dict[str, Any]:
+    ops_store = _import_ops_store()
+    db_path = resolve_ops_store_path(config)
+    event = ops_store.get_monitor_event(event_id, db_path=db_path)
+    if not event or str(event.get("environment") or "").upper() != env_name.upper():
+        return {"error": "Evento nao encontrado"}
+    enriched = _enrich_monitor_event(dict(event), config)
+    recorded = enriched.get("recorded_at")
+    category = str(enriched.get("category") or "").lower()
+    metric_key = "health_latency_ms"
+    if category in ("logs", "log"):
+        metric_key = "service_log_errors"
+    series = build_monitoring_series(
+        config, env_name, metric_key, hours=1, center=recorded
+    )
+    related: list[dict[str, Any]] = []
+    since_dt = _parse_iso_dt(recorded)
+    if since_dt:
+        rel_since = (since_dt - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        rel_until = (since_dt + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        related = ops_store.query_monitor_events(
+            env_name.upper(),
+            since=rel_since,
+            until=rel_until,
+            limit=20,
+            db_path=db_path,
+        )
+        related = [r for r in related if int(r.get("id") or 0) != int(event_id)]
+    return {
+        "event": enriched,
+        "series": series,
+        "relatedEvents": [_enrich_monitor_event(dict(r), config) for r in related],
+    }
+
+
+def _normalize_event_group_key(event: dict[str, Any]) -> str:
+    env = str(event.get("environment") or "").upper()
+    category = str(event.get("category") or "").lower()
+    title = str(event.get("title") or "")
+    if "Pico" in title and "latencia" in title.lower():
+        title = "Pico de latencia health"
+    return f"{env}:{category}:{title}"
+
+
+def build_monitoring_grouped_events(
+    config: dict[str, Any],
+    *,
+    env_name: str | None = None,
+    hours: int = 24,
+) -> dict[str, Any]:
+    raw = build_monitoring_events(
+        config, env_name, limit=500, hours=hours
+    )
+    events = raw.get("events") or []
+    groups: dict[str, dict[str, Any]] = {}
+    for event in events:
+        key = _normalize_event_group_key(event)
+        bucket = groups.get(key)
+        if not bucket:
+            groups[key] = {
+                "key": key,
+                "environment": event.get("environment"),
+                "category": event.get("category"),
+                "severity": event.get("severity"),
+                "title": event.get("title"),
+                "count": 1,
+                "firstAt": event.get("recorded_at"),
+                "lastAt": event.get("recorded_at"),
+                "sampleEventId": event.get("id"),
+                "sampleEvent": event,
+            }
+            continue
+        bucket["count"] += 1
+        recorded = event.get("recorded_at")
+        if recorded and (not bucket["firstAt"] or recorded < bucket["firstAt"]):
+            bucket["firstAt"] = recorded
+        if recorded and (not bucket["lastAt"] or recorded > bucket["lastAt"]):
+            bucket["lastAt"] = recorded
+        sev_rank = {"critical": 0, "warn": 1, "info": 2}
+        if sev_rank.get(str(event.get("severity")).lower(), 9) < sev_rank.get(
+            str(bucket.get("severity")).lower(), 9
+        ):
+            bucket["severity"] = event.get("severity")
+            bucket["sampleEventId"] = event.get("id")
+            bucket["sampleEvent"] = event
+    grouped = sorted(
+        groups.values(),
+        key=lambda g: (g.get("lastAt") or ""),
+        reverse=True,
+    )
+    return {"groups": grouped, "hours": hours, "totalEvents": len(events)}
 
 
 def build_monitoring_syncs(config: dict[str, Any], env_name: str) -> dict[str, Any]:
     days = int(get_monitoring_settings(config).get("retentionDays") or 7)
-    syncs = _query_sync_logs(config, env_name, days=days)
-    return {"environment": env_name.upper(), "syncs": syncs, "retentionDays": days}
+    syncs, error = _query_sync_logs(config, env_name, days=days)
+    payload: dict[str, Any] = {
+        "environment": env_name.upper(),
+        "syncs": syncs,
+        "retentionDays": days,
+    }
+    if error:
+        payload["error"] = error
+    return payload
+
+
+def build_monitoring_service_logs(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    since: str | None = None,
+    pattern: str | None = "ERROR",
+    limit: int = 200,
+) -> dict[str, Any]:
+    ops_store = _import_ops_store()
+    db_path = resolve_ops_store_path(config)
+    if not since:
+        since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f"
+        )[:-3] + "Z"
+    lines = ops_store.query_service_log_lines(
+        env_name.upper(),
+        since=since,
+        pattern=pattern,
+        limit=limit,
+        db_path=db_path,
+    )
+    return {
+        "environment": env_name.upper(),
+        "since": since,
+        "pattern": pattern,
+        "lines": lines,
+    }
 
 
 def build_monitoring_api_routes(config: dict[str, Any], env_name: str, window: str = "24h") -> dict[str, Any]:
@@ -860,3 +1251,286 @@ def build_monitoring_deploy_stats(config: dict[str, Any], env_name: str) -> dict
         "aggregates24h": aggregates,
         "aggregates7d": aggregates7d,
     }
+
+
+def _count_sync_failure_events_24h(
+    ops_store, db_path: Path, env_name: str, since: str
+) -> int:
+    try:
+        events = ops_store.query_monitor_events(
+            env_name.upper(),
+            since=since,
+            category="sync",
+            limit=200,
+            db_path=db_path,
+        )
+        return sum(
+            1
+            for event in events
+            if str(event.get("severity") or "").lower() in ("warn", "critical")
+        )
+    except Exception:
+        return 0
+
+
+def build_monitoring_summary_lite(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    window_hours: int = 24,
+    include_api: bool = False,
+    api_timeout: float = 2.0,
+) -> dict[str, Any]:
+    """Resumo rápido: SQLite only, sem consultas PG de sync."""
+    env_name = env_name.upper()
+    ops_store = _import_ops_store()
+    db_path = resolve_ops_store_path(config)
+    since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%f"
+    )[:-3] + "Z"
+
+    health = ops_store.aggregate_monitor_samples(
+        env_name, "health_latency_ms", since=since, db_path=db_path
+    )
+    pg_conn = ops_store.aggregate_monitor_samples(
+        env_name, "pg_connections_total", since=since, db_path=db_path
+    )
+    log_errors = ops_store.aggregate_monitor_samples(
+        env_name, "service_log_errors", since=since, db_path=db_path
+    )
+    reach_agg = ops_store.aggregate_monitor_samples(
+        env_name, "health_reachable", since=since, db_path=db_path
+    )
+    uptime_pct = round(float(reach_agg.get("avg") or 0) * 100, 1)
+    latest_reachable = float(reach_agg.get("latest") or 0) >= 1.0
+
+    api_metrics: dict[str, Any] = {"deferred": True}
+    if include_api:
+        api_metrics = fetch_backend_api_metrics(
+            config, env_name, window="24h", timeout=api_timeout
+        )
+
+    return {
+        "environment": env_name,
+        "windowHours": window_hours,
+        "since": since,
+        "health": health,
+        "uptimePct": uptime_pct,
+        "latestReachable": latest_reachable,
+        "dataFresh": _is_data_fresh(config),
+        "postgres": {"connections": pg_conn},
+        "logErrors": log_errors,
+        "api": api_metrics,
+        "syncFailures24h": _count_sync_failure_events_24h(
+            ops_store, db_path, env_name, since
+        ),
+        "syncQueryError": None,
+        "lite": True,
+    }
+
+
+def _downsample_series_points(points: list[dict[str, Any]], max_points: int = 360) -> list[dict[str, Any]]:
+    if len(points) <= max_points:
+        return points
+    step = len(points) / max_points
+    return [points[int(i * step)] for i in range(max_points)]
+
+
+def build_monitoring_grouped_events_lite(
+    config: dict[str, Any],
+    *,
+    env_name: str | None = None,
+    hours: int = 24,
+    limit: int = 200,
+) -> dict[str, Any]:
+    ops_store = _import_ops_store()
+    db_path = resolve_ops_store_path(config)
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%f"
+    )[:-3] + "Z"
+    events = ops_store.query_monitor_events(
+        env_name.upper() if env_name else None,
+        since=since,
+        limit=limit,
+        db_path=db_path,
+    )
+    groups: dict[str, dict[str, Any]] = {}
+    for event in events:
+        item = dict(event)
+        key = _normalize_event_group_key(item)
+        bucket = groups.get(key)
+        if not bucket:
+            groups[key] = {
+                "key": key,
+                "environment": item.get("environment"),
+                "category": item.get("category"),
+                "severity": item.get("severity"),
+                "title": item.get("title"),
+                "count": 1,
+                "firstAt": item.get("recorded_at"),
+                "lastAt": item.get("recorded_at"),
+                "sampleEventId": item.get("id"),
+                "sampleEvent": item,
+            }
+            continue
+        bucket["count"] += 1
+        recorded = item.get("recorded_at")
+        if recorded and (not bucket["firstAt"] or recorded < bucket["firstAt"]):
+            bucket["firstAt"] = recorded
+        if recorded and (not bucket["lastAt"] or recorded > bucket["lastAt"]):
+            bucket["lastAt"] = recorded
+        sev_rank = {"critical": 0, "warn": 1, "info": 2}
+        if sev_rank.get(str(item.get("severity")).lower(), 9) < sev_rank.get(
+            str(bucket.get("severity")).lower(), 9
+        ):
+            bucket["severity"] = item.get("severity")
+            bucket["sampleEventId"] = item.get("id")
+            bucket["sampleEvent"] = item
+    grouped = sorted(groups.values(), key=lambda g: (g.get("lastAt") or ""), reverse=True)
+    return {"groups": grouped, "hours": hours, "totalEvents": len(events)}
+
+
+def build_monitoring_dashboard(
+    config: dict[str, Any],
+    *,
+    env_names: list[str],
+    tab: str = "summary",
+    include_health_series: bool = False,
+    include_deploy: bool = False,
+    include_api: bool = False,
+    event_hours: int = 24,
+    series_hours: int = 168,
+    event_limit: int = 100,
+    severity: str | None = None,
+    category: str | None = None,
+) -> dict[str, Any]:
+    env_names = [e.upper() for e in env_names if e.upper() in ENV_ORDER]
+    if not env_names:
+        env_names = list(ENV_ORDER)
+
+    cache_key = json.dumps(
+        {
+            "envs": env_names,
+            "tab": tab,
+            "hs": include_health_series,
+            "dep": include_deploy,
+            "api": include_api,
+            "eh": event_hours,
+            "sh": series_hours,
+            "el": event_limit,
+            "sev": severity,
+            "cat": category,
+        },
+        sort_keys=True,
+    )
+    now = time.time()
+    cached = _DASHBOARD_CACHE.get(cache_key)
+    if cached and now - cached[0] < _DASHBOARD_CACHE_TTL_SEC:
+        return cached[1]
+
+    ops_store = _import_ops_store()
+    db_path = resolve_ops_store_path(config)
+    since_events = (datetime.now(timezone.utc) - timedelta(hours=event_hours)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%f"
+    )[:-3] + "Z"
+
+    result: dict[str, Any] = {
+        "config": build_monitoring_config(config),
+        "tab": tab,
+        "envSummaries": [],
+        "healthSeries": {},
+        "deploys": {},
+        "groupedEvents": [],
+        "events": [],
+        "generatedAt": _utc_now_iso(),
+    }
+
+    futures_map: dict[Any, str] = {}
+    with ThreadPoolExecutor(max_workers=min(12, max(4, len(env_names) * 3))) as pool:
+        if tab in ("summary", "latency"):
+            for env in env_names:
+                fut = pool.submit(
+                    build_monitoring_summary_lite,
+                    config,
+                    env,
+                    include_api=include_api,
+                    api_timeout=2.0,
+                )
+                futures_map[fut] = f"summary:{env}"
+
+        if include_health_series and tab in ("summary", "latency"):
+            for env in env_names:
+                fut = pool.submit(
+                    build_monitoring_series,
+                    config,
+                    env,
+                    "health_latency_ms",
+                    hours=series_hours,
+                )
+                futures_map[fut] = f"series:{env}"
+
+        if include_deploy and tab == "summary":
+            for env in env_names:
+                fut = pool.submit(build_monitoring_deploy_stats, config, env)
+                futures_map[fut] = f"deploy:{env}"
+
+        if tab in ("summary", "incidents"):
+            fut = pool.submit(
+                build_monitoring_grouped_events_lite,
+                config,
+                hours=event_hours,
+                limit=200,
+            )
+            futures_map[fut] = "grouped"
+
+        if tab == "incidents":
+            for env in env_names:
+                fut = pool.submit(
+                    ops_store.query_monitor_events,
+                    env,
+                    since=since_events,
+                    category=category,
+                    severity=severity,
+                    limit=event_limit,
+                    db_path=db_path,
+                )
+                futures_map[fut] = f"events:{env}"
+
+        for future in as_completed(futures_map):
+            kind = futures_map[future]
+            try:
+                data = future.result()
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("monitoring dashboard task failed (%s): %s", kind, exc)
+                continue
+            if kind.startswith("summary:"):
+                env = kind.split(":", 1)[1]
+                result["envSummaries"].append({"env": env, "summary": data})
+            elif kind.startswith("series:"):
+                env = kind.split(":", 1)[1]
+                data["points"] = _downsample_series_points(data.get("points") or [])
+                result["healthSeries"][env] = data
+            elif kind.startswith("deploy:"):
+                env = kind.split(":", 1)[1]
+                result["deploys"][env] = data
+            elif kind == "grouped":
+                result["groupedEvents"] = [
+                    g for g in (data.get("groups") or []) if g.get("environment") in env_names
+                ]
+            elif kind.startswith("events:"):
+                env = kind.split(":", 1)[1]
+                for row in data or []:
+                    item = dict(row)
+                    item["environment"] = env
+                    result["events"].append(item)
+
+    result["envSummaries"].sort(
+        key=lambda item: ENV_ORDER.index(item["env"]) if item["env"] in ENV_ORDER else 99
+    )
+    result["events"].sort(
+        key=lambda item: str(item.get("recorded_at") or ""), reverse=True
+    )
+    result["events"] = result["events"][:200]
+
+    _DASHBOARD_CACHE[cache_key] = (now, result)
+    return result

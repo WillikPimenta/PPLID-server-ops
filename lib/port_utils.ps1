@@ -119,7 +119,7 @@ function Stop-PortProcess {
     )
 
     $killed = @()
-    foreach ($processId in (Get-PortConnectionPids -Port $Port)) {
+    foreach ($processId in (Get-PortConnectionPids -Port $Port -ListenOnly)) {
         if ($processId -in $killed) { continue }
         try {
             Stop-Process -Id $processId -Force -ErrorAction Stop

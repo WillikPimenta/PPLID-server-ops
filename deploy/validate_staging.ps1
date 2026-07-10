@@ -14,6 +14,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\deploy_logging.ps1")
 . (Join-Path $PSScriptRoot "lib\python_invoke.ps1")
 . (Join-Path $PSScriptRoot "lib\backend_deploy.ps1")
+. (Join-Path (Split-Path $PSScriptRoot -Parent) "lib\port_utils.ps1")
 
 $releaseDir = Get-PplidReleaseDir -Environment $Environment -Sha $TargetSha
 $logName = "validate.log"
@@ -49,6 +50,11 @@ $warnings = [System.Collections.ArrayList]@()
 try {
     if ($backendChanged) {
         LogInfo "Validacao backend (release com mudancas em backend/)."
+        $pg = Test-PostgresAvailable -BackendDir $backendDir
+        if (-not $pg.Open) {
+            throw "PostgreSQL indisponivel em $($pg.HostName):$($pg.Port). Inicie o servico PostgreSQL e tente novamente."
+        }
+        LogOk "PostgreSQL OK ($($pg.HostName):$($pg.Port))"
         Invoke-PplidPython -Python $venvPython -Args @(
             "manage.py", "check", "--deploy"
         ) -WorkingDirectory $backendDir -FailMessage "manage.py check --deploy falhou."

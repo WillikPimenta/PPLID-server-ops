@@ -18,6 +18,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\python_invoke.ps1")
 . (Join-Path $PSScriptRoot "lib\legacy_deploy_status.ps1")
 . (Join-Path $PSScriptRoot "lib\backend_deploy.ps1")
+. (Join-Path (Split-Path $PSScriptRoot -Parent) "lib\port_utils.ps1")
 
 $spec = Get-PplidEnvSpec -Environment $Environment
 $paths = Get-PplidDeployEnvPaths -Environment $Environment
@@ -115,6 +116,37 @@ function Invoke-PplidPostPromoteHealthCheck {
     }
 }
 
+function Assert-PostgresAvailableForPromote {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BackendDir
+    )
+
+    $pg = Test-PostgresAvailable -BackendDir $BackendDir
+    if (-not $pg.Open) {
+        throw "PostgreSQL indisponivel em $($pg.HostName):$($pg.Port). Inicie o servico PostgreSQL e tente novamente."
+    }
+    LogOk "PostgreSQL OK ($($pg.HostName):$($pg.Port))"
+}
+
+function Restore-PplidPromoteJunctionIfNeeded {
+    param(
+        [string]$OldActive,
+        [string]$Reason
+    )
+
+    if (-not $OldActive) { return }
+    $previousRelease = Get-PplidReleaseDir -Environment $Environment -Sha $OldActive.Trim()
+    if (-not (Test-Path $previousRelease)) {
+        LogWarn "Nao foi possivel restaurar junction: release anterior ausente ($OldActive)."
+        return
+    }
+
+    Set-DirectoryJunction -LinkPath $paths.Current -TargetPath $previousRelease
+    $env:PPLID_APP_ROOT = $paths.Current
+    LogWarn "Junction restaurada para $previousRelease ($Reason)"
+}
+
 if (-not (Test-Path $releaseDir)) {
     throw "Release nao encontrada: $releaseDir"
 }
@@ -126,6 +158,7 @@ if (-not $oldActive) {
 }
 
 Start-DeployStep -Environment $Environment -RunId $RunId -StepId "restart_services"
+$promoteServicesStopped = $false
 try {
     if ($oldActive) {
         $previousRelease = Get-PplidReleaseDir -Environment $Environment -Sha $oldActive.Trim()
@@ -146,6 +179,7 @@ try {
         LogInfo "backend/.env copiado do repo."
     }
     Invoke-PplidDeployScript -ScriptPath (Join-Path $deployScript "sync_env_files.ps1") -Arguments @{ Environment = $Environment }
+    Assert-PostgresAvailableForPromote -BackendDir (Join-Path $paths.Current "backend")
     Invoke-EnsureDatabaseSafe -DeployScript $deployScript -AppRoot $paths.Current
 
     $backendDir = Join-Path $paths.Current "backend"
@@ -163,6 +197,7 @@ try {
     }
 
     Invoke-PplidDeployScript -ScriptPath (Join-Path $deployScript "stop_env.ps1") -Arguments @{ Environment = $Environment }
+    $promoteServicesStopped = $true
     Start-Sleep -Seconds 3
     try {
         Invoke-PplidDeployScript -ScriptPath (Join-Path $deployScript "start_env.ps1") -Arguments @{ Environment = $Environment }
@@ -183,6 +218,9 @@ try {
     LogOk "Servicos reiniciados"
     Complete-DeployStep -Environment $Environment -RunId $RunId -StepId "restart_services" -Status "success"
 } catch {
+    if (-not $promoteServicesStopped) {
+        Restore-PplidPromoteJunctionIfNeeded -OldActive $oldActive -Reason "promote_failed_before_restart"
+    }
     if ((Get-DeploySteps -Environment $Environment -RunId $RunId | Where-Object { $_.id -eq "restart_services" }).status -ne "error") {
         Complete-DeployStep -Environment $Environment -RunId $RunId -StepId "restart_services" -Status "error" -ErrorMessage $_.Exception.Message
     }

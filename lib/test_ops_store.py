@@ -58,6 +58,8 @@ class OpsStoreTests(unittest.TestCase):
         agg = ops_store.aggregate_monitor_samples("MAIN", "health_latency_ms", db_path=self.db)
         self.assertEqual(agg["count"], 2)
         self.assertAlmostEqual(agg["avg"], 185.25)
+        self.assertIn("p95", agg)
+        self.assertIn("latest", agg)
 
         ops_store.insert_monitor_event(
             "MAIN", "warn", "availability", "Health lento", detail="test", db_path=self.db

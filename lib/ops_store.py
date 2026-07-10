@@ -720,6 +720,9 @@ def query_monitor_events(
     environment: str | None = None,
     *,
     since: str | None = None,
+    until: str | None = None,
+    category: str | None = None,
+    severity: str | None = None,
     limit: int = 100,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
@@ -732,6 +735,15 @@ def query_monitor_events(
     if since:
         clauses.append("recorded_at>=?")
         params.append(since)
+    if until:
+        clauses.append("recorded_at<=?")
+        params.append(until)
+    if category:
+        clauses.append("category=?")
+        params.append(category.lower())
+    if severity:
+        clauses.append("severity=?")
+        params.append(severity.lower())
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     sql = f"""
@@ -746,6 +758,64 @@ def query_monitor_events(
     return [dict(r) for r in rows]
 
 
+def get_monitor_event(event_id: int, *, db_path: Path | None = None) -> dict[str, Any] | None:
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, environment, severity, category, title, detail, recorded_at
+            FROM monitor_events
+            WHERE id=?
+            """,
+            (event_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def query_service_log_lines(
+    environment: str,
+    *,
+    since: str | None = None,
+    pattern: str | None = None,
+    limit: int = 200,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    env = environment.upper()
+    limit = max(1, min(limit, 500))
+    clauses = ["environment=?"]
+    params: list[Any] = [env]
+    if since:
+        clauses.append("logged_at>=?")
+        params.append(since)
+    if pattern:
+        clauses.append("UPPER(line) LIKE ?")
+        params.append(f"%{pattern.upper()}%")
+    params.append(limit)
+    sql = f"""
+        SELECT id, service, stream, line, logged_at
+        FROM service_log_lines
+        WHERE {' AND '.join(clauses)}
+        ORDER BY id DESC
+        LIMIT ?
+    """
+    with get_connection(db_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    k = (pct / 100.0) * (len(sorted_vals) - 1)
+    f_idx = int(k)
+    c_idx = min(f_idx + 1, len(sorted_vals) - 1)
+    if f_idx == c_idx:
+        return sorted_vals[f_idx]
+    return sorted_vals[f_idx] + (k - f_idx) * (sorted_vals[c_idx] - sorted_vals[f_idx])
+
+
 def aggregate_monitor_samples(
     environment: str,
     metric_key: str,
@@ -758,23 +828,51 @@ def aggregate_monitor_samples(
     if since:
         clauses.append("recorded_at>=?")
         params.append(since)
+    where = " AND ".join(clauses)
     sql = f"""
         SELECT COUNT(*) AS count,
                AVG(value) AS avg_value,
                MIN(value) AS min_value,
                MAX(value) AS max_value
         FROM monitor_samples
-        WHERE {' AND '.join(clauses)}
+        WHERE {where}
     """
     with get_connection(db_path) as conn:
         row = conn.execute(sql, params).fetchone()
+        latest_row = conn.execute(
+            f"""
+            SELECT value, recorded_at
+            FROM monitor_samples
+            WHERE {where}
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+        value_rows = conn.execute(
+            f"""
+            SELECT value
+            FROM monitor_samples
+            WHERE {where}
+            ORDER BY recorded_at DESC
+            LIMIT 1000
+            """,
+            params,
+        ).fetchall()
     if not row:
-        return {"count": 0, "avg": 0, "min": 0, "max": 0}
+        return {"count": 0, "avg": 0, "min": 0, "max": 0, "p95": 0, "latest": 0, "latestAt": None}
+    values = [float(r["value"]) for r in value_rows if r["value"] is not None]
+    p95 = _percentile(values, 95.0) if values else 0.0
+    latest = round(float(latest_row["value"]), 2) if latest_row else 0.0
+    latest_at = latest_row["recorded_at"] if latest_row else None
     return {
         "count": int(row["count"] or 0),
         "avg": round(float(row["avg_value"] or 0), 2),
         "min": round(float(row["min_value"] or 0), 2),
         "max": round(float(row["max_value"] or 0), 2),
+        "p95": round(p95, 2),
+        "latest": latest,
+        "latestAt": latest_at,
     }
 
 

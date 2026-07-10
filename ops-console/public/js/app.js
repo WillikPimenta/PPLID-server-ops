@@ -297,10 +297,14 @@ function stopAutoRefresh() {
 function startAutoRefresh() {
   stopAutoRefresh();
   if (OC.authState.locked || OC.refreshPaused) return;
+  if (OC.currentRoute?.view === "monitoring") return;
   const ms = getRefreshInterval();
   OC._refreshIntervalMs = ms;
   OC.refreshTimer = setInterval(() => OC.refresh(), ms);
 }
+
+OC.stopAutoRefresh = stopAutoRefresh;
+OC.startAutoRefresh = startAutoRefresh;
 
 function startDurationTicker() {
   stopDurationTicker();
@@ -319,6 +323,12 @@ OC.refresh = async function refresh(options = {}) {
 
   const full = options.full === true;
   const statusEl = document.getElementById("refresh-status");
+  if (OC.currentRoute?.view === "monitoring") {
+    if (statusEl && OC.lastOverview?.generatedAt) {
+      statusEl.textContent = `Última atualização: ${OC.formatDate(OC.lastOverview.generatedAt)} · monitoramento`;
+    }
+    return;
+  }
   try {
     if (statusEl) statusEl.textContent = "Atualizando…";
     OC.setGlobalError(null);

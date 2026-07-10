@@ -5,38 +5,6 @@ function Test-PipelineDeployStatusSupportsExtendedEvents {
     return (Get-Command Update-DeployStatus).Parameters.ContainsKey("EventSha")
 }
 
-function Get-PipelineDebugLogPath {
-    if (Get-Command Get-PplidBaseDir -ErrorAction SilentlyContinue) {
-        return Join-Path (Get-PplidBaseDir) "debug-079b97.log"
-    }
-    return Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) "debug-079b97.log"
-}
-
-function Write-PipelineDebugLog {
-    param(
-        [string]$HypothesisId,
-        [string]$Location,
-        [string]$Message,
-        [hashtable]$Data = @{},
-        [string]$RunId = "pre-fix"
-    )
-
-    #region agent log
-    try {
-        $entry = @{
-            sessionId    = "079b97"
-            runId        = $RunId
-            hypothesisId = $HypothesisId
-            location     = $Location
-            message      = $Message
-            data         = $Data
-            timestamp    = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-        }
-        Add-Content -Path (Get-PipelineDebugLogPath) -Value ($entry | ConvertTo-Json -Compress) -Encoding UTF8
-    } catch { }
-    #endregion
-}
-
 function Invoke-PipelineDeployStatusUpdate {
     param(
         [Parameter(Mandatory = $true)]
@@ -54,18 +22,10 @@ function Invoke-PipelineDeployStatusUpdate {
         [string]$EventFinishedAt = "",
         [int]$EventDurationSeconds = -1,
         [string]$EventResult = "",
-        [string]$EventFailedStep = "",
-        [string]$DebugRunId = "pre-fix"
+        [string]$EventFailedStep = ""
     )
 
     $supportsExtended = Test-PipelineDeployStatusSupportsExtendedEvents
-    Write-PipelineDebugLog -HypothesisId "A" -Location "deploy_status_bridge.ps1:Invoke-PipelineDeployStatusUpdate" `
-        -Message "deploy status update" -RunId $DebugRunId -Data @{
-            environment      = $Environment
-            eventType        = $EventType
-            supportsExtended = $supportsExtended
-            hasEventSha      = [bool]$EventSha
-        }
 
     $params = @{
         Environment = $Environment
