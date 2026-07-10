@@ -166,7 +166,7 @@ try {
         Invoke-PipelineDeployStatusUpdate -Environment $Environment -Updates $startedUpdates `
             -EventType "deploy_started" -EventMessage "Pipeline $TargetSha ($Trigger)" `
             -EventSha $TargetSha -EventSubject $commitSubject -EventAuthor $commitAuthor `
-            -EventRunId $RunId -EventPreviousSha $oldActive -EventStartedAt $startedAt -DebugRunId $RunId
+            -EventRunId $RunId -EventPreviousSha $oldActive -EventStartedAt $startedAt
     }
 
     Write-DeployLogInfo -Environment $Environment -RunId $RunId -Message "Ambiente: $Environment"
@@ -283,7 +283,7 @@ try {
             -EventType "deploy_success" -EventMessage $successMsg `
             -EventSha $TargetSha -EventSubject $commitSubject -EventAuthor $commitAuthor `
             -EventRunId $RunId -EventPreviousSha $oldActive -EventStartedAt $startedAt `
-            -EventFinishedAt $finishedAt -EventDurationSeconds $durationSec -EventResult $deployResult -DebugRunId $RunId
+            -EventFinishedAt $finishedAt -EventDurationSeconds $durationSec -EventResult $deployResult
     }
 
     . (Join-Path $PSScriptRoot "lib\sync_workspace_repo.ps1")
@@ -414,7 +414,7 @@ try {
             -EventSha $TargetSha -EventSubject $commitSubject -EventAuthor $commitAuthor `
             -EventRunId $RunId -EventPreviousSha $oldActive -EventStartedAt $startedAt `
             -EventFinishedAt $finishedAt -EventDurationSeconds $durationSec -EventResult "failed" `
-            -EventFailedStep $failedStep -DebugRunId $RunId
+            -EventFailedStep $failedStep
     }
 
     Write-PipelineLog "Pipeline FALHOU: $err" "ERROR"

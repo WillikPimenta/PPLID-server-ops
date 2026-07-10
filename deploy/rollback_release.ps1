@@ -148,7 +148,7 @@ if (Test-Path $deployLib) {
     Invoke-PipelineDeployStatusUpdate -Environment $Environment -Updates $rollbackUpdates `
         -EventType $(if ($healthOk) { "rollback_success" } else { "rollback_failed" }) -EventMessage $msg `
         -EventSha $rolledBackSha -EventSubject $commitUpdates.gitCommitSubject -EventAuthor $commitUpdates.gitCommitAuthor `
-        -EventRunId $RunId -DebugRunId $RunId
+        -EventRunId $RunId
 }
 
 Log "Rollback concluido (activeSha=$rolledBackSha, healthOk=$healthOk)."
