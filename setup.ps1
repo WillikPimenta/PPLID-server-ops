@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Cria diretorios, machine.config.json, copia/clona ops e repositorios PPLID.
-    Execute como Administrador para registrar tasks como SYSTEM.
+    Registra sync Git no usuario logado (-SkipSystemAccount). Ops-console e manual.
 #>
 param(
     [string]$BaseDir = "C:\PPLID",
@@ -16,18 +16,13 @@ param(
     [switch]$MigrateLegacy,
     [switch]$SkipClone,
     [switch]$SkipTasks,
+    [switch]$SkipSyncTask,
     [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
 $script:PplidDefaultBaseDir = $BaseDir
 . (Join-Path $PSScriptRoot "lib\paths.ps1")
-
-function Test-IsAdministrator {
-    $current = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($current)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
 
 function Copy-TreeIfMissing {
     param(
@@ -40,8 +35,11 @@ function Copy-TreeIfMissing {
     }
 
     if ((Test-Path $Destination) -and -not $Force) {
-        Write-Host "  Ja existe: $Destination (use -Force para sobrescrever)"
-        return $true
+        $hasContent = Get-ChildItem $Destination -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hasContent) {
+            Write-Host "  Ja existe: $Destination (use -Force para sobrescrever)"
+            return $true
+        }
     }
 
     Write-Host "  Copiando $Source -> $Destination"
@@ -56,6 +54,21 @@ Write-Host "=== PPLID Server Setup ==="
 Write-Host "Base: $BaseDir"
 
 Initialize-PplidDirectories -BaseDir $BaseDir
+
+$opsDataDir = Join-Path $BaseDir "ops\data"
+if (-not (Test-Path $opsDataDir)) {
+    New-Item -ItemType Directory -Path $opsDataDir -Force | Out-Null
+}
+$opsStoreScript = Join-Path $PSScriptRoot "lib\ops_store.ps1"
+if (Test-Path $opsStoreScript) {
+    . $opsStoreScript
+    try {
+        Initialize-OpsStore
+        Write-Host "Ops store SQLite inicializado: $script:OpsStoreDbPath"
+    } catch {
+        Write-Warning "Ops store nao inicializado: $($_.Exception.Message)"
+    }
+}
 
 if (-not $LanIp) {
     $LanIp = Get-LanIPv4
@@ -141,19 +154,19 @@ if (-not $SkipClone) {
     }
 }
 
-if (-not $SkipTasks) {
-    $opsScripts = Join-Path $opsTarget "install_scheduled_task.ps1"
-    $consoleTask = Join-Path $opsTarget "install_ops_console_task.ps1"
+if (-not $SkipTasks -and -not $SkipSyncTask) {
+    $syncTaskScript = Join-Path $opsTarget "install_scheduled_task.ps1"
 
-    if (Test-IsAdministrator) {
-        Write-Host "Registrando tasks (conta SYSTEM)..."
-        & $opsScripts -IntervalMinutes 1
-        & $consoleTask
+    if (-not (Test-Path $syncTaskScript)) {
+        Write-Warning "Script de sync nao encontrado: $syncTaskScript"
     } else {
-        Write-Warning "Sem privilegio de administrador: tasks nao registradas."
-        Write-Host "Execute como Admin:"
-        Write-Host "  powershell -File `"$opsScripts`""
-        Write-Host "  powershell -File `"$consoleTask`""
+        Write-Host "Registrando sync Git (usuario logado, a cada 2 min)..."
+        try {
+            & $syncTaskScript -IntervalMinutes 2 -SkipSystemAccount
+        } catch {
+            Write-Warning "Falha ao registrar task de sync: $($_.Exception.Message)"
+            Write-Host "Use sync manual: powershell -File `"$(Join-Path $opsTarget 'update_all.ps1')`""
+        }
     }
 }
 

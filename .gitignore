@@ -1,4 +1,7 @@
 machine.config.json
 ops-console/.env.local
 ops/data/
+data/
 debug-*.log
+lib/__pycache__/
+_debug_*.ps1
