@@ -3,7 +3,7 @@
     Configura modo kiosk (Edge tela cheia) para o Console de Operacoes PPLID.
 #>
 param(
-    [string]$RepoDir = "",
+    [string]$ConfigPath = "",
     [string]$KioskUser = "PPLID_Kiosk",
     [string]$KioskPassword = "",
     [switch]$Uninstall,
@@ -15,8 +15,8 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\paths.ps1")
 
-if (-not $RepoDir) {
-    $RepoDir = Get-PplidRepoDir -Name "PPLID_DEV"
+if (-not $ConfigPath) {
+    $ConfigPath = Get-PplidEnvConfigPath -ScriptRoot $PSScriptRoot
 }
 
 function Get-OpsKioskUrl {
@@ -59,7 +59,6 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-$ConfigPath = Join-Path $RepoDir "scripts\deploy\env.config.json"
 $KioskUrl = Get-OpsKioskUrl -ConfigPath $ConfigPath
 $ShortcutName = "PPLID Ops Console Kiosk.lnk"
 $IsAdmin = Test-IsAdministrator

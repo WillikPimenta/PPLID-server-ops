@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PPLID — Console de Operações</title>
+    <script>
+      (function () {
+        var t = localStorage.getItem("pplid-theme");
+        document.documentElement.setAttribute("data-theme", t === "dark" ? "dark" : "light");
+      })();
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header" id="app-header">
+        <div class="header-container">
+          <div class="header-brand">
+            <div class="brand-icon" aria-hidden="true">
+              <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                <rect width="32" height="32" rx="6" fill="currentColor" />
+                <path d="M8 12h16v2H8zm0 4h12v2H8zm0 4h8v2H8z" fill="white" />
+              </svg>
+            </div>
+            <div class="brand-text">
+              <h1 class="brand-title">PPLID</h1>
+              <span class="brand-subtitle">Console de Operações</span>
+            </div>
+          </div>
+          <div class="header-meta-block">
+            <p class="meta-line" id="server-info">Carregando servidor…</p>
+            <p class="meta-line meta-sub" id="refresh-status"></p>
+          </div>
+          <div class="header-actions">
+            <button
+              type="button"
+              class="theme-toggle"
+              id="btn-theme"
+              aria-label="Alternar tema claro/escuro"
+              title="Tema claro/escuro"
+            >
+              <span id="theme-toggle-icon" aria-hidden="true">☀</span>
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              id="btn-pause-refresh"
+              title="Pausar atualização automática"
+            >
+              Pausar
+            </button>
+            <button type="button" class="btn btn-primary btn-sm" id="btn-refresh">Atualizar</button>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              id="btn-lock"
+              title="Bloquear sessão do console"
+            >
+              Bloquear sessão
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div id="lock-screen" class="lock-screen hidden" aria-hidden="true">
+        <div class="lock-screen-inner">
+          <div class="lock-brand">
+            <h2>PPLID</h2>
+            <p>Console de Operações</p>
+          </div>
+          <p class="lock-clock" id="lock-clock"></p>
+          <form id="lock-form" class="lock-form">
+            <div id="lock-username-wrap" class="lock-field">
+              <label for="lock-username">Usuário</label>
+              <input type="text" id="lock-username" name="username" autocomplete="username" required />
+            </div>
+            <div class="lock-field">
+              <label for="lock-password">Senha</label>
+              <input
+                type="password"
+                id="lock-password"
+                name="password"
+                autocomplete="current-password"
+                required
+              />
+            </div>
+            <p id="lock-error" class="lock-error" role="alert" hidden></p>
+            <button type="submit" class="btn btn-primary lock-submit">Desbloquear</button>
+          </form>
+        </div>
+      </div>
+
+      <main class="app-main" id="app-main">
+        <div id="global-error" class="global-error hidden" role="alert"></div>
+        <div id="loading-panel" class="loading-panel">
+          <div class="loading-spinner"></div>
+          <p>Carregando status…</p>
+        </div>
+
+        <div id="dashboard" class="dashboard hidden">
+          <div id="view-deploy">
+          <section class="section-block" aria-labelledby="summary-heading">
+            <div class="section-head-row">
+              <h2 id="summary-heading" class="section-title">Ambientes</h2>
+              <div class="section-head-actions">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-open-monitoring">Monitoramento</button>
+              </div>
+              <p class="section-hint">Use <strong>Configuração</strong> para deploy e <strong>Histórico</strong> para ver eventos.</p>
+            </div>
+            <div id="env-summary" class="env-summary-grid"></div>
+          </section>
+          </div>
+          <div id="view-env" class="hidden"></div>
+          <div id="view-database" class="hidden"></div>
+          <div id="view-monitoring" class="hidden"></div>
+        </div>
+      </main>
+
+      <p id="auth-mode-banner" class="auth-mode-banner hidden" role="status"></p>
+
+      <footer class="app-footer">
+        <div class="footer-container">
+          <p>
+            Acesso restrito à rede interna · Logs em
+            <code id="footer-log-dir">—</code>
+          </p>
+        </div>
+      </footer>
+    </div>
+
+    <div id="drawer-overlay" class="drawer-overlay hidden" aria-hidden="true"></div>
+    <aside
+      id="deployment-drawer"
+      class="drawer hidden"
+      aria-hidden="true"
+      aria-labelledby="drawer-title"
+      role="dialog"
+    >
+      <div class="drawer-header">
+        <h2 id="drawer-title">Detalhes do deploy</h2>
+        <button type="button" class="drawer-close" id="drawer-close" aria-label="Fechar">×</button>
+      </div>
+      <div id="drawer-body" class="drawer-body">
+        <p class="drawer-placeholder">Selecione um item no histórico.</p>
+      </div>
+    </aside>
+
+    <div id="db-row-overlay" class="drawer-overlay hidden" aria-hidden="true"></div>
+    <aside
+      id="db-row-drawer"
+      class="drawer db-row-drawer hidden"
+      aria-hidden="true"
+      aria-labelledby="db-row-drawer-title"
+      role="dialog"
+    >
+      <div class="drawer-header">
+        <h2 id="db-row-drawer-title">Editar linha</h2>
+        <button type="button" class="drawer-close" id="db-row-drawer-close" aria-label="Fechar">×</button>
+      </div>
+      <div id="db-row-drawer-body" class="drawer-body"></div>
+    </aside>
+
+    <script src="/js/utils.js"></script>
+    <script src="/js/status.js"></script>
+    <script src="/js/actions.js"></script>
+    <script src="/js/router.js"></script>
+    <script src="/js/env-config.js"></script>
+    <script src="/js/database-explorer.js"></script>
+    <script src="/js/history.js"></script>
+    <script src="/js/deploy-progress.js"></script>
+    <script src="/js/deploy-drawer.js"></script>
+    <script src="/js/filters.js"></script>
+    <script src="/js/drawer.js"></script>
+    <script src="/js/monitoring.js"></script>
+    <script src="/js/render.js"></script>
+    <script src="/js/app.js"></script>
+  </body>
+</html>

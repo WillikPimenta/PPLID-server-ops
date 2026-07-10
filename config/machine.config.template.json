@@ -1,4 +1,6 @@
 {
   "baseDir": "C:\\PPLID",
-  "lanIp": null
+  "lanIp": null,
+  "envConfigPath": "C:\\PPLID\\ops\\config\\env.config.json",
+  "opsConsoleDir": "C:\\PPLID\\ops\\ops-console"
 }

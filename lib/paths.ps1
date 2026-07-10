@@ -99,6 +99,42 @@ function Get-PplidOpsDir {
     return $fromScript
 }
 
+function Get-PplidOpsConsoleDir {
+    param(
+        [string]$ScriptRoot = $PSScriptRoot
+    )
+
+    $machine = Get-PplidMachineConfig
+    if ($machine.opsConsoleDir -and (Test-Path $machine.opsConsoleDir)) {
+        return $machine.opsConsoleDir
+    }
+
+    return Join-Path (Get-PplidOpsDir -ScriptRoot $ScriptRoot) "ops-console"
+}
+
+function Get-PplidEnvConfigPath {
+    param(
+        [string]$ScriptRoot = $PSScriptRoot
+    )
+
+    $machine = Get-PplidMachineConfig
+    if ($machine.envConfigPath -and (Test-Path $machine.envConfigPath)) {
+        return $machine.envConfigPath
+    }
+
+    $default = Join-Path (Get-PplidOpsDir -ScriptRoot $ScriptRoot) "config\env.config.json"
+    if (Test-Path $default) {
+        return $default
+    }
+
+    $legacy = Join-Path (Get-PplidRepoDir -Name "PPLID_DEV") "scripts\deploy\env.config.json"
+    if (Test-Path $legacy) {
+        return $legacy
+    }
+
+    return $default
+}
+
 function Import-PplidPathsModule {
     param(
         [string]$ScriptRoot = $PSScriptRoot
@@ -135,8 +171,29 @@ function Save-PplidMachineConfig {
 
     $path = Join-Path $baseDir "machine.config.json"
     $json = $output | ConvertTo-Json -Depth 3
-    Set-Content -Path $path -Value $json -Encoding UTF8
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($path, $json, $utf8NoBom)
     return $path
+}
+
+function Initialize-PplidGitSafeDirectories {
+    $baseDir = Get-PplidBaseDir
+    $reposDir = Get-PplidReposDir
+    $deployRoot = Join-Path $baseDir "deploy"
+    $dirs = @(
+        (Join-Path $reposDir "PPLID_MAIN")
+        (Join-Path $reposDir "PPLID_DEV")
+        (Join-Path $reposDir "PPLID_HOM")
+        (Join-Path $deployRoot "MAIN\mirror")
+        (Join-Path $deployRoot "DEV\mirror")
+        (Join-Path $deployRoot "HOM\mirror")
+    )
+
+    for ($i = 0; $i -lt $dirs.Count; $i++) {
+        Set-Item -Path "env:GIT_CONFIG_KEY_$i" -Value "safe.directory"
+        Set-Item -Path "env:GIT_CONFIG_VALUE_$i" -Value ($dirs[$i] -replace '\\', '/')
+    }
+    $env:GIT_CONFIG_COUNT = $dirs.Count.ToString()
 }
 
 function Initialize-PplidDirectories {

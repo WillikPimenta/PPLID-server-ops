@@ -1,1 +1,4 @@
 machine.config.json
+ops-console/.env.local
+ops/data/
+debug-*.log

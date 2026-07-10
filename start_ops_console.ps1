@@ -1,18 +1,22 @@
 param(
-    [string]$RepoDir = "",
+    [string]$OpsDir = "",
+    [string]$ConfigPath = "",
     [int]$Port = 0
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\paths.ps1")
+. (Join-Path $PSScriptRoot "lib\port_utils.ps1")
 
-if (-not $RepoDir) {
-    $RepoDir = Get-PplidRepoDir -Name "PPLID_DEV"
+if (-not $OpsDir) {
+    $OpsDir = Get-PplidOpsConsoleDir -ScriptRoot $PSScriptRoot
 }
 
-$OpsDir = Join-Path $RepoDir "ops-console"
+if (-not $ConfigPath) {
+    $ConfigPath = Get-PplidEnvConfigPath -ScriptRoot $PSScriptRoot
+}
+
 $ServerScript = Join-Path $OpsDir "server.py"
-$ConfigPath = Join-Path $RepoDir "scripts\deploy\env.config.json"
 
 if (-not (Test-Path $ServerScript)) {
     throw "Ops console nao encontrado: $ServerScript"
@@ -22,10 +26,33 @@ if (-not (Test-Path $ConfigPath)) {
     throw "Config nao encontrada: $ConfigPath"
 }
 
-$python = Get-Command python -ErrorAction SilentlyContinue
-if (-not $python) {
-    throw "Python nao encontrado no PATH."
+function Resolve-OpsConsolePython {
+    param([string]$BaseDir)
+
+    $devRepoDir = Get-PplidRepoDir -Name "PPLID_DEV"
+    $candidates = @(
+        (Join-Path $BaseDir "deploy\DEV\current\backend\.venv\Scripts\python.exe")
+        (Join-Path $devRepoDir "backend\.venv\Scripts\python.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path $candidate)) { continue }
+        try {
+            $check = & $candidate -c "import psycopg; print('ok')" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $check -eq "ok") {
+                return $candidate
+            }
+        } catch { }
+    }
+
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) {
+        return $python.Source
+    }
+    throw "Python com psycopg nao encontrado. Instale deps do backend ou use o venv em deploy/DEV/current."
 }
+
+$baseDir = Get-PplidBaseDir
+$pythonExe = Resolve-OpsConsolePython -BaseDir $baseDir
 
 $consolePort = 5190
 if ($Port -gt 0) {
@@ -41,9 +68,9 @@ if ($Port -gt 0) {
     }
 }
 
-$existing = Get-NetTCPConnection -LocalPort $consolePort -State Listen -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Host "Ops Console ja esta escutando na porta $consolePort (PID $($existing[0].OwningProcess))."
+$existingPid = Get-PortListenOwnerPid -Port $consolePort
+if ($existingPid) {
+    Write-Host "Ops Console ja esta escutando na porta $consolePort (PID $existingPid)."
     exit 0
 }
 
@@ -53,16 +80,16 @@ if ($Port -gt 0) {
 }
 
 Write-Host "Iniciando Ops Console..."
+Write-Host "Python: $pythonExe"
 Write-Host "Diretorio: $OpsDir"
 Write-Host "Config: $ConfigPath"
 
 Push-Location $OpsDir
 try {
-    Start-Process -FilePath $python.Source -ArgumentList $args -WindowStyle Hidden
+    Start-Process -FilePath $pythonExe -ArgumentList $args -WindowStyle Hidden
     Start-Sleep -Seconds 2
 
-    $listen = Get-NetTCPConnection -LocalPort $consolePort -State Listen -ErrorAction SilentlyContinue
-    if ($listen) {
+    if (Test-PortListening -Port $consolePort) {
         $machine = Get-PplidMachineConfig
         $lan = if ($machine.lanIp) { $machine.lanIp } elseif ($cfg.lanIp) { $cfg.lanIp } else { Get-LanIPv4 }
         Write-Host "Ops Console ativo: http://${lan}:$consolePort"
@@ -72,3 +99,4 @@ try {
 } finally {
     Pop-Location
 }
+exit 0
