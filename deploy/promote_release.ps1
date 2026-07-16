@@ -18,6 +18,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\python_invoke.ps1")
 . (Join-Path $PSScriptRoot "lib\legacy_deploy_status.ps1")
 . (Join-Path $PSScriptRoot "lib\backend_deploy.ps1")
+. (Join-Path $PSScriptRoot "lib\shared_env.ps1")
 . (Join-Path (Split-Path $PSScriptRoot -Parent) "lib\port_utils.ps1")
 
 $spec = Get-PplidEnvSpec -Environment $Environment
@@ -172,13 +173,9 @@ try {
     LogInfo "current -> $releaseDir"
 
     $env:PPLID_APP_ROOT = $paths.Current
-    $repoBackendEnv = Join-Path $spec.RepoDir "backend\.env"
-    $releaseBackendEnv = Join-Path $releaseDir "backend\.env"
-    if (Test-Path $repoBackendEnv) {
-        Copy-Item $repoBackendEnv $releaseBackendEnv -Force
-        LogInfo "backend/.env copiado do repo."
-    }
-    Invoke-PplidDeployScript -ScriptPath (Join-Path $deployScript "sync_env_files.ps1") -Arguments @{ Environment = $Environment }
+    LogInfo "Instalando env/media persistentes (shared)..."
+    Install-PplidSharedRuntime -Environment $Environment -AppRoot $releaseDir -RepoDir $spec.RepoDir
+    LogInfo "shared env/media instalados."
     Assert-PostgresAvailableForPromote -BackendDir (Join-Path $paths.Current "backend")
     Invoke-EnsureDatabaseSafe -DeployScript $deployScript -AppRoot $paths.Current
 

@@ -589,13 +589,107 @@ def remove_env_keys(path: Path, keys: list[str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def get_shared_dir(config: dict[str, Any], env_name: str) -> Path:
+    return get_base_dir(config) / "deploy" / env_name / "shared"
+
+
 def get_env_paths(config: dict[str, Any], env_name: str) -> tuple[Path, Path]:
-    env_cfg = config.get(env_name, {})
-    repo_dir = Path(env_cfg.get("repoDir", ""))
+    shared = get_shared_dir(config, env_name)
+    shared.mkdir(parents=True, exist_ok=True)
+    (shared / "media").mkdir(parents=True, exist_ok=True)
+    ensure_shared_env_seeded(config, env_name)
+    return shared / "backend.env", shared / "frontend.env"
+
+
+def _copy_file_if_exists(src: Path, dest: Path) -> bool:
+    if not src.is_file():
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(src.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    return True
+
+
+def _ensure_env_key(path: Path, key: str, value: str) -> None:
+    existing = parse_env_file(path) if path.is_file() else {}
+    if existing.get(key) == value:
+        return
+    write_env_file(path, {key: value}, existing)
+
+
+def ensure_shared_env_seeded(config: dict[str, Any], env_name: str) -> None:
+    shared = get_shared_dir(config, env_name)
+    shared.mkdir(parents=True, exist_ok=True)
+    media_dir = shared / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+
+    backend_shared = shared / "backend.env"
+    frontend_shared = shared / "frontend.env"
     base_dir = get_base_dir(config)
     current = base_dir / "deploy" / env_name / "current"
-    app_root = current if (current / "backend").is_dir() else repo_dir
-    return app_root / "backend" / ".env", app_root / "frontend" / ".env"
+    repo_dir = Path(config.get(env_name, {}).get("repoDir", ""))
+
+    if not backend_shared.is_file():
+        seeded = False
+        for src in (
+            current / "backend" / ".env",
+            repo_dir / "backend" / ".env",
+            repo_dir / "backend" / ".env.example",
+        ):
+            if _copy_file_if_exists(src, backend_shared):
+                seeded = True
+                break
+        if not seeded:
+            backend_shared.write_text(
+                "\n".join(
+                    [
+                        "SECRET_KEY=dev-secret-key-change-in-production",
+                        "DEBUG=True",
+                        "ALLOWED_HOSTS=localhost,127.0.0.1",
+                        f"POSTGRES_DB=pplid_{env_name.lower()}",
+                        "POSTGRES_USER=postgres",
+                        "POSTGRES_PASSWORD=postgres",
+                        "POSTGRES_HOST=localhost",
+                        "POSTGRES_PORT=5432",
+                        f"SESSION_COOKIE_NAME=pplid_{env_name.lower()}_sessionid",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+    _ensure_env_key(backend_shared, "MEDIA_ROOT", str(media_dir))
+
+    if not frontend_shared.is_file():
+        seeded = False
+        for src in (current / "frontend" / ".env", repo_dir / "frontend" / ".env"):
+            if _copy_file_if_exists(src, frontend_shared):
+                seeded = True
+                break
+        if not seeded:
+            env_cfg = config.get(env_name, {})
+            fe_port = env_cfg.get("frontendPort") or 5173
+            be_port = env_cfg.get("backendPort") or 8000
+            frontend_shared.write_text(
+                "\n".join(
+                    [
+                        "VITE_API_BASE_URL=",
+                        f"VITE_DEV_SERVER_PORT={fe_port}",
+                        f"VITE_BACKEND_PORT={be_port}",
+                        f"VITE_BACKEND_PROXY_TARGET=http://localhost:{be_port}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+
+def mirror_shared_env_to_current(config: dict[str, Any], env_name: str) -> None:
+    backend_shared, frontend_shared = get_env_paths(config, env_name)
+    current = get_base_dir(config) / "deploy" / env_name / "current"
+    if not (current / "backend").is_dir():
+        return
+    _copy_file_if_exists(backend_shared, current / "backend" / ".env")
+    if (current / "frontend").is_dir() or frontend_shared.is_file():
+        _copy_file_if_exists(frontend_shared, current / "frontend" / ".env")
 
 
 def build_env_payload(config: dict[str, Any], env_name: str) -> dict[str, Any]:
@@ -628,11 +722,11 @@ def build_env_diff(config: dict[str, Any]) -> dict[str, Any]:
     diff: dict[str, Any] = {}
     all_keys: set[str] = set()
     per_env: dict[str, dict[str, str]] = {}
-    for env_name in ENV_ORDER:
-        backend_path, _ = get_env_paths(config, env_name)
+    for name in ENV_ORDER:
+        backend_path, _ = get_env_paths(config, name)
         data = parse_env_file(backend_path)
-        per_env[env_name] = {k: v for k, v in data.items() if not is_secret_key(k)}
-        all_keys.update(per_env[env_name].keys())
+        per_env[name] = {k: v for k, v in data.items() if not is_secret_key(k)}
+        all_keys.update(per_env[name].keys())
 
     for key in sorted(all_keys):
         values = {env: per_env.get(env, {}).get(key) for env in ENV_ORDER}
@@ -666,6 +760,7 @@ def update_env_vars(
     env_name: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    ensure_shared_env_seeded(config, env_name)
     backend_path, frontend_path = get_env_paths(config, env_name)
     backend_updates = payload.get("backend") or {}
     frontend_updates = payload.get("frontend") or {}
@@ -690,9 +785,7 @@ def update_env_vars(
     if frontend_updates:
         write_env_file(frontend_path, frontend_updates, parse_env_file(frontend_path))
 
-    sync_script = Path(config.get(env_name, {}).get("repoDir", "")) / "scripts" / "deploy" / "sync_env_files.ps1"
-    if sync_script.is_file():
-        run_powershell(sync_script, ["-Environment", env_name], timeout=60)
+    mirror_shared_env_to_current(config, env_name)
 
     return {
         "ok": True,

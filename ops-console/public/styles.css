@@ -831,6 +831,50 @@ body {
   gap: var(--spacing-3);
 }
 
+.env-mode-toggle {
+  display: inline-flex;
+  gap: 0;
+  margin-bottom: var(--spacing-3);
+  border: 1px solid var(--theme-border);
+  border-radius: var(--border-radius-md);
+  overflow: hidden;
+}
+
+.env-mode-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--theme-text-muted);
+  padding: 0.4rem 0.9rem;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.env-mode-btn.is-active {
+  background: var(--theme-bg-muted, rgba(127, 127, 127, 0.15));
+  color: var(--theme-text);
+  font-weight: var(--font-weight-semibold);
+}
+
+.env-json-editor {
+  width: 100%;
+  min-height: 22rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  padding: var(--spacing-3);
+  border: 1px solid var(--theme-border);
+  border-radius: var(--border-radius-md);
+  background: var(--theme-bg);
+  color: var(--theme-text);
+  resize: vertical;
+}
+
+.env-paths-hint {
+  margin: 0 0 var(--spacing-3);
+  word-break: break-all;
+}
+
 .env-panel-head {
   display: flex;
   align-items: center;

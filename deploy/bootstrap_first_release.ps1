@@ -16,6 +16,7 @@ $opsRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot "lib\git_invoke.ps1")
 . (Join-Path $opsRoot "lib\version_drift.ps1")
 . (Join-Path $PSScriptRoot "lib\python_invoke.ps1")
+. (Join-Path $PSScriptRoot "lib\shared_env.ps1")
 
 Initialize-PplidGitSafeDirectories
 Initialize-PplidDeployLayout -Environment $Environment
@@ -195,15 +196,8 @@ if (-not (Test-Path $paths.Current)) {
 }
 
 $env:PPLID_APP_ROOT = $paths.Current
-$repoBackendEnv = Join-Path $spec.RepoDir "backend\.env"
-$releaseBackendEnv = Join-Path $releaseDir "backend\.env"
-if (Test-Path $repoBackendEnv) {
-    Copy-Item $repoBackendEnv $releaseBackendEnv -Force
-    Log "backend/.env copiado do repo."
-}
-
-Log "Sincronizando .env..."
-Invoke-PplidDeployScript -ScriptPath (Join-Path $deployScript "sync_env_files.ps1") -Arguments @{ Environment = $Environment }
+Log "Instalando env/media persistentes (shared)..."
+Install-PplidSharedRuntime -Environment $Environment -AppRoot $releaseDir -RepoDir $spec.RepoDir
 Invoke-EnsureDatabaseSafe -DeployScript $deployScript -AppRoot $releaseDir
 
 Push-Location $backendDir

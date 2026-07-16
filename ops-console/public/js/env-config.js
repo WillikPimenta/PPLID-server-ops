@@ -7,6 +7,7 @@
     env: "DEV",
     saved: true,
     data: null,
+    mode: "form",
     removed: { backend: new Set(), frontend: new Set() },
   };
   OC.ENV_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -33,7 +34,7 @@
     const type = masked ? "password" : "text";
     const secretBadge = masked ? '<span class="badge-secret">Segredo</span>' : "";
     const revealBtn = masked
-      ? `<button type="button" class="env-icon-btn env-reveal-btn" data-reveal-scope="${scope}" data-reveal-key="${OC.escapeHtml(key)}" title="Mostrar valor" aria-label="Mostrar valor">­ƒæü</button>`
+      ? `<button type="button" class="env-icon-btn env-reveal-btn" data-reveal-scope="${scope}" data-reveal-key="${OC.escapeHtml(key)}" title="Mostrar valor" aria-label="Mostrar valor">👁</button>`
       : "";
     return `<div class="env-var-item" data-var-row="${OC.escapeHtml(key)}">
       <div class="env-var-item-top">
@@ -60,6 +61,28 @@
       </header>
       <div class="env-var-list" data-env-tbody="${scope}">${items}</div>
       <button type="button" class="btn btn-secondary btn-sm env-add-var-btn" data-add-var="${scope}">+ Nova variável</button>
+    </section>`;
+  }
+
+  function varsToPlainObject(vars) {
+    const out = {};
+    Object.keys(vars || {})
+      .sort()
+      .forEach((key) => {
+        out[key] = vars[key]?.value ?? "";
+      });
+    return out;
+  }
+
+  function renderJsonPanel(scope, title, vars) {
+    const json = JSON.stringify(varsToPlainObject(vars), null, 2);
+    return `<section class="env-panel-card env-json-panel">
+      <header class="env-panel-head">
+        <h3 class="env-panel-title">${title}</h3>
+        <span class="env-panel-count">${Object.keys(vars || {}).length}</span>
+      </header>
+      <textarea class="env-json-editor" data-env-json="${scope}" spellcheck="false" aria-label="JSON ${title}">${OC.escapeHtml(json)}</textarea>
+      <p class="drawer-hint">Objeto plano KEY → valor. Remova uma chave do JSON para apagá-la. Segredos mascarados (${OC.ENV_MASK_PLACEHOLDER}) não são alterados ao salvar.</p>
     </section>`;
   }
 
@@ -181,10 +204,138 @@
     return payload;
   };
 
+  OC.collectEnvPayloadFromJson = function collectEnvPayloadFromJson(container) {
+    const data = OC.envConfigState.data || {};
+    const payload = { backend: {}, frontend: {} };
+    const remove = { backend: [], frontend: [] };
+
+    for (const scope of ["backend", "frontend"]) {
+      const ta = container.querySelector(`[data-env-json="${scope}"]`);
+      if (!ta) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(ta.value || "{}");
+      } catch {
+        throw new Error(`JSON inválido no painel ${scope}.`);
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`JSON de ${scope} deve ser um objeto { "KEY": "valor" }.`);
+      }
+
+      const original = data[scope] || {};
+      const seen = new Set();
+      for (const [rawKey, value] of Object.entries(parsed)) {
+        const key = String(rawKey).trim();
+        const err = OC.validateEnvKey(key);
+        if (err) throw new Error(`${scope}: ${err} (${rawKey})`);
+        if (seen.has(key)) throw new Error(`Variável duplicada em ${scope}: ${key}`);
+        seen.add(key);
+        const strVal = value == null ? "" : String(value);
+        const wasMasked =
+          original[key]?.masked &&
+          (strVal === OC.ENV_MASK_PLACEHOLDER || strVal === original[key]?.value);
+        if (wasMasked) continue;
+        payload[scope][key] = strVal;
+      }
+
+      for (const key of Object.keys(original)) {
+        if (!seen.has(key)) remove[scope].push(key);
+      }
+    }
+
+    if (remove.backend.length || remove.frontend.length) {
+      payload.remove = remove;
+    }
+    return payload;
+  };
+
+  function syncFormStateIntoData(container) {
+    const data = OC.envConfigState.data;
+    if (!data) return;
+    for (const scope of ["backend", "frontend"]) {
+      data[scope] = data[scope] || {};
+      container.querySelectorAll(`.env-input[data-scope="${scope}"][data-key]`).forEach((input) => {
+        const key = input.getAttribute("data-key");
+        if (!key) return;
+        if (OC.envConfigState.removed[scope]?.has(key)) {
+          delete data[scope][key];
+          return;
+        }
+        data[scope][key] = {
+          value: input.value,
+          masked: input.dataset.masked === "1" && input.dataset.revealed !== "1",
+        };
+      });
+      container.querySelectorAll(`.env-new-row`).forEach((row) => {
+        const rowScope = row.querySelector(".env-new-key")?.getAttribute("data-scope");
+        if (rowScope !== scope) return;
+        const key = row.querySelector(".env-new-key")?.value?.trim() || "";
+        const value = row.querySelector(".env-new-value")?.value ?? "";
+        if (!key || OC.validateEnvKey(key)) return;
+        data[scope][key] = { value, masked: false };
+      });
+      for (const key of OC.envConfigState.removed[scope] || []) {
+        delete data[scope][key];
+      }
+    }
+    OC.envConfigState.removed = { backend: new Set(), frontend: new Set() };
+  }
+
+  function syncJsonStateIntoData(container) {
+    const data = OC.envConfigState.data;
+    if (!data) return;
+    for (const scope of ["backend", "frontend"]) {
+      const ta = container.querySelector(`[data-env-json="${scope}"]`);
+      if (!ta) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(ta.value || "{}");
+      } catch {
+        throw new Error(`JSON inválido no painel ${scope}. Corrija antes de trocar de modo.`);
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`JSON de ${scope} deve ser um objeto.`);
+      }
+      const next = {};
+      const prev = data[scope] || {};
+      for (const [rawKey, value] of Object.entries(parsed)) {
+        const key = String(rawKey).trim();
+        const err = OC.validateEnvKey(key);
+        if (err) throw new Error(`${scope}: ${err}`);
+        const strVal = value == null ? "" : String(value);
+        next[key] = {
+          value: strVal,
+          masked: !!(prev[key]?.masked && strVal === OC.ENV_MASK_PLACEHOLDER),
+        };
+      }
+      data[scope] = next;
+    }
+  }
+
   function diffCellClass(vals, env) {
     const v = vals[env] ?? "—";
     const others = OC.ENV_ORDER.filter((e) => e !== env).map((e) => vals[e] ?? "—");
     return others.some((o) => o !== v) ? "diff-changed" : "";
+  }
+
+  function renderModeToggle(mode) {
+    return `<div class="env-mode-toggle" role="tablist" aria-label="Modo de edição">
+      <button type="button" class="env-mode-btn ${mode === "form" ? "is-active" : ""}" data-env-mode="form">Formulário</button>
+      <button type="button" class="env-mode-btn ${mode === "json" ? "is-active" : ""}" data-env-mode="json">JSON</button>
+    </div>`;
+  }
+
+  function renderEditorBody(data, mode) {
+    if (mode === "json") {
+      return `<div class="env-columns">
+        ${renderJsonPanel("backend", "Backend (.env)", data.backend)}
+        ${renderJsonPanel("frontend", "Frontend (.env)", data.frontend)}
+      </div>`;
+    }
+    return `<div class="env-columns">
+      ${renderVarsPanel("backend", "Backend (.env)", data.backend)}
+      ${renderVarsPanel("frontend", "Frontend (.env)", data.frontend)}
+    </div>`;
   }
 
   OC.renderEnvConfig = async function renderEnvConfig(envName) {
@@ -192,6 +343,7 @@
     if (!root) return;
     OC.envConfigState.env = envName;
     OC.envConfigState.removed = { backend: new Set(), frontend: new Set() };
+    const mode = OC.envConfigState.mode || "form";
     root.innerHTML = `
       <section class="section-block">
         ${OC.renderInternalPageHeader({ title: "Variáveis de ambiente", env: envName })}
@@ -233,67 +385,103 @@
         })
         .join("");
 
-      body.innerHTML = `
-        <div class="env-columns">
-          ${renderVarsPanel("backend", "Backend (.env)", data.backend)}
-          ${renderVarsPanel("frontend", "Frontend (.env)", data.frontend)}
-        </div>
-        <div class="env-footer-actions">
-          <button type="button" class="btn btn-primary btn-sm" id="env-save-btn">Salvar alterações</button>
-          <button type="button" class="btn btn-secondary btn-sm" id="env-apply-btn" disabled>Aplicar (reiniciar backend)</button>
-          <p class="drawer-hint env-save-hint">Segredos mascarados por padrão. Após salvar, use Aplicar para reiniciar o backend.</p>
-        </div>
-        ${
-          diffRows
-            ? `<details class="env-diff-section">
-          <summary>Comparação entre ambientes <span class="section-count">${Object.keys(diff).length}</span></summary>
-          <div class="env-diff-scroll">
-            <table class="env-diff-table">
-              <thead><tr><th>Chave</th>${OC.ENV_ORDER.map((e) => `<th>${e}</th>`).join("")}</tr></thead>
-              <tbody>${diffRows}</tbody>
-            </table>
+      const mountEditor = () => {
+        const currentMode = OC.envConfigState.mode || "form";
+        body.innerHTML = `
+          ${renderModeToggle(currentMode)}
+          <p class="drawer-hint env-paths-hint">Fonte persistente: <code>${OC.escapeHtml(data.paths?.backend || "")}</code></p>
+          <div id="env-editor-root">${renderEditorBody(OC.envConfigState.data, currentMode)}</div>
+          <div class="env-footer-actions">
+            <button type="button" class="btn btn-primary btn-sm" id="env-save-btn">Salvar alterações</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="env-apply-btn" ${OC.envConfigState.saved ? "disabled" : ""}>Aplicar (reiniciar backend)</button>
+            <p class="drawer-hint env-save-hint">Segredos mascarados por padrão. Após salvar, use Aplicar para reiniciar o backend. Deploys não alteram estas variáveis.</p>
           </div>
-        </details>`
-            : ""
-        }
-      `;
+          ${
+            diffRows
+              ? `<details class="env-diff-section">
+            <summary>Comparação entre ambientes <span class="section-count">${Object.keys(diff).length}</span></summary>
+            <div class="env-diff-scroll">
+              <table class="env-diff-table">
+                <thead><tr><th>Chave</th>${OC.ENV_ORDER.map((e) => `<th>${e}</th>`).join("")}</tr></thead>
+                <tbody>${diffRows}</tbody>
+              </table>
+            </div>
+          </details>`
+              : ""
+          }
+        `;
 
-      const markDirty = () => {
-        OC.envConfigState.saved = false;
-        document.getElementById("env-apply-btn").disabled = true;
+        const editorRoot = document.getElementById("env-editor-root");
+        const markDirty = () => {
+          OC.envConfigState.saved = false;
+          const applyBtn = document.getElementById("env-apply-btn");
+          if (applyBtn) applyBtn.disabled = true;
+        };
+
+        if (currentMode === "form") {
+          OC.bindEnvVarInputs(editorRoot || body, markDirty);
+        } else {
+          body.querySelectorAll(".env-json-editor").forEach((ta) => {
+            ta.addEventListener("input", markDirty);
+          });
+        }
+
+        body.querySelectorAll("[data-env-mode]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const next = btn.getAttribute("data-env-mode");
+            if (!next || next === OC.envConfigState.mode) return;
+            try {
+              if (OC.envConfigState.mode === "form") {
+                syncFormStateIntoData(editorRoot || body);
+              } else {
+                syncJsonStateIntoData(body);
+              }
+            } catch (err) {
+              window.alert(err.message);
+              return;
+            }
+            OC.envConfigState.mode = next;
+            mountEditor();
+          });
+        });
+
+        document.getElementById("env-save-btn")?.addEventListener("click", async () => {
+          let payload;
+          try {
+            if ((OC.envConfigState.mode || "form") === "json") {
+              payload = OC.collectEnvPayloadFromJson(body);
+            } else {
+              payload = OC.collectEnvPayload(editorRoot || body);
+            }
+          } catch (err) {
+            window.alert(err.message);
+            return;
+          }
+          if (envName === "MAIN" && !window.confirm("Confirmar alterações em MAIN?")) return;
+          if (envName === "MAIN") payload.confirmMain = true;
+          try {
+            const result = await OC.putJson(`/api/v1/env/${envName}`, payload);
+            OC.envConfigState.saved = true;
+            document.getElementById("env-apply-btn").disabled = false;
+            window.alert(result.needsRestart ? "Salvo. Use Aplicar para reiniciar o backend." : "Salvo.");
+            OC.renderEnvConfig(envName);
+          } catch (err) {
+            window.alert(err.message || "Falha ao salvar");
+          }
+        });
+
+        document.getElementById("env-apply-btn")?.addEventListener("click", async () => {
+          if (!window.confirm(`Reiniciar backend de ${envName} para aplicar variáveis?`)) return;
+          try {
+            const result = await OC.postAction(`/api/v1/actions/restart/${envName}`, { service: "backend" });
+            window.alert(result.ok ? "Backend reiniciado." : result.error || "Falha ao reiniciar");
+          } catch (err) {
+            window.alert(err.message || "Falha ao aplicar");
+          }
+        });
       };
-      OC.bindEnvVarInputs(body, markDirty);
 
-      document.getElementById("env-save-btn")?.addEventListener("click", async () => {
-        let payload;
-        try {
-          payload = OC.collectEnvPayload(body);
-        } catch (err) {
-          window.alert(err.message);
-          return;
-        }
-        if (envName === "MAIN" && !window.confirm("Confirmar alterações em MAIN?")) return;
-        if (envName === "MAIN") payload.confirmMain = true;
-        try {
-          const result = await OC.putJson(`/api/v1/env/${envName}`, payload);
-          OC.envConfigState.saved = true;
-          document.getElementById("env-apply-btn").disabled = false;
-          window.alert(result.needsRestart ? "Salvo. Use Aplicar para reiniciar o backend." : "Salvo.");
-          OC.renderEnvConfig(envName);
-        } catch (err) {
-          window.alert(err.message || "Falha ao salvar");
-        }
-      });
-
-      document.getElementById("env-apply-btn")?.addEventListener("click", async () => {
-        if (!window.confirm(`Reiniciar backend de ${envName} para aplicar variáveis?`)) return;
-        try {
-          const result = await OC.postAction(`/api/v1/actions/restart/${envName}`, { service: "backend" });
-          window.alert(result.ok ? "Backend reiniciado." : result.error || "Falha ao reiniciar");
-        } catch (err) {
-          window.alert(err.message || "Falha ao aplicar");
-        }
-      });
+      mountEditor();
     } catch (err) {
       body.innerHTML = `<div class="empty-state"><p class="error-msg">${OC.escapeHtml(err.message)}</p></div>`;
       if (err.code === 401 && OC.onUnauthorized) OC.onUnauthorized();

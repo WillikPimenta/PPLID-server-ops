@@ -21,6 +21,8 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\deps_cache.ps1")
 . (Join-Path $PSScriptRoot "lib\python_invoke.ps1")
 . (Join-Path $PSScriptRoot "lib\release_cleanup.ps1")
+. (Join-Path $PSScriptRoot "lib\shared_env.ps1")
+. (Join-Path $PSScriptRoot "lib\junction.ps1")
 
 $spec = Get-PplidEnvSpec -Environment $Environment
 $paths = Get-PplidDeployEnvPaths -Environment $Environment
@@ -403,16 +405,9 @@ try {
     }
 
     $deployScript = Join-Path $spec.RepoDir "scripts\deploy"
-    $repoBackendEnv = Join-Path $spec.RepoDir "backend\.env"
-    $releaseBackendEnv = Join-Path $releaseDir "backend\.env"
-    if (Test-Path $repoBackendEnv) {
-        Copy-Item $repoBackendEnv $releaseBackendEnv -Force
-        LogInfo "backend/.env copiado do repo."
-    }
     $env:PPLID_APP_ROOT = $releaseDir
-    LogInfo "Sincronizando .env para build..."
-    & (Join-Path $deployScript "sync_env_files.ps1") -Environment $Environment
-    if ($LASTEXITCODE -ne 0) { throw "sync_env_files falhou." }
+    LogInfo "Instalando env/media persistentes (shared) para build..."
+    Install-PplidSharedRuntime -Environment $Environment -AppRoot $releaseDir -RepoDir $spec.RepoDir
     LogOk "Build backend concluido"
     Complete-DeployStep -Environment $Environment -RunId $RunId -StepId "build_backend" -Status "success"
 } catch {

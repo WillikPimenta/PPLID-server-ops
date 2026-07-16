@@ -25,6 +25,7 @@ function Get-PplidDeployEnvPaths {
     )
 
     $root = Get-PplidDeployEnvRoot -Environment $Environment
+    $shared = Join-Path $root "shared"
     return [PSCustomObject]@{
         Root                 = $root
         Mirror               = Join-Path $root "mirror"
@@ -32,6 +33,8 @@ function Get-PplidDeployEnvPaths {
         Releases             = Join-Path $root "releases"
         Current              = Join-Path $root "current"
         Previous             = Join-Path $root "previous"
+        Shared               = $shared
+        SharedMedia          = Join-Path $shared "media"
         Logs                 = Join-Path $root "logs"
         Runs                 = Join-Path $root "logs\runs"
         StateFile            = Join-Path $root "deploy-state.json"
@@ -59,7 +62,17 @@ function Initialize-PplidDeployLayout {
 
     $paths = Get-PplidDeployEnvPaths -Environment $Environment
     $pipCache = Get-PplidPipCacheDir
-    foreach ($dir in @($paths.Root, $paths.Mirror, $paths.Staging, $paths.Releases, $paths.Logs, $paths.Runs, $pipCache)) {
+    foreach ($dir in @(
+        $paths.Root,
+        $paths.Mirror,
+        $paths.Staging,
+        $paths.Releases,
+        $paths.Shared,
+        $paths.SharedMedia,
+        $paths.Logs,
+        $paths.Runs,
+        $pipCache
+    )) {
         if (-not (Test-Path $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }

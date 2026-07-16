@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\deploy_state.ps1")
 . (Join-Path $PSScriptRoot "lib\deploy_lock.ps1")
 . (Join-Path $PSScriptRoot "lib\env_spec.ps1")
+. (Join-Path $PSScriptRoot "lib\shared_env.ps1")
 . (Join-Path (Split-Path $PSScriptRoot -Parent) "lib\version_drift.ps1")
 . (Join-Path (Split-Path $PSScriptRoot -Parent) "lib\port_utils.ps1")
 
@@ -57,24 +58,12 @@ try {
     }
 
     $appRoot = if ($env:PPLID_APP_ROOT) { $env:PPLID_APP_ROOT } elseif (Test-Path $paths.Current) { $paths.Current } else { $spec.RepoDir }
+    Log "Instalando env/media persistentes (shared) em $appRoot..."
+    Install-PplidSharedRuntime -Environment $Environment -AppRoot $appRoot -RepoDir $spec.RepoDir
     $backendEnv = Join-Path $appRoot "backend\.env"
     if (-not (Test-Path $backendEnv)) {
-        Log "backend/.env ausente em $appRoot; sincronizando..."
-        $repoBackendEnv = Join-Path $spec.RepoDir "backend\.env"
-        if (Test-Path $repoBackendEnv) {
-            $targetDir = Split-Path $backendEnv -Parent
-            if (-not (Test-Path $targetDir)) {
-                New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
-            }
-            Copy-Item $repoBackendEnv $backendEnv -Force
-        }
-        if (Test-Path (Join-Path $deployScript "sync_env_files.ps1")) {
-            & (Join-Path $deployScript "sync_env_files.ps1") -Environment $Environment
-        }
-        if (-not (Test-Path $backendEnv)) {
-            Log "backend/.env ainda ausente; abortando start de $Environment."
-            exit 1
-        }
+        Log "backend/.env ainda ausente apos install shared; abortando start de $Environment."
+        exit 1
     }
 
     $backendPort = $spec.BackendPort
