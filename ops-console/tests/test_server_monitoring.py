@@ -109,12 +109,60 @@ class BuildMonitoringTests(unittest.TestCase):
         self.assertIn("center", series)
         self.assertGreaterEqual(len(series["points"]), 1)
 
+    def test_build_monitoring_series_prefers_newest(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        # Many old samples would formerly fill ASC LIMIT and hide today's points
+        for i in range(50):
+            ts = (now - timedelta(days=5, minutes=50 - i)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            self.ops_store.insert_monitor_sample(
+                "MAIN", "health_latency_ms", 100.0, recorded_at=ts, db_path=self.db
+            )
+        recent_ts = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.ops_store.insert_monitor_sample(
+            "MAIN", "health_latency_ms", 999.0, recorded_at=recent_ts, db_path=self.db
+        )
+        series = sm.build_monitoring_series(self.config, "MAIN", "health_latency_ms", hours=168)
+        self.assertTrue(series["points"])
+        self.assertEqual(series["lastSampleAt"], recent_ts)
+        self.assertEqual(float(series["points"][-1]["v"]), 999.0)
+
+    def test_clear_monitoring_events(self) -> None:
+        before = self.ops_store.query_monitor_events("DEV", db_path=self.db)
+        self.assertGreaterEqual(len(before), 1)
+        result = sm.clear_monitoring_events(self.config)
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["deleted"], 1)
+        after = self.ops_store.query_monitor_events("DEV", db_path=self.db)
+        self.assertEqual(len(after), 0)
+
+    def test_build_monitoring_uptime_hours(self) -> None:
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        day = now.strftime("%Y-%m-%d")
+        for h in (8, 9, 14):
+            ts = now.replace(hour=h, minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            self.ops_store.insert_monitor_sample(
+                "HOM", "health_latency_ms", 150.0 + h, recorded_at=ts, db_path=self.db
+            )
+            self.ops_store.insert_monitor_sample(
+                "HOM", "health_reachable", 1.0, recorded_at=ts, db_path=self.db
+            )
+        result = sm.build_monitoring_uptime_hours(self.config, "HOM", date=day)
+        self.assertEqual(result["date"], day)
+        self.assertEqual(len(result["hourBars"]), 24)
+        self.assertTrue(any(b["avgMs"] is not None for b in result["hourBars"]))
+        json.dumps(result)
+
     def test_build_monitoring_config(self) -> None:
         cfg = sm.build_monitoring_config(self.config)
         self.assertEqual(cfg["retentionDays"], 7)
         self.assertIn("MAIN", cfg["environments"])
         self.assertIn("slos", cfg)
-        self.assertEqual(cfg["slos"]["healthP95WarnMs"], 400)
+        self.assertEqual(cfg["slos"]["healthP95WarnMs"], 2000)
+        self.assertEqual(cfg["slos"]["healthP95CriticalMs"], 3000)
         self.assertIn("collectorStatus", cfg)
         self.assertIn("generatedAt", cfg)
 
@@ -168,12 +216,75 @@ class BuildMonitoringTests(unittest.TestCase):
         self.assertGreaterEqual(grouped["totalEvents"], 1)
         self.assertGreaterEqual(len(grouped["groups"]), 1)
 
+    def test_grouped_events_lite_skips_correlate(self) -> None:
+        with patch.object(sm, "_correlate_event") as mock_corr:
+            lite = sm.build_monitoring_grouped_events_lite(self.config, env_name="DEV", hours=24)
+        self.assertTrue(lite.get("lite"))
+        self.assertIn("groups", lite)
+        self.assertIn("timingMs", lite)
+        mock_corr.assert_not_called()
+
+    def test_grouped_events_full_enriches(self) -> None:
+        with patch.object(sm, "_correlate_event", return_value=[]) as mock_corr:
+            full = sm.build_monitoring_grouped_events(self.config, env_name="DEV", hours=24)
+        self.assertFalse(full.get("lite"))
+        self.assertIn("groups", full)
+        # Full path goes through build_monitoring_events -> _enrich_monitor_event
+        self.assertGreaterEqual(mock_corr.call_count, 1)
+
     def test_build_monitoring_event_detail(self) -> None:
         events = self.ops_store.query_monitor_events("DEV", db_path=self.db)
         detail = sm.build_monitoring_event_detail(self.config, "DEV", int(events[0]["id"]))
         self.assertIn("event", detail)
         self.assertIn("series", detail)
         self.assertEqual(detail["event"]["id"], events[0]["id"])
+
+    def test_offline_window_and_event_detail(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        base = datetime.now(timezone.utc) - timedelta(minutes=30)
+        for i in range(10):
+            ts = (base + timedelta(minutes=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            reachable = 0.0 if 3 <= i <= 7 else 1.0
+            self.ops_store.insert_monitor_sample(
+                "MAIN",
+                "health_reachable",
+                reachable,
+                recorded_at=ts,
+                db_path=self.db,
+            )
+        mid = (base + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        eid = self.ops_store.insert_monitor_event(
+            "MAIN",
+            "critical",
+            "availability",
+            "Backend offline",
+            detail="Health check falhou · erro: Connection refused",
+            recorded_at=mid,
+            db_path=self.db,
+        )
+        detail = sm.build_monitoring_event_detail(self.config, "MAIN", eid)
+        self.assertIsNotNone(detail.get("offline"))
+        self.assertGreater(detail["offline"]["offlineDurationSec"], 0)
+        self.assertIn("offlineDurationLabel", detail["event"])
+
+    def test_build_monitoring_uptime_days(self) -> None:
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        for i in range(5):
+            ts = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            self.ops_store.insert_monitor_sample(
+                "HOM", "health_reachable", 1.0, recorded_at=ts, db_path=self.db
+            )
+            self.ops_store.insert_monitor_sample(
+                "HOM", "health_latency_ms", 120.0, recorded_at=ts, db_path=self.db
+            )
+        result = sm.build_monitoring_uptime_days(self.config, "HOM", days=7)
+        self.assertEqual(result["environment"], "HOM")
+        self.assertEqual(len(result["dayBars"]), 7)
+        self.assertTrue(any(d["samples"] > 0 for d in result["dayBars"]))
+        json.dumps(result)
 
     @patch("server_monitoring._query_sync_logs")
     def test_build_monitoring_syncs_with_error(self, mock_sync) -> None:
@@ -182,12 +293,75 @@ class BuildMonitoringTests(unittest.TestCase):
         self.assertEqual(result["syncs"], [])
         self.assertEqual(result["error"], "connection failed")
 
+    def test_sync_row_json_serializable(self) -> None:
+        from datetime import datetime, timezone
+        from decimal import Decimal
+
+        import server_db as sdb
+
+        raw_row = {
+            "kind": "prod",
+            "started_at": datetime(2026, 7, 15, 8, 0, tzinfo=timezone.utc),
+            "finished_at": datetime(2026, 7, 15, 8, 1, tzinfo=timezone.utc),
+            "duration_seconds": Decimal("12.5"),
+            "success": True,
+            "message": "ok",
+            "row_count": 10,
+            "trigger_source": "cron",
+        }
+        item = {k: sdb.serialize_value(v) for k, v in raw_row.items()}
+        item["source"] = "produtividade"
+        item["startedAt"] = raw_row["started_at"].isoformat()
+        item["finishedAt"] = raw_row["finished_at"].isoformat()
+        json.dumps([item])  # must not raise
+        self.assertIsInstance(item["started_at"], str)
+        self.assertIsInstance(item["duration_seconds"], str)
+        self.assertIn("T", item["startedAt"])
+
     def test_build_monitoring_service_logs(self) -> None:
         self.ops_store.append_service_log(
             "DEV", "backend", "stderr", "ERROR something bad", db_path=self.db
         )
-        logs = sm.build_monitoring_service_logs(self.config, "DEV", pattern="ERROR")
-        self.assertGreaterEqual(len(logs["lines"]), 1)
+        self.ops_store.append_service_log(
+            "DEV", "backend", "out", "Start concluido.", db_path=self.db
+        )
+        only_err = sm.build_monitoring_service_logs(self.config, "DEV", pattern="ERROR")
+        self.assertGreaterEqual(len(only_err["lines"]), 1)
+        self.assertTrue(all("ERROR" in (ln.get("line") or "").upper() for ln in only_err["lines"]))
+
+        all_lines = sm.build_monitoring_service_logs(self.config, "DEV", pattern=None)
+        self.assertGreaterEqual(len(all_lines["lines"]), 2)
+        blank = sm.build_monitoring_service_logs(self.config, "DEV", pattern="")
+        self.assertGreaterEqual(len(blank["lines"]), 2)
+
+    def test_service_logs_pattern_error_can_be_empty_while_plain_lines_exist(self) -> None:
+        """Regressão: aba Logs vazia quando o default era pattern=ERROR sem ERRORs recentes."""
+        self.ops_store.append_service_log(
+            "HOM", "deploy", "out", "[info] Start concluido.", db_path=self.db
+        )
+        with_error = sm.build_monitoring_service_logs(self.config, "HOM", pattern="ERROR")
+        without = sm.build_monitoring_service_logs(self.config, "HOM", pattern=None)
+        self.assertEqual(len(with_error["lines"]), 0)
+        self.assertGreaterEqual(len(without["lines"]), 1)
+
+    def test_service_logs_narrow_since_excludes_older_lines(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.ops_store.append_service_log(
+            "MAIN", "deploy", "out", "linha antiga", logged_at=old, db_path=self.db
+        )
+        since_future = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        empty = sm.build_monitoring_service_logs(
+            self.config, "MAIN", since=since_future, pattern=None
+        )
+        self.assertEqual(len(empty["lines"]), 0)
+        ok = sm.build_monitoring_service_logs(
+            self.config, "MAIN", since=old, pattern=None
+        )
+        self.assertGreaterEqual(len(ok["lines"]), 1)
+        self.assertEqual(ok["lines"][0].get("logged_at"), old)
 
     def test_collector_status_detail(self) -> None:
         detail = sm.build_monitoring_collector_status_detail(self.config)
@@ -211,17 +385,19 @@ class SpikeDetectionTests(unittest.TestCase):
     def setUp(self) -> None:
         sm._LATENCY_SPIKE_SAMPLES.clear()
         sm._RECENT_EVENT_KEYS.clear()
+        sm._CONFIG_CACHE = None
 
     @patch("server_monitoring._record_event")
     def test_spike_requires_three_consecutive_samples(self, mock_record) -> None:
         ops_store = sm._import_ops_store()
         db = Path(tempfile.mkdtemp()) / "ops-store.db"
         ops_store.init_store(db)
-        sm._detect_health_spike(ops_store, db, "DEV", 600, True)
-        sm._detect_health_spike(ops_store, db, "DEV", 650, True)
+        # Below warn (2000): no pico; need 3 consecutive samples above threshold
+        sm._detect_health_spike(ops_store, db, "DEV", 2100, True)
+        sm._detect_health_spike(ops_store, db, "DEV", 2200, True)
         titles_early = [c.args[5] for c in mock_record.call_args_list if len(c.args) > 5]
         self.assertFalse(any("Pico" in t for t in titles_early))
-        sm._detect_health_spike(ops_store, db, "DEV", 700, True)
+        sm._detect_health_spike(ops_store, db, "DEV", 2300, True)
         titles = [c.args[5] for c in mock_record.call_args_list if len(c.args) > 5]
         self.assertTrue(any("Pico" in t for t in titles))
 

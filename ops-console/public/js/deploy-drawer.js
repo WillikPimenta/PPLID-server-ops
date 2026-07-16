@@ -257,6 +257,9 @@
           <span class="deploy-progress-pct">${progressPct}% concluido</span>
         </div>
         ${OC.deployPhaseStepperHtml ? OC.deployPhaseStepperHtml(data) : ""}
+        ${!isFailed ? `<div class="deploy-drawer-actions" style="margin-top:var(--spacing-3)">
+          <button type="button" class="btn btn-danger btn-sm" data-cancel-deploy="${OC.escapeHtml(envName)}">Cancelar deploy</button>
+        </div>` : ""}
       </div>
       ${failurePanel}
       <div class="deploy-timeline" aria-label="Etapas do deploy">${timeline}</div>
@@ -268,6 +271,22 @@
       btn.addEventListener("click", () => {
         const text = btn.getAttribute("data-copy-deploy-error");
         if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+      });
+    });
+
+    body.querySelectorAll("[data-cancel-deploy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const env = btn.getAttribute("data-cancel-deploy");
+        if (!env || !OC.runCancelDeploy) return;
+        btn.disabled = true;
+        await OC.runCancelDeploy(env, (err, result) => {
+          OC.afterActionRefresh?.(err, result, btn);
+          if (!err && result?.ok) {
+            OC.closeDeployDrawer?.();
+          } else {
+            btn.disabled = false;
+          }
+        });
       });
     });
 

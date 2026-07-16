@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS monitor_events (
 );
 CREATE INDEX IF NOT EXISTS idx_monitor_events_env_time
     ON monitor_events(environment, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_monitor_events_time
+    ON monitor_events(recorded_at);
 """
 
 SCHEMA_V2_SQL = """
@@ -138,6 +140,8 @@ CREATE TABLE IF NOT EXISTS monitor_events (
 );
 CREATE INDEX IF NOT EXISTS idx_monitor_events_env_time
     ON monitor_events(environment, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_monitor_events_time
+    ON monitor_events(recorded_at);
 """
 
 
@@ -682,6 +686,7 @@ def query_monitor_series(
     limit: int = 2000,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
+    """Return up to `limit` samples in [since, until], preferring the **newest** points."""
     env = environment.upper()
     limit = max(1, min(limit, 10000))
     clauses = ["environment=?", "metric_key=?"]
@@ -693,17 +698,18 @@ def query_monitor_series(
         clauses.append("recorded_at<=?")
         params.append(until)
     params.append(limit)
+    # Newest-first then reverse so callers get chronological order ending at "now".
     sql = f"""
         SELECT id, value, labels_json, recorded_at
         FROM monitor_samples
         WHERE {' AND '.join(clauses)}
-        ORDER BY recorded_at ASC
+        ORDER BY recorded_at DESC
         LIMIT ?
     """
     with get_connection(db_path) as conn:
         rows = conn.execute(sql, params).fetchall()
     out: list[dict[str, Any]] = []
-    for row in rows:
+    for row in reversed(rows):
         item = dict(row)
         if item.get("labels_json"):
             try:
@@ -714,6 +720,14 @@ def query_monitor_series(
             item["labels"] = {}
         out.append(item)
     return out
+
+
+def clear_monitor_events(*, db_path: Path | None = None) -> int:
+    """Delete all monitor_events rows. Returns deleted count."""
+    with get_connection(db_path) as conn:
+        cur = conn.execute("DELETE FROM monitor_events")
+        conn.commit()
+        return int(cur.rowcount or 0)
 
 
 def query_monitor_events(
@@ -775,6 +789,7 @@ def query_service_log_lines(
     environment: str,
     *,
     since: str | None = None,
+    until: str | None = None,
     pattern: str | None = None,
     limit: int = 200,
     db_path: Path | None = None,
@@ -786,6 +801,9 @@ def query_service_log_lines(
     if since:
         clauses.append("logged_at>=?")
         params.append(since)
+    if until:
+        clauses.append("logged_at<=?")
+        params.append(until)
     if pattern:
         clauses.append("UPPER(line) LIKE ?")
         params.append(f"%{pattern.upper()}%")

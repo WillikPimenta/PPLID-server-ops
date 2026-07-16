@@ -1,0 +1,100 @@
+[
+  {
+    "endpoint": "grouped_lite",
+    "n": 10,
+    "avg_ms": 94.9,
+    "p95_ms": 142.5,
+    "max_ms": 142.5,
+    "min_ms": 44.9,
+    "lite": true,
+    "server_timingMs": 141.7,
+    "groups": 9
+  },
+  {
+    "endpoint": "grouped_full",
+    "n": 10,
+    "avg_ms": 522.6,
+    "p95_ms": 782.6,
+    "max_ms": 782.6,
+    "min_ms": 168.3,
+    "lite": false,
+    "server_timingMs": 720.6,
+    "groups": 9
+  },
+  {
+    "endpoint": "dashboard_summary",
+    "n": 10,
+    "avg_ms": 42.7,
+    "p95_ms": 426.7,
+    "max_ms": 426.7,
+    "min_ms": 0.0,
+    "server_timingMs": 0.0,
+    "last_cacheHit": true
+  },
+  {
+    "endpoint": "dashboard_latency",
+    "n": 10,
+    "avg_ms": 46.8,
+    "p95_ms": 467.7,
+    "max_ms": 467.7,
+    "min_ms": 0.0,
+    "server_timingMs": 0.0,
+    "last_cacheHit": true
+  },
+  {
+    "endpoint": "dashboard_incidents",
+    "n": 10,
+    "avg_ms": 16.4,
+    "p95_ms": 164.1,
+    "max_ms": 164.1,
+    "min_ms": 0.0,
+    "server_timingMs": 0.0,
+    "last_cacheHit": true
+  },
+  {
+    "endpoint": "summary_lite_dev",
+    "n": 10,
+    "avg_ms": 181.2,
+    "p95_ms": 349.4,
+    "max_ms": 349.4,
+    "min_ms": 60.7,
+    "lite": true
+  },
+  {
+    "endpoint": "summary_full_dev",
+    "n": 10,
+    "avg_ms": 492.7,
+    "p95_ms": 663.7,
+    "max_ms": 663.7,
+    "min_ms": 298.0
+  },
+  {
+    "endpoint": "logs_dev",
+    "n": 10,
+    "avg_ms": 31.4,
+    "p95_ms": 66.5,
+    "max_ms": 66.5,
+    "min_ms": 23.6,
+    "server_timingMs": 23.6,
+    "last_cacheHit": false
+  },
+  {
+    "endpoint": "api_routes_main",
+    "n": 10,
+    "avg_ms": 14.7,
+    "p95_ms": 147.0,
+    "max_ms": 147.0,
+    "min_ms": 0.0,
+    "server_timingMs": 0.0,
+    "last_cacheHit": true
+  },
+  {
+    "endpoint": "series_latency_7d",
+    "n": 10,
+    "avg_ms": 52.5,
+    "p95_ms": 77.2,
+    "max_ms": 77.2,
+    "min_ms": 41.6,
+    "points": 360
+  }
+]

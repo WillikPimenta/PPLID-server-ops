@@ -80,10 +80,11 @@
             <dd class="detail-value"><code>${OC.escapeHtml(repoSha)}</code> ${diskMatch ? '<span class="disk-ok">✓</span>' : '<span class="disk-warn">≠</span>'}</dd>
           </dl>
           <div class="env-expand-actions">
-            <a class="btn btn-secondary btn-sm" href="#/env/${name}">Variáveis</a>
-            <a class="btn btn-secondary btn-sm" href="#/database/${name}">Banco</a>
+            <a class="btn btn-secondary btn-sm" href="/env/${name}">Variáveis</a>
+            <a class="btn btn-secondary btn-sm" href="/database/${name}">Banco</a>
             ${data.githubCommitUrl ? `<a class="btn btn-secondary btn-sm" href="${data.githubCommitUrl}" target="_blank" rel="noopener">GitHub</a>` : ""}
             <button type="button" class="btn btn-outline-danger btn-sm" data-card-action="rollback" data-env="${name}" ${!canRollback ? "disabled" : ""}>Rollback</button>
+            ${busy ? `<button type="button" class="btn btn-danger btn-sm" data-card-action="cancel-deploy" data-env="${name}">Cancelar deploy</button>` : ""}
             <button type="button" class="btn btn-primary btn-sm" data-card-action="redeploy" data-env="${name}" ${busy ? "disabled" : ""}>Re-deploy</button>
           </div>
         </div>
@@ -228,6 +229,8 @@
           await OC.runRedeploy(env, "", (err, result) => OC.afterActionRefresh(err, result, btn));
         } else if (action === "clear-block") {
           await OC.runClearBlockRedeploy(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+        } else if (action === "cancel-deploy") {
+          await OC.runCancelDeploy(env, (err, result) => OC.afterActionRefresh(err, result, btn));
         }
       });
     });
@@ -600,11 +603,123 @@
     });
   };
 
+  OC.computeHomeKpis = function computeHomeKpis(overview, alertGroups) {
+    const environments = overview?.environments || {};
+    const names = OC.ENV_ORDER.filter((name) => environments[name]);
+    const total = names.length || OC.ENV_ORDER.length;
+    let healthy = 0;
+    let attention = 0;
+    names.forEach((name) => {
+      const key = OC.summaryStatusKey(environments[name]);
+      const badge = OC.STATUS_META[key]?.badgeClass || "idle";
+      if (badge === "success" || badge === "online") healthy += 1;
+      else if (badge === "failed" || badge === "waiting" || badge === "offline") attention += 1;
+    });
+    const deploying = OC.getRunningEnvironments?.(overview)?.length || 0;
+    const lastUpdate = overview?.generatedAt
+      ? OC.formatRelativeTime?.(overview.generatedAt) || OC.formatDate?.(overview.generatedAt) || "—"
+      : "—";
+    const groups = alertGroups || OC.lastAlertGroups || [];
+    const alertCountFromGroups = OC.countActiveAlerts ? OC.countActiveAlerts(groups) : 0;
+    // Na home, ambientes offline/failed também são impacto ativo
+    const alertCount = Math.max(attention, alertCountFromGroups);
+    const occurredCount = OC.countOccurredProblems ? OC.countOccurredProblems(groups) : 0;
+    return { total, healthy, attention, deploying, lastUpdate, alertCount, occurredCount };
+  };
+
+  OC.renderDeployHomeShell = function renderDeployHomeShell(overview) {
+    const heroRoot = document.getElementById("deploy-hero");
+    const kpiRoot = document.getElementById("deploy-kpi");
+    if (!heroRoot && !kpiRoot) return;
+    const kpis = OC.computeHomeKpis(overview, OC.lastAlertGroups);
+    if (heroRoot && OC.renderOpsHero) {
+      heroRoot.innerHTML = OC.renderOpsHero({
+        title: "Console de Operações",
+        subtitle: "Status dos ambientes, deploys e acesso rápido ao monitoramento.",
+        stats: [
+          { label: "Saudáveis", value: `${kpis.healthy}/${kpis.total}` },
+          { label: "Deploys ativos", value: String(kpis.deploying) },
+          { label: "Alertas ativos", value: String(kpis.alertCount), action: "alerts" },
+          { label: "Problemas 24h", value: String(kpis.occurredCount), action: "alerts" },
+        ],
+      });
+    }
+    if (kpiRoot && OC.renderOpsKpiRow) {
+      const alertTone = kpis.alertCount > 0 ? "warn" : "ok";
+      const occurredTone = kpis.occurredCount > 0 ? "warn" : "ok";
+      kpiRoot.innerHTML = OC.renderOpsKpiRow([
+        {
+          label: "Ambientes saudáveis",
+          value: `${kpis.healthy} de ${kpis.total}`,
+          hint: "Online ou último deploy ok",
+          tone: "ok",
+          icon: "check",
+        },
+        {
+          label: "Deploys em andamento",
+          value: String(kpis.deploying),
+          hint: deployingHint(kpis.deploying),
+          tone: "deploy",
+          icon: "rocket",
+        },
+        {
+          label: "Alertas ativos",
+          value: String(kpis.alertCount),
+          hint:
+            kpis.alertCount > 0
+              ? "Impacto agora · clique para detalhar"
+              : "Nenhum impacto ativo agora",
+          tone: alertTone,
+          icon: "alert",
+          action: "alerts",
+        },
+        {
+          label: "Problemas ocorridos",
+          value: String(kpis.occurredCount),
+          hint: "Warn/critical nas últimas 24h",
+          tone: occurredTone,
+          icon: "pulse",
+          action: "alerts",
+        },
+      ]);
+    }
+    const openAlerts = async () => {
+      let groups = OC.lastAlertGroups || [];
+      if (!groups.length && OC.fetchActiveAlertGroups) {
+        groups = await OC.fetchActiveAlertGroups(24);
+      }
+      if (OC.openMonitorAlertsDrawer) OC.openMonitorAlertsDrawer(groups);
+      else OC.navigate("monitoring", null, { tab: "incidents" });
+    };
+    const shell = document.getElementById("view-deploy");
+    OC.bindOpsStatActions?.(shell, { alerts: openAlerts });
+  };
+
+  function deployingHint(count) {
+    if (count === 0) return "Nenhum pipeline ativo";
+    if (count === 1) return "1 ambiente implantando";
+    return `${count} ambientes implantando`;
+  }
+
+  OC.refreshHomeAlerts = async function refreshHomeAlerts() {
+    if (!OC.fetchActiveAlertGroups) return;
+    try {
+      await OC.fetchActiveAlertGroups(24);
+      if (OC.lastOverview) OC.renderDeployHomeShell(OC.lastOverview);
+    } catch {
+      /* ignore */
+    }
+  };
+
   OC.renderDashboard = function renderDashboard(overview, options = {}) {
     OC.lastOverview = overview;
     OC.lastDeploymentRows = OC.buildDeploymentRows(overview);
 
+    OC.renderDeployHomeShell(overview);
     OC.renderSummaryCards(overview, options);
+    if (!options.skipAlertRefresh) {
+      OC.refreshHomeAlerts?.();
+    }
 
     const logDirEl = document.getElementById("footer-log-dir");
     if (logDirEl && overview?.logDir) {

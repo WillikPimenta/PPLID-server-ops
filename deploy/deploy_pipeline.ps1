@@ -184,11 +184,15 @@ try {
     Write-PipelineLog "Pipeline iniciado: $oldActive -> $TargetSha"
     & (Join-Path $PSScriptRoot "build_staging.ps1") -Environment $Environment -TargetSha $TargetSha -TargetShaFull $TargetShaFull -RunId $RunId
 
+    Assert-DeployNotCancelled -Environment $Environment -RunId $RunId
     Set-DeployState -Environment $Environment -Updates @{ status = "validating" }
     & (Join-Path $PSScriptRoot "validate_staging.ps1") -Environment $Environment -TargetSha $TargetSha -RunId $RunId
 
+    Assert-DeployNotCancelled -Environment $Environment -RunId $RunId
     Set-DeployState -Environment $Environment -Updates @{ status = "promoting" }
     & (Join-Path $PSScriptRoot "promote_release.ps1") -Environment $Environment -TargetSha $TargetSha -RunId $RunId
+
+    Assert-DeployNotCancelled -Environment $Environment -RunId $RunId
 
     $finishedAt = (Get-Date).ToString("o")
     $durationSec = 0
@@ -305,6 +309,73 @@ try {
     $err = ($errRaw -replace '\x1b\[[0-9;]*m', '' -replace "[\r\n]+", " " -replace '\s+', ' ').Trim()
     if ($err.Length -gt 500) { $err = $err.Substring(0, 500) }
     $finishedAt = (Get-Date).ToString("o")
+    $isCancelled = ($errRaw -eq "DEPLOY_CANCELLED") -or ($err -match "DEPLOY_CANCELLED") -or (Test-DeployCancelRequested -Environment $Environment -RunId $RunId)
+
+    if ($isCancelled) {
+        Write-DeployLogInfo -Environment $Environment -RunId $RunId -Message "Deploy cancelado (cooperativo)" -LogName "pipeline.log"
+        Skip-RemainingDeploySteps -Environment $Environment -RunId $RunId -AfterStepId ""
+        . (Join-Path $PSScriptRoot "lib\legacy_deploy_status.ps1")
+        $preserveActive = Get-PplidPreservedActiveSha -Environment $Environment -State $state
+        if (-not $preserveActive -and $oldActive) { $preserveActive = $oldActive }
+        $preserveGood = if ($state.lastGoodSha) { $state.lastGoodSha } else { $preserveActive }
+        $durationSec = 0
+        try {
+            $durationSec = [int]([datetime]::Parse($finishedAt) - [datetime]::Parse($startedAt)).TotalSeconds
+        } catch { }
+
+        Set-DeployState -Environment $Environment -Updates @{
+            status     = "idle"
+            lastError  = "cancelled_by_user"
+            finishedAt = $finishedAt
+            lockHolder = $null
+            targetSha  = $null
+            runId      = $null
+            startedAt  = $null
+            activeSha  = $preserveActive
+            lastGoodSha = $preserveGood
+        }
+        Clear-DeployBlockedSha -Environment $Environment | Out-Null
+
+        Update-DeployManifest -Environment $Environment -RunId $RunId -Updates @{
+            finishedAt = $finishedAt
+            result     = "cancelled"
+        }
+        Write-DeployRunSummary -Environment $Environment -RunId $RunId -Summary @{
+            environment = $Environment
+            runId       = $RunId
+            branch      = $spec.Branch
+            fromSha     = $oldActive
+            toSha       = $TargetSha
+            subject     = $commitSubject
+            author      = $commitAuthor
+            startedAt   = $startedAt
+            finishedAt  = $finishedAt
+            durationSec = $durationSec
+            result      = "cancelled"
+            failedStep  = $null
+            trigger     = $Trigger
+            lastError   = "cancelled_by_user"
+        }
+
+        if ($hasDeployStatusLib) {
+            try {
+                Invoke-PipelineDeployStatusUpdate -Environment $Environment -Updates @{
+                    phase                = "healthy"
+                    lastDeployResult     = "cancelled"
+                    lastDeployMessage    = "cancelled_by_user"
+                    lastDeployFinishedAt = $finishedAt
+                } -EventType "deploy_cancelled" -EventMessage "Deploy cancelado ($TargetSha)" `
+                    -EventSha $TargetSha -EventSubject $commitSubject -EventAuthor $commitAuthor `
+                    -EventRunId $RunId -EventPreviousSha $oldActive -EventStartedAt $startedAt `
+                    -EventFinishedAt $finishedAt -EventDurationSeconds $durationSec -EventResult "cancelled"
+            } catch { }
+        }
+
+        Clear-DeployCancelRequested -Environment $Environment
+        Write-PipelineLog "Pipeline CANCELADO pelo usuario." "WARN"
+        exit 0
+    }
+
     $failedStep = Get-FailedDeployStepId -Environment $Environment -RunId $RunId
     if (-not $failedStep) { $failedStep = $script:PipelineFailedStep }
 

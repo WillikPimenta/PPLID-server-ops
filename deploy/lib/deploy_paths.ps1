@@ -26,15 +26,16 @@ function Get-PplidDeployEnvPaths {
 
     $root = Get-PplidDeployEnvRoot -Environment $Environment
     return [PSCustomObject]@{
-        Root      = $root
-        Mirror    = Join-Path $root "mirror"
-        Staging   = Join-Path $root "staging"
-        Releases  = Join-Path $root "releases"
-        Current   = Join-Path $root "current"
-        Previous  = Join-Path $root "previous"
-        Logs      = Join-Path $root "logs"
-        Runs      = Join-Path $root "logs\runs"
-        StateFile = Join-Path $root "deploy-state.json"
+        Root                 = $root
+        Mirror               = Join-Path $root "mirror"
+        Staging              = Join-Path $root "staging"
+        Releases             = Join-Path $root "releases"
+        Current              = Join-Path $root "current"
+        Previous             = Join-Path $root "previous"
+        Logs                 = Join-Path $root "logs"
+        Runs                 = Join-Path $root "logs\runs"
+        StateFile            = Join-Path $root "deploy-state.json"
+        CancelRequestedFile  = Join-Path $root "cancel-requested.json"
     }
 }
 

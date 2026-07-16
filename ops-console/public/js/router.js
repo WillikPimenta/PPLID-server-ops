@@ -1,4 +1,4 @@
-﻿/* global window */
+﻿/* global window, document */
 (function () {
   window.OpsConsole = window.OpsConsole || {};
   const OC = window.OpsConsole;
@@ -28,8 +28,26 @@
     return { tab, env, query };
   };
 
-  OC.parseRoute = function parseRoute(hash) {
-    const raw = (hash || window.location.hash || "#/").replace(/^#/, "");
+  /** Normalize path+query or legacy #/hash into a route object. */
+  OC.parseRoute = function parseRoute(locationLike) {
+    let raw = locationLike;
+    if (raw == null || raw === "") {
+      const path = window.location.pathname || "/";
+      const search = window.location.search || "";
+      const hash = window.location.hash || "";
+      // Prefer pathname; fall back to legacy hash when still on /
+      if ((path === "/" || path === "") && hash.startsWith("#/")) {
+        raw = hash.replace(/^#/, "");
+      } else {
+        raw = path + search;
+      }
+    } else if (String(raw).startsWith("#")) {
+      raw = String(raw).replace(/^#/, "");
+    }
+
+    raw = String(raw);
+    if (!raw.startsWith("/")) raw = `/${raw}`;
+
     const qIndex = raw.indexOf("?");
     const pathPart = qIndex >= 0 ? raw.slice(0, qIndex) : raw;
     const queryPart = qIndex >= 0 ? raw.slice(qIndex + 1) : "";
@@ -56,7 +74,7 @@
       const mon = OC.parseMonitoringRoute(parts, query);
       return {
         view: "monitoring",
-        env: mon.env || "DEV",
+        env: mon.env || null,
         tab: mon.tab,
         query: mon.query,
       };
@@ -64,23 +82,40 @@
     return { view: "deploy", env: "DEV", query: {} };
   };
 
-  OC.navigate = function navigate(view, env, opts) {
-    let hash = "#/";
-    if (view === "env") hash = `#/env/${env || "DEV"}`;
-    else if (view === "database") hash = `#/database/${env || "DEV"}`;
-    else if (view === "monitoring") {
+  OC.buildAppPath = function buildAppPath(view, env, opts) {
+    if (view === "env") return `/env/${env || "DEV"}`;
+    if (view === "database") return `/database/${env || "DEV"}`;
+    if (view === "monitoring") {
       const tab = opts?.tab || OC.monitorState?.activeTab || "summary";
-      const focusEnv = opts?.focusEnv || env;
       const params = new URLSearchParams(opts?.query || {});
-      if (focusEnv && OC.ENV_ORDER.includes(focusEnv)) params.set("env", focusEnv);
+      // Pin ?env= only with explicit focusEnv. Do not default to DEV for "all envs".
+      if (opts?.focusEnv && OC.ENV_ORDER.includes(String(opts.focusEnv).toUpperCase())) {
+        params.set("env", String(opts.focusEnv).toUpperCase());
+      }
       const qs = params.toString();
-      hash = `#/monitoring/${tab}${qs ? `?${qs}` : ""}`;
+      return `/monitoring/${tab}${qs ? `?${qs}` : ""}`;
     }
-    if (window.location.hash !== hash) {
-      window.location.hash = hash;
-    } else {
-      OC.renderRoute();
+    return "/";
+  };
+
+  OC.migrateLegacyHashRoute = function migrateLegacyHashRoute() {
+    const hash = window.location.hash || "";
+    if (!hash.startsWith("#/")) return false;
+    const next = hash.slice(1) || "/";
+    window.history.replaceState({ migrated: true }, "", next);
+    return true;
+  };
+
+  OC.navigate = function navigate(view, env, opts) {
+    const path = OC.buildAppPath(view, env, opts);
+    const current = `${window.location.pathname}${window.location.search}`;
+    if (current !== path) {
+      window.history.pushState({ view, env }, "", path);
+    } else if (window.location.hash) {
+      // Drop leftover # after same-path navigate
+      window.history.replaceState({ view, env }, "", path);
     }
+    OC.renderRoute();
   };
 
   OC.navigateToEnvironments = function navigateToEnvironments(env) {
@@ -119,7 +154,7 @@
   };
 
   OC.renderRoute = function renderRoute() {
-    OC.currentRoute = OC.parseRoute(window.location.hash);
+    OC.currentRoute = OC.parseRoute();
     if (OC.currentRoute.view === "monitoring") {
       OC.monitorState = OC.monitorState || {};
       OC.monitorState.activeTab = OC.currentRoute.tab || "summary";
@@ -129,6 +164,10 @@
           OC.monitorState.selectedEnvs = [focus];
         }
       }
+    }
+
+    if (!OC.authState?.locked) {
+      OC.setDashboardVisible?.(true);
     }
 
     const deployView = document.getElementById("view-deploy");
@@ -170,7 +209,52 @@
     }
   };
 
+  function isAppPath(pathname) {
+    const p = (pathname || "").replace(/\/+$/, "") || "/";
+    if (p === "/" || p === "/deploy") return true;
+    if (p.startsWith("/env/") || p === "/env") return true;
+    if (p.startsWith("/database/") || p === "/database") return true;
+    if (p.startsWith("/monitoring/") || p === "/monitoring") return true;
+    return false;
+  }
+
   OC.bindRouter = function bindRouter() {
-    window.addEventListener("hashchange", () => OC.renderRoute());
+    window.addEventListener("popstate", () => OC.renderRoute());
+
+    // Internal SPA links (/monitoring/..., legacy #/...) without full reload
+    document.addEventListener("click", (e) => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+        return;
+      }
+      const a = e.target.closest?.("a[href]");
+      if (!a || a.target === "_blank" || a.hasAttribute("download")) return;
+      const href = a.getAttribute("href") || "";
+      if (!href || href.startsWith("mailto:") || href.startsWith("http://") || href.startsWith("https://")) {
+        return;
+      }
+
+      let path = null;
+      if (href.startsWith("#/")) {
+        path = href.slice(1);
+      } else if (href.startsWith("/")) {
+        try {
+          const u = new URL(href, window.location.origin);
+          if (u.origin !== window.location.origin) return;
+          if (!isAppPath(u.pathname)) return;
+          path = u.pathname + u.search;
+        } catch {
+          return;
+        }
+      } else {
+        return;
+      }
+
+      e.preventDefault();
+      const current = `${window.location.pathname}${window.location.search}`;
+      if (current !== path) {
+        window.history.pushState({}, "", path);
+      }
+      OC.renderRoute();
+    });
   };
 })();

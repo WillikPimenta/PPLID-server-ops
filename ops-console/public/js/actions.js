@@ -61,6 +61,22 @@
     }
   };
 
+  OC.runCancelDeploy = async function runCancelDeploy(env, onDone) {
+    const msg =
+      `Cancelar o deploy em andamento em ${env}?\n\n` +
+      `O pipeline sera interrompido e o ambiente liberado para um novo redeploy.\n` +
+      `Se o cancelamento ocorrer durante a publicacao (promote), o ambiente pode ficar inconsistente — use Rollback se necessario.`;
+    if (!OC.confirmAction(msg)) return;
+    try {
+      const result = await OC.postAction(`/api/v1/actions/cancel/${env}`, {});
+      if (onDone) onDone(null, result);
+      return result;
+    } catch (err) {
+      if (onDone) onDone(err);
+      throw err;
+    }
+  };
+
   OC.runRestartService = async function runRestartService(env, service, onDone) {
     if (!OC.confirmAction(`Reiniciar ${service} em ${env}?`)) return;
     try {
@@ -132,6 +148,9 @@
         "success"
       );
       OC.focusEnvCard?.(result.environment);
+    } else if (result?.ok && result.action === "cancel") {
+      OC.showToast(result.message || `Deploy ${result.environment || ""} cancelado.`, "success");
+      if (result.environment) OC.focusEnvCard?.(result.environment);
     } else if (result?.ok) {
       const svc = context?.service || result.service;
       const env = context?.env;

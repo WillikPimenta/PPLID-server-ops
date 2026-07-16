@@ -308,64 +308,89 @@ function Invoke-PplidPipInstall {
         Write-DeployLogInfo -Environment $Environment -RunId $RunId -Message "Running: $cmdDisplay" -LogName $LogName
     }
 
+    # Start-Process (not Start-Job): PS jobs routinely hit OutOfMemoryException on large pip runs.
+    # Use ArgumentList as array + WaitForExit polling so ExitCode is reliable after success.
     $outputFile = Join-Path $env:TEMP ("pplid-pip-{0}-{1}.log" -f $RunId, ([guid]::NewGuid().ToString("N").Substring(0, 8)))
-    $job = Start-Job -ScriptBlock {
-        param($Python, $PipArgs, $OutFile)
-        try {
-            & $Python @PipArgs *> $OutFile
-        } catch {
-            $_ | Out-File -FilePath $OutFile -Append -Encoding utf8
-        }
-        return $LASTEXITCODE
-    } -ArgumentList $VenvPython, $pipArgs, $outputFile
+    $stderrFile = "$outputFile.err"
+    New-Item -ItemType File -Path $outputFile -Force | Out-Null
+    New-Item -ItemType File -Path $stderrFile -Force | Out-Null
+    $proc = Start-Process -FilePath $VenvPython -ArgumentList $pipArgs `
+        -RedirectStandardOutput $outputFile -RedirectStandardError $stderrFile `
+        -NoNewWindow -PassThru
 
     $lineOffset = 0
+    $errOffset = 0
     $exitCode = 1
     $timedOut = $false
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
 
     while ($true) {
         $newLines, $lineOffset = Get-PipOutputNewLines -OutputFile $outputFile -AfterLine $lineOffset
-        if ($newLines.Count -gt 0) {
-            Write-PipOutputToDeployLog -Environment $Environment -RunId $RunId -LogName $LogName -Lines $newLines
-            Write-PipProgressMarkers -Environment $Environment -RunId $RunId -LogName $LogName -Lines $newLines
+        $errLines, $errOffset = Get-PipOutputNewLines -OutputFile $stderrFile -AfterLine $errOffset
+        $combined = @($newLines) + @($errLines)
+        if ($combined.Count -gt 0) {
+            Write-PipOutputToDeployLog -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined
+            Write-PipProgressMarkers -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined
         }
 
-        $jobState = (Get-Job -Id $job.Id -ErrorAction SilentlyContinue).State
-        if ($jobState -in @("Completed", "Failed", "Stopped")) {
+        if ($proc.WaitForExit(800)) {
             break
         }
         if ((Get-Date) -gt $deadline) {
-            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            try {
+                if (-not $proc.HasExited) { $proc.Kill() }
+            } catch { }
+            try { $proc.WaitForExit(5000) } catch { }
             $timedOut = $true
             break
         }
-        Start-Sleep -Milliseconds 800
     }
 
     if ($timedOut) {
         $exitCode = 124
     } else {
-        $received = Receive-Job -Job $job
-        if ($null -ne $received) { $exitCode = [int]$received } else { $exitCode = 1 }
+        try { $proc.Refresh() } catch { }
+        if ($null -ne $proc.ExitCode) {
+            $exitCode = [int]$proc.ExitCode
+        } else {
+            # Fallback: treat "Successfully installed" / empty failure as success when ExitCode missing
+            $probe = @(Get-PipOutputTail -OutputFile $outputFile -Tail 5) + @(Get-PipOutputTail -OutputFile $stderrFile -Tail 5)
+            $joined = ($probe -join "`n")
+            if ($joined -match 'Successfully installed') {
+                $exitCode = 0
+            } else {
+                $exitCode = 1
+            }
+        }
     }
-    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+
+    try { $proc.Dispose() } catch { }
 
     $newLines, $lineOffset = Get-PipOutputNewLines -OutputFile $outputFile -AfterLine $lineOffset
-    if ($newLines.Count -gt 0) {
-        Write-PipOutputToDeployLog -Environment $Environment -RunId $RunId -LogName $LogName -Lines $newLines
-        Write-PipProgressMarkers -Environment $Environment -RunId $RunId -LogName $LogName -Lines $newLines
+    $errLines, $errOffset = Get-PipOutputNewLines -OutputFile $stderrFile -AfterLine $errOffset
+    $combined = @($newLines) + @($errLines)
+    if ($combined.Count -gt 0) {
+        Write-PipOutputToDeployLog -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined
+        Write-PipProgressMarkers -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined
     }
 
-    $tail = Get-PipOutputTail -OutputFile $outputFile -Tail 20
+    $tailOut = @(Get-PipOutputTail -OutputFile $outputFile -Tail 20)
+    $tailErr = @(Get-PipOutputTail -OutputFile $stderrFile -Tail 20)
+    $tail = $tailOut + $tailErr
+    if ($tail.Count -gt 20) { $tail = $tail[-20..-1] }
 
-    if ($exitCode -eq 124 -and $Environment -and $RunId -and (Test-Path $outputFile)) {
+    if ($exitCode -eq 124 -and $Environment -and $RunId -and ((Test-Path $outputFile) -or (Test-Path $stderrFile))) {
         try {
             $runDir = Get-PplidDeployRunDir -Environment $Environment -RunId $RunId
             if (-not (Test-Path $runDir)) {
                 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
             }
-            Copy-Item -Path $outputFile -Destination (Join-Path $runDir "deps_backend.pip.log") -Force
+            if (Test-Path $outputFile) {
+                Copy-Item -Path $outputFile -Destination (Join-Path $runDir "deps_backend.pip.log") -Force
+            }
+            if (Test-Path $stderrFile) {
+                Copy-Item -Path $stderrFile -Destination (Join-Path $runDir "deps_backend.pip.err.log") -Force
+            }
             Write-DeployLogWarn -Environment $Environment -RunId $RunId `
                 -Message "pip timeout: log completo preservado em deps_backend.pip.log" -LogName $LogName
         } catch { }
@@ -373,6 +398,9 @@ function Invoke-PplidPipInstall {
 
     if (Test-Path $outputFile) {
         Remove-Item $outputFile -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $stderrFile) {
+        Remove-Item $stderrFile -Force -ErrorAction SilentlyContinue
     }
 
     $errorDetail = $null

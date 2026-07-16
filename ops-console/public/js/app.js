@@ -215,7 +215,11 @@ async function unlockWithCredentials(username, password) {
     });
     OC.applyAuthState(status);
     if (!status.locked) {
+      OC.migrateLegacyHashRoute?.();
+      OC.currentRoute = OC.parseRoute();
       await OC.refresh({ full: true });
+      OC.setDashboardVisible(true);
+      OC.renderRoute();
       tryEnterKioskFullscreen();
     }
     return true;
@@ -324,8 +328,17 @@ OC.refresh = async function refresh(options = {}) {
   const full = options.full === true;
   const statusEl = document.getElementById("refresh-status");
   if (OC.currentRoute?.view === "monitoring") {
+    OC.setDashboardVisible(true);
     if (statusEl && OC.lastOverview?.generatedAt) {
       statusEl.textContent = `Última atualização: ${OC.formatDate(OC.lastOverview.generatedAt)} · monitoramento`;
+    }
+    // Keep header/overview warm on full refresh, but skip deploy dashboard paint.
+    if (full && !OC.lastOverview) {
+      try {
+        OC.lastOverview = await OC.fetchJson("/api/v1/overview");
+      } catch {
+        /* ignore — monitoring tab can still load */
+      }
     }
     return;
   }
@@ -401,16 +414,16 @@ function bindUi() {
   document.getElementById("btn-refresh")?.addEventListener("click", () => OC.refresh({ full: true }));
   document.getElementById("btn-pause-refresh")?.addEventListener("click", togglePauseRefresh);
   document.getElementById("btn-theme")?.addEventListener("click", toggleTheme);
-  document.getElementById("btn-open-monitoring")?.addEventListener("click", () => OC.navigate("monitoring"));
+  document.getElementById("view-deploy")?.addEventListener("click", (e) => {
+    if (e.target.closest("#btn-open-monitoring")) OC.navigate("monitoring");
+  });
 
   OC.bindFilters(onFilterChange);
   OC.bindDrawer();
   OC.bindRouter();
 
-  if (!window.location.hash) {
-    window.location.hash = "#/";
-  }
-  OC.currentRoute = OC.parseRoute(window.location.hash);
+  OC.migrateLegacyHashRoute?.();
+  OC.currentRoute = OC.parseRoute();
 
   document.getElementById("filter-technical")?.addEventListener("change", (e) => {
     OC.showTechnicalActivity = !!e.target.checked;
@@ -434,11 +447,11 @@ async function bootstrap() {
   try {
     await checkAuthStatus();
     if (!OC.authState.locked) {
-      OC.currentRoute = OC.parseRoute(window.location.hash || "#/");
+      OC.migrateLegacyHashRoute?.();
+      OC.currentRoute = OC.parseRoute();
       await OC.refresh({ full: true });
-      if (OC.currentRoute.view !== "deploy") {
-        OC.renderRoute();
-      }
+      OC.setDashboardVisible(true);
+      OC.renderRoute();
       startAutoRefresh();
       startDurationTicker();
       tryEnterKioskFullscreen();

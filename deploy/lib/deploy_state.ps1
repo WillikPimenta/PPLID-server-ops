@@ -148,6 +148,88 @@ function Test-DeployStateStale {
     }
 }
 
+function Get-DeployCancelRequestedPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("MAIN", "DEV", "HOM")]
+        [string]$Environment
+    )
+    return (Get-PplidDeployEnvPaths -Environment $Environment).CancelRequestedFile
+}
+
+function Write-DeployCancelRequested {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("MAIN", "DEV", "HOM")]
+        [string]$Environment,
+        [string]$RunId = "",
+        [string]$RequestedBy = "console"
+    )
+
+    Initialize-PplidDeployLayout -Environment $Environment
+    $path = Get-DeployCancelRequestedPath -Environment $Environment
+    $payload = [ordered]@{
+        runId       = $RunId
+        requestedAt = (Get-Date).ToString("o")
+        requestedBy = $RequestedBy
+    }
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($path, ($payload | ConvertTo-Json -Depth 4), $utf8)
+    return $path
+}
+
+function Clear-DeployCancelRequested {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("MAIN", "DEV", "HOM")]
+        [string]$Environment
+    )
+
+    $path = Get-DeployCancelRequestedPath -Environment $Environment
+    if (Test-Path $path) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-DeployCancelRequested {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("MAIN", "DEV", "HOM")]
+        [string]$Environment,
+        [string]$RunId = ""
+    )
+
+    $path = Get-DeployCancelRequestedPath -Environment $Environment
+    if (-not (Test-Path $path)) {
+        return $false
+    }
+    try {
+        $raw = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $raw) { return $true }
+        $flagRunId = [string]$raw.runId
+        if ([string]::IsNullOrWhiteSpace($RunId) -or [string]::IsNullOrWhiteSpace($flagRunId)) {
+            return $true
+        }
+        return ($flagRunId -eq $RunId)
+    } catch {
+        return $true
+    }
+}
+
+function Assert-DeployNotCancelled {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("MAIN", "DEV", "HOM")]
+        [string]$Environment,
+        [Parameter(Mandatory = $true)]
+        [string]$RunId
+    )
+
+    if (Test-DeployCancelRequested -Environment $Environment -RunId $RunId) {
+        throw "DEPLOY_CANCELLED"
+    }
+}
+
 function Sync-DeployStateFromLegacy {
     param(
         [Parameter(Mandatory = $true)]

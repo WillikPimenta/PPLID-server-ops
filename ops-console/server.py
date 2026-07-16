@@ -1197,6 +1197,21 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         status = 200 if result.get("ok") else 500
         self._send_json(result, status=status)
 
+    def _handle_action_cancel(self, env_name: str, body: dict[str, Any]) -> None:
+        result = server_ops.action_cancel_deploy(
+            self.config,
+            env_name,
+            requested_by=str(body.get("requestedBy") or self._session_username() or "console"),
+        )
+        server_ops.audit_log(
+            self.config,
+            self._session_username(),
+            "cancel-deploy",
+            f"env={env_name} runId={result.get('previousRunId', '')} ok={result.get('ok')}",
+        )
+        status = 200 if result.get("ok") else 500
+        self._send_json(result, status=status)
+
     def _handle_action_clear_block(self, env_name: str, body: dict[str, Any]) -> None:
         result = server_ops.action_clear_block_and_redeploy(self.config, env_name)
         server_ops.audit_log(
@@ -1364,6 +1379,20 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             self._handle_auth_lock()
             return
 
+        if path == "/api/v1/monitoring/events/clear":
+            if not self._require_unlocked_session():
+                self._send_json({"error": "Bloqueado ou nao autenticado"}, status=401)
+                return
+            result = server_monitoring.clear_monitoring_events(self.config)
+            server_ops.audit_log(
+                self.config,
+                self._session_username(),
+                "monitoring_events_clear",
+                f"deleted={result.get('deleted')}",
+            )
+            self._send_json(result)
+            return
+
         if path.startswith("/api/v1/actions/"):
             if not self._require_unlocked_session():
                 self._send_json({"error": "Bloqueado ou nao autenticado"}, status=401)
@@ -1375,6 +1404,7 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             for prefix, handler in (
                 ("/api/v1/actions/rollback/", self._handle_action_rollback),
                 ("/api/v1/actions/redeploy/", self._handle_action_redeploy),
+                ("/api/v1/actions/cancel/", self._handle_action_cancel),
                 ("/api/v1/actions/clear-block/", self._handle_action_clear_block),
                 ("/api/v1/actions/restart/", self._handle_action_restart),
             ):
@@ -1612,13 +1642,29 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             if len(parts) >= 2 and parts[0] == "events" and parts[1] == "grouped":
                 hours = int(query.get("hours", ["24"])[0])
                 env_filter = (query.get("env") or [None])[0]
-                self._send_json(
-                    server_monitoring.build_monitoring_grouped_events(
-                        self.config,
-                        env_name=env_filter.upper() if env_filter else None,
-                        hours=hours,
+                # Default lite: correlate/enriquecimento pesado só no detalhe do evento.
+                lite = (query.get("lite") or ["1"])[0].lower() not in ("0", "false", "no")
+                if lite:
+                    self._send_json(
+                        server_monitoring.build_monitoring_grouped_events_lite(
+                            self.config,
+                            env_name=env_filter.upper() if env_filter else None,
+                            hours=hours,
+                            limit=200,
+                        )
                     )
-                )
+                else:
+                    self._send_json(
+                        server_monitoring.build_monitoring_grouped_events(
+                            self.config,
+                            env_name=env_filter.upper() if env_filter else None,
+                            hours=hours,
+                        )
+                    )
+                return
+
+            if len(parts) >= 2 and parts[0] == "events" and parts[1] == "clear":
+                self._send_json({"error": "Use POST /api/v1/monitoring/events/clear"}, status=405)
                 return
 
             if not parts:
@@ -1631,9 +1677,24 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             sub = parts[1].lower() if len(parts) > 1 else "summary"
             if sub == "summary":
                 hours = int(query.get("hours", ["24"])[0])
-                self._send_json(
-                    server_monitoring.build_monitoring_summary(self.config, env_name, window_hours=hours)
-                )
+                lite = (query.get("lite") or ["0"])[0].lower() in ("1", "true", "yes")
+                if lite:
+                    include_api = (query.get("api") or ["0"])[0].lower() in ("1", "true", "yes")
+                    self._send_json(
+                        server_monitoring.build_monitoring_summary_lite(
+                            self.config,
+                            env_name,
+                            window_hours=hours,
+                            include_api=include_api,
+                            api_timeout=2.0,
+                        )
+                    )
+                else:
+                    self._send_json(
+                        server_monitoring.build_monitoring_summary(
+                            self.config, env_name, window_hours=hours
+                        )
+                    )
                 return
             if sub == "series":
                 metric = (query.get("metric") or [""])[0]
@@ -1645,6 +1706,25 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     server_monitoring.build_monitoring_series(
                         self.config, env_name, metric, hours=hours, center=center
+                    )
+                )
+                return
+            if sub == "uptime-days":
+                days = int(query.get("days", ["7"])[0])
+                self._send_json(
+                    server_monitoring.build_monitoring_uptime_days(
+                        self.config, env_name, days=days
+                    )
+                )
+                return
+            if sub == "uptime-hours":
+                date = (query.get("date") or [""])[0]
+                if not date:
+                    self._send_json({"error": "date obrigatorio (YYYY-MM-DD)"}, status=400)
+                    return
+                self._send_json(
+                    server_monitoring.build_monitoring_uptime_hours(
+                        self.config, env_name, date=date
                     )
                 )
                 return
@@ -1679,7 +1759,9 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 return
             if sub == "logs":
                 since = (query.get("since") or [None])[0]
-                pattern = (query.get("pattern") or ["ERROR"])[0]
+                pattern_raw = (query.get("pattern") or [""])[0]
+                # Empty / ALL → sem filtro de texto (mostra linhas recentes).
+                pattern = None if not pattern_raw or pattern_raw.upper() in ("ALL", "*", "ANY") else pattern_raw
                 limit = int(query.get("limit", ["200"])[0])
                 self._send_json(
                     server_monitoring.build_monitoring_service_logs(
@@ -1698,6 +1780,29 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 window = (query.get("window") or ["24h"])[0]
                 self._send_json(
                     server_monitoring.build_monitoring_api_routes(self.config, env_name, window=window)
+                )
+                return
+            if sub == "api-samples":
+                at = (query.get("at") or [""])[0]
+                if not at:
+                    self._send_json({"error": "Parametro at obrigatorio"}, status=400)
+                    return
+                try:
+                    radius = int((query.get("radiusMinutes") or ["5"])[0])
+                except ValueError:
+                    radius = 5
+                try:
+                    min_ms = int((query.get("minMs") or ["0"])[0])
+                except ValueError:
+                    min_ms = 0
+                self._send_json(
+                    server_monitoring.build_monitoring_api_samples(
+                        self.config,
+                        env_name,
+                        at=at,
+                        radius_minutes=radius,
+                        min_ms=min_ms,
+                    )
                 )
                 return
             if sub == "deploy":

@@ -14,10 +14,34 @@ window.OpsConsole.escapeHtml = function escapeHtml(text) {
   return div.innerHTML;
 };
 
+/** Horário de Brasília — fonte canônica para exibição no console. */
+window.OpsConsole.DISPLAY_TIMEZONE = "America/Sao_Paulo";
+
+/**
+ * Parse ISO timestamps. Valores sem timezone (sem Z / offset) são tratados como UTC,
+ * porque a coleta grava em UTC e omitir o Z fazia o browser mostrar a hora "crua" (UTC).
+ */
+window.OpsConsole.parseDate = function parseDate(iso) {
+  if (iso == null || iso === "") return null;
+  if (iso instanceof Date) {
+    return Number.isNaN(iso.getTime()) ? null : iso;
+  }
+  const s = String(iso).trim();
+  if (!s) return null;
+  let normalized = s;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) {
+    normalized = `${s}Z`;
+  }
+  const d = new Date(normalized);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
 window.OpsConsole.formatDate = function formatDate(iso) {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleString("pt-BR");
+    const d = window.OpsConsole.parseDate(iso);
+    if (!d) return String(iso);
+    return d.toLocaleString("pt-BR", { timeZone: window.OpsConsole.DISPLAY_TIMEZONE });
   } catch {
     return String(iso);
   }
@@ -26,7 +50,14 @@ window.OpsConsole.formatDate = function formatDate(iso) {
 window.OpsConsole.formatTimeShort = function formatTimeShort(iso) {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const d = window.OpsConsole.parseDate(iso);
+    if (!d) return "—";
+    return d.toLocaleTimeString("pt-BR", {
+      timeZone: window.OpsConsole.DISPLAY_TIMEZONE,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
   } catch {
     return "—";
   }
@@ -35,7 +66,8 @@ window.OpsConsole.formatTimeShort = function formatTimeShort(iso) {
 window.OpsConsole.formatRelativeTime = function formatRelativeTime(iso) {
   if (!iso) return "—";
   try {
-    const then = new Date(iso).getTime();
+    const then = window.OpsConsole.parseDate(iso)?.getTime();
+    if (then == null) return "—";
     const diffSec = Math.floor((Date.now() - then) / 1000);
     if (diffSec < 60) return "há menos de 1 min";
     if (diffSec < 3600) return `há ${Math.floor(diffSec / 60)} min`;

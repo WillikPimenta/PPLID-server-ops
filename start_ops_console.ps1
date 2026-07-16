@@ -1,7 +1,8 @@
 param(
     [string]$OpsDir = "",
     [string]$ConfigPath = "",
-    [int]$Port = 0
+    [int]$Port = 0,
+    [switch]$Restart
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,8 +71,23 @@ if ($Port -gt 0) {
 
 $existingPid = Get-PortListenOwnerPid -Port $consolePort
 if ($existingPid) {
-    Write-Host "Ops Console ja esta escutando na porta $consolePort (PID $existingPid)."
-    exit 0
+    if ($Restart) {
+        Write-Host "Reiniciando Ops Console (PID $existingPid) na porta $consolePort..."
+        try {
+            Stop-Process -Id $existingPid -Force -ErrorAction Stop
+            Start-Sleep -Seconds 1
+        } catch {
+            Write-Warning "Nao foi possivel encerrar PID ${existingPid}: $_"
+        }
+        $existingPid = Get-PortListenOwnerPid -Port $consolePort
+        if ($existingPid) {
+            throw "Porta $consolePort ainda em uso (PID $existingPid) apos tentativa de restart."
+        }
+    } else {
+        Write-Host "Ops Console ja esta escutando na porta $consolePort (PID $existingPid)."
+        Write-Host "Use -Restart para reiniciar e aplicar codigo atualizado."
+        exit 0
+    }
 }
 
 $args = @($ServerScript, $ConfigPath)

@@ -269,6 +269,63 @@ def action_rollback(
     }
 
 
+def action_cancel_deploy(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    requested_by: str = "console",
+) -> dict[str, Any]:
+    """Cancela deploy em curso: mata o pipeline, libera o ambiente para novo redeploy."""
+    base_dir = get_base_dir(config)
+    state_before = load_deploy_state(base_dir, env_name)
+    previous_run_id = str(state_before.get("runId") or "")
+    was_busy = is_deploy_busy(base_dir, env_name)
+
+    script = base_dir / "ops" / "deploy" / "cancel_deploy.ps1"
+    args = ["-Environment", env_name, "-RequestedBy", requested_by or "console"]
+    result = run_powershell(script, args, timeout=120)
+
+    # Parse JSON da saida do script (ultima linha JSON)
+    parsed: dict[str, Any] = {}
+    stdout = str(result.get("stdout") or "")
+    for line in reversed(stdout.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                parsed = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+
+    state = load_deploy_state(base_dir, env_name)
+    still_busy = is_deploy_busy(base_dir, env_name)
+    ok = bool(result.get("ok")) and not still_busy
+    if parsed.get("ok") is False:
+        ok = False
+
+    message = (
+        parsed.get("message")
+        or result.get("error")
+        or ("Deploy cancelado." if ok else "Falha ao cancelar deploy.")
+    )
+    return {
+        "ok": ok,
+        "action": "cancel",
+        "environment": env_name,
+        "previousRunId": parsed.get("previousRunId") or previous_run_id,
+        "wasBusy": was_busy,
+        "alreadyIdle": bool(parsed.get("alreadyIdle")) or not was_busy,
+        "processKilled": bool(parsed.get("processKilled")),
+        "message": message,
+        "activeSha": state.get("activeSha"),
+        "lastGoodSha": state.get("lastGoodSha"),
+        "pipelineStatus": state.get("status"),
+        "exitCode": result.get("exitCode"),
+        "stderr": result.get("stderr"),
+        "error": None if ok else (result.get("error") or message),
+    }
+
+
 def action_redeploy(
     config: dict[str, Any],
     env_name: str,

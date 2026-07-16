@@ -10,6 +10,7 @@
     "deploy_started",
     "deploy_success",
     "deploy_failed",
+    "deploy_cancelled",
     "rollback_started",
     "rollback_success",
     "rollback_failed",

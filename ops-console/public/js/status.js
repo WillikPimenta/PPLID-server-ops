@@ -35,8 +35,10 @@ window.OpsConsole.phaseToStatusKey = function phaseToStatusKey(phase, envData) {
     if (ps === "building" || ps === "validating" || ps === "promoting") return "deploying";
     if (ps === "rolled_back") return "rolled_back";
     if (ps === "failed") return "failed";
+    if (ps === "cancelled") return "cancelled";
   }
   if (p === "failed") return "failed";
+  if (p === "cancelled") return "cancelled";
   if (p === "offline") return "offline";
   if (p === "unhealthy") return "unhealthy";
   if (p === "degraded") return "degraded";
@@ -44,6 +46,7 @@ window.OpsConsole.phaseToStatusKey = function phaseToStatusKey(phase, envData) {
   if (p === "healthy") {
     const ld = envData?.lastDeploy?.result || envData?.lastDeployResult;
     if (ld === "warning") return "warning";
+    if (ld === "cancelled") return "cancelled";
     return ld === "success" ? "success" : "online";
   }
   if (p === "idle") {
@@ -51,6 +54,7 @@ window.OpsConsole.phaseToStatusKey = function phaseToStatusKey(phase, envData) {
     const ld = envData?.lastDeploy?.result || envData?.lastDeployResult;
     if (ld === "failed") return "failed";
     if (ld === "warning") return "warning";
+    if (ld === "cancelled") return "cancelled";
     if (ld === "success") return "success";
     return "online";
   }
@@ -64,6 +68,7 @@ window.OpsConsole.eventTypeToStatusKey = function eventTypeToStatusKey(type) {
   if (type === "rollback_failed") return "failed";
   if (type === "rollback_started") return "deploying";
   if (type === "deploy_failed" || type === "phase_failed") return "failed";
+  if (type === "deploy_cancelled") return "cancelled";
   if (type === "deploy_started" || type === "phase_deploying") return "deploying";
   if (type === "deploy_pending" || type === "update_detected") return "deploy_pending";
   if (type.startsWith("sync_") || type === "phase_syncing") return "idle";

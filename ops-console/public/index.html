@@ -100,16 +100,18 @@
 
         <div id="dashboard" class="dashboard hidden">
           <div id="view-deploy">
-          <section class="section-block" aria-labelledby="summary-heading">
-            <div class="section-head-row">
-              <h2 id="summary-heading" class="section-title">Ambientes</h2>
-              <div class="section-head-actions">
-                <button type="button" class="btn btn-secondary btn-sm" id="btn-open-monitoring">Monitoramento</button>
+            <div id="deploy-hero"></div>
+            <div id="deploy-kpi"></div>
+            <section class="ops-section monitor-section" aria-labelledby="summary-heading">
+              <div class="ops-section-head monitor-section-head">
+                <h3 id="summary-heading" class="ops-section-title monitor-section-title">Ambientes</h3>
+                <div class="deploy-section-actions">
+                  <button type="button" class="btn btn-primary btn-sm" id="btn-open-monitoring">Monitoramento</button>
+                </div>
               </div>
               <p class="section-hint">Use <strong>Configuração</strong> para deploy e <strong>Histórico</strong> para ver eventos.</p>
-            </div>
-            <div id="env-summary" class="env-summary-grid"></div>
-          </section>
+              <div id="env-summary" class="env-summary-grid"></div>
+            </section>
           </div>
           <div id="view-env" class="hidden"></div>
           <div id="view-database" class="hidden"></div>
@@ -179,6 +181,8 @@
     </aside>
 
     <script src="/js/utils.js"></script>
+    <script src="/js/ops-perf.js"></script>
+    <script src="/js/ops-ui.js"></script>
     <script src="/js/status.js"></script>
     <script src="/js/actions.js"></script>
     <script src="/js/router.js"></script>
