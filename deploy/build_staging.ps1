@@ -81,6 +81,10 @@ function Invoke-NpmCommand {
     $outputFile = Join-Path $env:TEMP ("pplid-npm-{0}-{1}.log" -f $RunId, ([guid]::NewGuid().ToString("N").Substring(0, 8)))
     try {
         Remove-Item Env:npm_config_devdir -ErrorAction SilentlyContinue
+        # Evita OOM do Vite em hosts com pip/npm concorrentes (falha tipica em "transforming...").
+        if (-not $env:NODE_OPTIONS -or $env:NODE_OPTIONS -notmatch 'max-old-space-size') {
+            $env:NODE_OPTIONS = (($env:NODE_OPTIONS, "--max-old-space-size=8192") | Where-Object { $_ }) -join " "
+        }
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = "SilentlyContinue"
         try {
@@ -99,6 +103,12 @@ function Invoke-NpmCommand {
                 if ($line) { LogErr (Strip-Ansi $line) }
             }
             $detail = ($detailLines | Where-Object { $_ }) -join "`n"
+            $joined = ($allLines | ForEach-Object { Strip-Ansi $_ }) -join "`n"
+            if ($joined -match '(?i)transforming\.\.\.' -and $joined -notmatch '(?i)built in|✓ built|error during build') {
+                $oomHint = "Build interrompido durante transforming (possivel OOM/kill do node). NODE_OPTIONS=$($env:NODE_OPTIONS)"
+                LogErr $oomHint
+                $detail = if ($detail) { "$detail`n$oomHint" } else { $oomHint }
+            }
             if ($detail) {
                 throw ("{0}`n{1}" -f $FailureMessage, $detail)
             }
