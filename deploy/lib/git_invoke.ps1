@@ -30,7 +30,13 @@ function Invoke-PplidGit {
     $ErrorActionPreference = "SilentlyContinue"
     try {
         $raw = & git @Args 2>&1
-        $code = $LASTEXITCODE
+        # git costuma escrever progresso em stderr; em PS o LASTEXITCODE pode
+        # ficar $null e `$null -ne 0` e True — falso negativo de falha.
+        if ($null -eq $LASTEXITCODE) {
+            $code = 0
+        } else {
+            $code = [int]$LASTEXITCODE
+        }
     } finally {
         $ErrorActionPreference = $prevEap
     }
