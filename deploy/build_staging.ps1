@@ -298,24 +298,77 @@ function Reset-PplidBackendVenv {
     if (Test-Path $venvPath) {
         LogWarn "Removendo venv corrompido/incompleto..."
         Remove-Item -LiteralPath $venvPath -Recurse -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+        if (Test-Path $venvPath) {
+            # Retry deletion (locks comuns no Windows apos clone falho).
+            cmd /c "rmdir /s /q `"$venvPath`"" | Out-Null
+            Start-Sleep -Milliseconds 500
+        }
+        if (Test-Path $venvPath) {
+            throw "Falha ao criar venv: nao foi possivel remover .venv residual em $venvPath"
+        }
     }
-    LogInfo "Criando venv..."
-    & python -m venv $venvPath
-    if ($LASTEXITCODE -ne 0) { throw "Falha ao criar venv." }
+
+    $pythonCmd = $null
+    foreach ($candidate in @("python", "py")) {
+        try {
+            $cmd = Get-Command $candidate -ErrorAction Stop
+            if ($candidate -eq "py") {
+                & $cmd.Source -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+                if ($LASTEXITCODE -eq 0) { $pythonCmd = @($cmd.Source, "-3"); break }
+            } else {
+                & $cmd.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+                if ($LASTEXITCODE -eq 0) { $pythonCmd = @($cmd.Source); break }
+            }
+        } catch {
+            continue
+        }
+    }
+    if (-not $pythonCmd) {
+        throw "Falha ao criar venv: Python 3.10+ nao encontrado no PATH."
+    }
+
+    LogInfo "Criando venv com $($pythonCmd -join ' ')..."
+    $venvArgs = @()
+    if ($pythonCmd.Count -gt 1) {
+        $venvArgs += $pythonCmd[1..($pythonCmd.Count - 1)]
+    }
+    $venvArgs += @("-m", "venv", $venvPath)
+    $venvOut = & $pythonCmd[0] @venvArgs 2>&1
+    $venvCode = $LASTEXITCODE
+    $venvTail = @($venvOut | ForEach-Object { "$_" } | Where-Object { $_ } | Select-Object -Last 12)
+    if ($venvCode -ne 0 -or -not (Test-Path (Join-Path $venvPath "Scripts\python.exe"))) {
+        $detail = if ($venvTail.Count -gt 0) { ($venvTail -join "`n") } else { "sem saida do python -m venv" }
+        throw "Falha ao criar venv (exit $venvCode).`n$detail"
+    }
+}
+
+function Resolve-PipInstallResult {
+    param([Parameter(Mandatory = $true)]$Raw)
+    if ($Raw -is [hashtable]) { return $Raw }
+    $fromArray = @($Raw | Where-Object { $_ -is [hashtable] } | Select-Object -Last 1)
+    if ($fromArray.Count -gt 0) { return [hashtable]$fromArray[0] }
+    throw "pip install retornou resultado invalido ($($Raw.GetType().FullName))."
 }
 
 function Throw-PipInstallFailure {
     param(
-        [hashtable]$PipResult,
+        [Parameter(Mandatory = $true)]$PipResult,
         [string]$FallbackMessage = "pip install falhou."
     )
+
+    $PipResult = Resolve-PipInstallResult -Raw $PipResult
 
     if ($PipResult.errorDetail) {
         Save-DeployErrorDetail -Environment $Environment -RunId $RunId -ErrorDetail $PipResult.errorDetail -FailedStep "deps_backend"
     }
     $msg = $FallbackMessage
     if ($PipResult.exitCode -eq 124) {
-        $msg = "pip install excedeu o tempo limite (3600s)."
+        $timeoutHint = 900
+        if ($PipResult.errorDetail -and $PipResult.errorDetail.message -match '(\d+)\s*s') {
+            $timeoutHint = [int]$Matches[1]
+        }
+        $msg = "pip install excedeu o tempo limite (${timeoutHint}s)."
     } elseif ($PipResult.errorDetail -and $PipResult.errorDetail.message) {
         $msg = [string]$PipResult.errorDetail.message
     }
@@ -358,15 +411,19 @@ try {
 
     if (-not $depsSkipped) {
         LogInfo "pip_requirements: instalando dependencias do backend..."
-        $pipResult = Invoke-PplidPipInstall -VenvPython $venvPython -Args @("-r", (Join-Path $backendDir "requirements.txt")) `
-            -TimeoutSec 3600 -Environment $Environment -RunId $RunId -LogName $logName
+        $pipResult = Resolve-PipInstallResult -Raw (
+            Invoke-PplidPipInstall -VenvPython $venvPython -Args @("-r", (Join-Path $backendDir "requirements.txt")) `
+                -TimeoutSec 3600 -Environment $Environment -RunId $RunId -LogName $logName
+        )
         if ($pipResult.exitCode -ne 0) { Throw-PipInstallFailure -PipResult $pipResult }
 
         $automacoesDir = Join-Path $releaseDir "automacoes"
         if (Test-Path (Join-Path $automacoesDir "pyproject.toml")) {
             LogInfo "pip_automacoes: instalando automacoes (pip install -e)..."
-            $pipResult = Invoke-PplidPipInstall -VenvPython $venvPython -Args @("-e", $automacoesDir) `
-                -TimeoutSec 180 -Environment $Environment -RunId $RunId -LogName $logName
+            $pipResult = Resolve-PipInstallResult -Raw (
+                Invoke-PplidPipInstall -VenvPython $venvPython -Args @("-e", $automacoesDir) `
+                    -TimeoutSec 900 -Environment $Environment -RunId $RunId -LogName $logName
+            )
             if ($pipResult.exitCode -ne 0) { Throw-PipInstallFailure -PipResult $pipResult -FallbackMessage "pip install -e automacoes falhou." }
         } else {
             LogWarn "automacoes/ ausente na release; central de automacao nao funcionara."
@@ -380,12 +437,14 @@ try {
             LogWarn "automacoes/ ausente na release; relink ignorado."
         } else {
             LogInfo "pip_automacoes: relink automacoes para release atual..."
-            $relinkResult = Install-PplidAutomacoesEditable -ReleaseDir $releaseDir -VenvPython $venvPython `
-                -TimeoutSec 180 -Environment $Environment -RunId $RunId -LogName $logName
+            $relinkResult = Resolve-PipInstallResult -Raw (
+                Install-PplidAutomacoesEditable -ReleaseDir $releaseDir -VenvPython $venvPython `
+                    -TimeoutSec 900 -Environment $Environment -RunId $RunId -LogName $logName
+            )
             if ($relinkResult.exitCode -eq -1) {
                 LogWarn "automacoes/ ausente na release; relink ignorado."
             } elseif ($relinkResult.exitCode -eq 124) {
-                throw "pip install -e automacoes (relink) excedeu o tempo limite (180s)."
+                throw "pip install -e automacoes (relink) excedeu o tempo limite (900s)."
             } elseif ($relinkResult.exitCode -ne 0) {
                 Throw-PipInstallFailure -PipResult $relinkResult -FallbackMessage "pip install -e automacoes (relink) falhou."
             } else {

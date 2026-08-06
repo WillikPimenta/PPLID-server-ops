@@ -16,11 +16,10 @@ $ErrorActionPreference = "Stop"
 $spec = Get-PplidEnvSpec -Environment $Environment
 $paths = Get-PplidDeployEnvPaths -Environment $Environment
 $deployScript = Join-Path $spec.RepoDir "scripts\deploy"
-$logFile = Join-Path (Get-PplidLogDir) "PPLID_$Environment.log"
+. (Join-Path (Split-Path $PSScriptRoot -Parent) "lib\ops_store.ps1")
 
 function Log([string]$msg) {
-    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $logFile -Value "[$ts] [bootstrap] $msg" -Encoding UTF8
+    Write-OpsEnvLog -Environment $Environment -Service "bootstrap" -Message "[bootstrap] $msg"
 }
 
 Initialize-PplidDeployLayout -Environment $Environment
@@ -37,27 +36,40 @@ if (-not (Enter-DeployLock -Environment $Environment)) {
 }
 
 try {
+    . (Join-Path $PSScriptRoot "lib\junction.ps1")
     $activeSha = [string]$state.activeSha
-    if (-not (Test-Path $paths.Current)) {
-        if ($activeSha) {
-            $releaseDir = Get-PplidReleaseDir -Environment $Environment -Sha $activeSha
-            if (Test-Path $releaseDir) {
-                . (Join-Path $PSScriptRoot "lib\junction.ps1")
-                Set-DirectoryJunction -LinkPath $paths.Current -TargetPath $releaseDir
-                Log "current junction criado -> $activeSha"
-            } else {
-                Log "Sem release $activeSha; usando repo ate primeiro pipeline."
-                $env:PPLID_APP_ROOT = $spec.RepoDir
+    $releaseDir = $null
+    if ($activeSha) {
+        $candidateRelease = Get-PplidReleaseDir -Environment $Environment -Sha $activeSha
+        if (Test-Path $candidateRelease) {
+            $releaseDir = $candidateRelease
+        }
+    }
+
+    $currentOk = (Test-Path $paths.Current) -and (Test-PplidPathIsReparsePoint -Path $paths.Current)
+    if (-not $currentOk) {
+        if ($releaseDir) {
+            if (Test-Path $paths.Current) {
+                Log "current existe e nao e junction; reparando residual antes do bootstrap."
             }
+            Set-DirectoryJunction -LinkPath $paths.Current -TargetPath $releaseDir -AllowReplaceResidualDirectory
+            Log "current junction criado -> $activeSha"
+            $currentOk = $true
+        } elseif (Test-Path $paths.Current) {
+            Log "current residual sem release ativa; usando repo ate primeiro pipeline."
+            $env:PPLID_APP_ROOT = $spec.RepoDir
         } else {
-            Log "Sem activeSha; usando repo ate primeiro pipeline."
+            Log "Sem activeSha/release; usando repo ate primeiro pipeline."
             $env:PPLID_APP_ROOT = $spec.RepoDir
         }
-    } else {
+    }
+
+    if ($currentOk) {
         $env:PPLID_APP_ROOT = $paths.Current
     }
 
-    $appRoot = if ($env:PPLID_APP_ROOT) { $env:PPLID_APP_ROOT } elseif (Test-Path $paths.Current) { $paths.Current } else { $spec.RepoDir }
+    # Sempre instalar shared no release fisico (nunca materializar current como pasta real).
+    $appRoot = if ($releaseDir) { $releaseDir } elseif ($currentOk) { $paths.Current } elseif ($env:PPLID_APP_ROOT) { $env:PPLID_APP_ROOT } else { $spec.RepoDir }
     Log "Instalando env/media persistentes (shared) em $appRoot..."
     Install-PplidSharedRuntime -Environment $Environment -AppRoot $appRoot -RepoDir $spec.RepoDir
     $backendEnv = Join-Path $appRoot "backend\.env"
@@ -67,12 +79,6 @@ try {
     }
 
     $backendPort = $spec.BackendPort
-    $portListening = Test-PortListening -Port $backendPort
-    if ($portListening) {
-        Log "Backend ja escutando :$backendPort"
-        exit 0
-    }
-
     $pgCheck = Test-PostgresAvailable -BackendDir (Join-Path $appRoot "backend")
     if (-not $pgCheck.Open) {
         $pgTarget = "$($pgCheck.HostName):$($pgCheck.Port)"
@@ -80,6 +86,27 @@ try {
         Write-Host "ERRO: PostgreSQL indisponivel em $pgTarget (ambiente $Environment)." -ForegroundColor Red
         Write-Host "Inicie o servico PostgreSQL local e execute deploy_all novamente." -ForegroundColor Yellow
         exit 1
+    }
+
+    # Sempre aplica migrations pendentes no bootstrap (mesmo se o backend ja estiver no ar).
+    # Evita health "degraded" por schema atrasado apos reboot/start sem promote.
+    $backendDir = Join-Path $appRoot "backend"
+    $venvPython = Join-Path $backendDir ".venv\Scripts\python.exe"
+    if ((Test-Path $venvPython) -and (Test-Path (Join-Path $backendDir "manage.py"))) {
+        . (Join-Path $PSScriptRoot "lib\backend_deploy.ps1")
+        Log "Aplicando migrations pendentes (bootstrap)..."
+        Invoke-PplidBackendMigrate -BackendDir $backendDir -VenvPython $venvPython -Log {
+            param($m)
+            Log $m
+        }
+    } else {
+        Log "venv/manage.py ausente; migrate adiado para o start_env/promote."
+    }
+
+    $portListening = Test-PortListening -Port $backendPort
+    if ($portListening) {
+        Log "Backend ja escutando :$backendPort (migrations conferidas)."
+        exit 0
     }
 
     Log "Subindo servicos de $Environment..."
