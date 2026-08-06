@@ -191,11 +191,30 @@ $fromSha = [string]$state.activeSha
 if (-not $fromSha) {
     $fromSha = [string]$state.lastGoodSha
 }
-$backendChanged = Test-PplidBackendChanged -MirrorDir $paths.Mirror -FromSha $fromSha -ToSha $TargetShaFull
+
+# Diff precisa do objeto no mirror. Em trigger console/manual o fetch do watcher
+# pode nao ter rodado ainda — busca origin antes do diff (o step git_fetch repete depois).
+Push-Location $paths.Mirror
+try {
+    Invoke-PplidGit -Args @("fetch", "origin") -FailMessage "git fetch falhou." | Out-Null
+} finally {
+    Pop-Location
+}
+
+$backendChanged = $true
 $backendPaths = @()
-if ($backendChanged) {
-    $backendPaths = Get-PplidBackendDiffPaths -MirrorDir $paths.Mirror -FromSha $fromSha -ToSha $TargetShaFull
-    LogInfo ("Backend alterado ($($backendPaths.Count) arquivos): " + ($backendPaths -join ", "))
+try {
+    $backendChanged = Test-PplidBackendChanged -MirrorDir $paths.Mirror -FromSha $fromSha -ToSha $TargetShaFull
+    if ($backendChanged) {
+        $backendPaths = Get-PplidBackendDiffPaths -MirrorDir $paths.Mirror -FromSha $fromSha -ToSha $TargetShaFull
+        LogInfo ("Backend alterado ($($backendPaths.Count) arquivos): " + ($backendPaths -join ", "))
+    } else {
+        LogInfo "Backend inalterado vs ativo ($fromSha -> $TargetSha)."
+    }
+} catch {
+    LogWarn "Diff backend indisponivel ($($_.Exception.Message)); assumindo backendChanged=true."
+    $backendChanged = $true
+    $backendPaths = @()
 }
 
 if (Test-Path $metaFile) {
