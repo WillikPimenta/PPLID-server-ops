@@ -193,10 +193,15 @@ if (-not $fromSha) {
 }
 
 # Diff precisa do objeto no mirror. Em trigger console/manual o fetch do watcher
-# pode nao ter rodado ainda — busca origin antes do diff (o step git_fetch repete depois).
+# pode nao ter rodado ainda — tenta origin antes do diff (o step git_fetch refaz depois).
+# Best-effort: falha aqui nao deve derrubar o build (git_fetch e a barreira real).
 Push-Location $paths.Mirror
 try {
-    Invoke-PplidGit -Args @("fetch", "origin") -FailMessage "git fetch falhou." | Out-Null
+    try {
+        Invoke-PplidGit -Args @("fetch", "origin") -FailMessage "git fetch falhou." | Out-Null
+    } catch {
+        LogWarn "Pre-fetch mirror (aviso): $($_.Exception.Message)"
+    }
 } finally {
     Pop-Location
 }
