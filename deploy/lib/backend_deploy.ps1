@@ -48,6 +48,60 @@ function Test-PplidReleaseHasFalhasModule {
     return (Test-Path $falhasApp)
 }
 
+function Import-PplidBackendDotEnv {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BackendDir,
+        [scriptblock]$Log = $null
+    )
+
+    $backendEnvFile = Join-Path $BackendDir ".env"
+    if (-not (Test-Path $backendEnvFile)) {
+        if ($Log) { & $Log "backend/.env ausente em $BackendDir (migrate usara defaults do processo)." }
+        return $false
+    }
+
+    $loaded = 0
+    Get-Content -Path $backendEnvFile -Encoding UTF8 | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line -or $line.StartsWith("#")) { return }
+        $eq = $line.IndexOf("=")
+        if ($eq -lt 1) { return }
+        $key = $line.Substring(0, $eq).Trim()
+        if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { return }
+        $val = $line.Substring($eq + 1).Trim()
+        if (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'"))) {
+            $val = $val.Substring(1, $val.Length - 2)
+        }
+        Set-Item -Path "Env:$key" -Value $val
+        $loaded++
+    }
+    if ($Log) { & $Log "backend/.env injetado no processo ($loaded chaves) para migrate." }
+    return $true
+}
+
+function Get-PplidPendingMigrations {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BackendDir,
+        [Parameter(Mandatory = $true)]
+        [string]$VenvPython
+    )
+
+    $showLines = Invoke-PplidPython -Python $VenvPython -Args @(
+        "manage.py", "showmigrations", "--plan", "--skip-checks"
+    ) -WorkingDirectory $BackendDir -FailMessage "showmigrations falhou."
+
+    $pending = @($showLines | Where-Object { $_ -match '\[ \]' } | ForEach-Object {
+        ($_ -replace '^\s*\[ \]\s*', '').Trim()
+    } | Where-Object { $_ })
+
+    return @{
+        lines   = $showLines
+        pending = $pending
+    }
+}
+
 function Invoke-PplidBackendMigrate {
     param(
         [Parameter(Mandatory = $true)]
@@ -56,6 +110,9 @@ function Invoke-PplidBackendMigrate {
         [string]$VenvPython,
         [scriptblock]$Log = $null
     )
+
+    # Mesmo padrao do waitress: injeta .env no processo para nao cair em DB/user default.
+    Import-PplidBackendDotEnv -BackendDir $BackendDir -Log $Log | Out-Null
 
     if ($Log) { & $Log "migrate..." }
 
@@ -75,21 +132,22 @@ function Invoke-PplidBackendMigrate {
         }
     }
 
-    if ($Log) { & $Log "migrate --check..." }
+    # Nao confiar so no exit code silencioso do --check (Django sai 1 sem mensagem).
+    if ($Log) { & $Log "verificando migrations pendentes (showmigrations --plan)..." }
+    $plan = Get-PplidPendingMigrations -BackendDir $BackendDir -VenvPython $VenvPython
+    if ($plan.pending.Count -gt 0) {
+        $list = ($plan.pending | Select-Object -First 20) -join ", "
+        throw ("migrations pendentes apos migrate ($($plan.pending.Count)): $list")
+    }
+
+    if ($Log) { & $Log "migrate --check --skip-checks..." }
     Invoke-PplidPython -Python $VenvPython -Args @(
-        "manage.py", "migrate", "--check"
+        "manage.py", "migrate", "--check", "--skip-checks"
     ) -WorkingDirectory $BackendDir -FailMessage "migrate --check falhou (migrations pendentes)."
 
-    try {
-        $showLines = Invoke-PplidPython -Python $VenvPython -Args @(
-            "manage.py", "showmigrations", "--plan"
-        ) -WorkingDirectory $BackendDir -FailMessage "showmigrations falhou."
-        if ($Log -and $showLines.Count -gt 0) {
-            $tail = $showLines | Select-Object -Last 8
-            & $Log ("showmigrations (ultimas linhas): " + ($tail -join " | "))
-        }
-    } catch {
-        if ($Log) { & $Log "showmigrations (aviso): $($_.Exception.Message)" }
+    if ($Log -and $plan.lines.Count -gt 0) {
+        $tail = $plan.lines | Select-Object -Last 8
+        & $Log ("showmigrations (ultimas linhas): " + ($tail -join " | "))
     }
 }
 
