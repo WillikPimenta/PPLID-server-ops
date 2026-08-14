@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 $spec = Get-PplidEnvSpec -Environment $Environment
 $paths = Get-PplidDeployEnvPaths -Environment $Environment
 $releaseDir = Get-PplidReleaseDir -Environment $Environment -Sha $TargetSha
-$deployScript = Join-Path $spec.RepoDir "scripts\deploy"
+$deployScript = Join-Path $releaseDir "scripts\deploy"
 $logName = "promote.log"
 
 function LogInfo([string]$msg) { Write-DeployLogInfo -Environment $Environment -RunId $RunId -Message $msg -LogName $logName }
@@ -150,6 +150,9 @@ function Restore-PplidPromoteJunctionIfNeeded {
 
 if (-not (Test-Path $releaseDir)) {
     throw "Release nao encontrada: $releaseDir"
+}
+if (-not (Test-Path $deployScript)) {
+    throw "Scripts de deploy ausentes na release: $deployScript"
 }
 
 $state = Get-DeployState -Environment $Environment
