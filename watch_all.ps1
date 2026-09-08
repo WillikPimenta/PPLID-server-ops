@@ -10,7 +10,12 @@ if (-not (Enter-PplidSyncLock)) {
 }
 
 try {
-    foreach ($env in @("MAIN", "DEV", "HOM")) {
+    $enabledEnvs = @(Get-PplidEnabledEnvironments -ScriptRoot $PSScriptRoot)
+    if ($enabledEnvs.Count -eq 0) {
+        Write-Host "Nenhum ambiente habilitado em env.config.json; sync ignorado."
+        exit 0
+    }
+    foreach ($env in $enabledEnvs) {
         Write-Host "=== Watch $env ==="
         & (Join-Path $PSScriptRoot "deploy\watch_github.ps1") -Environment $env
         if ($LASTEXITCODE -ne 0) {

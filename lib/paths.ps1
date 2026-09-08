@@ -135,6 +135,57 @@ function Get-PplidEnvConfigPath {
     return $default
 }
 
+function Get-PplidAllEnvironments {
+    return @("MAIN", "DEV", "HOM")
+}
+
+function Get-PplidEnabledEnvironments {
+    param(
+        [string]$ScriptRoot = $PSScriptRoot
+    )
+
+    $all = Get-PplidAllEnvironments
+    $path = Get-PplidEnvConfigPath -ScriptRoot $ScriptRoot
+    if (-not (Test-Path $path)) {
+        return $all
+    }
+
+    try {
+        $cfg = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        return $all
+    }
+
+    $enabled = [System.Collections.Generic.List[string]]::new()
+    foreach ($envName in $all) {
+        $block = $cfg.$envName
+        if (-not $block) {
+            continue
+        }
+        # Missing enabled => treated as true (backward compatible).
+        if ($null -eq $block.enabled -or [bool]$block.enabled) {
+            $enabled.Add($envName) | Out-Null
+        }
+    }
+
+    if ($enabled.Count -eq 0) {
+        return @()
+    }
+    return $enabled.ToArray()
+}
+
+function Test-PplidEnvironmentEnabled {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("MAIN", "DEV", "HOM")]
+        [string]$Environment,
+        [string]$ScriptRoot = $PSScriptRoot
+    )
+
+    $enabled = Get-PplidEnabledEnvironments -ScriptRoot $ScriptRoot
+    return ($enabled -contains $Environment)
+}
+
 function Import-PplidPathsModule {
     param(
         [string]$ScriptRoot = $PSScriptRoot

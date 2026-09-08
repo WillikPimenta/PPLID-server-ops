@@ -14,19 +14,30 @@ $opsRoot = $PSScriptRoot
 . (Join-Path $opsRoot "deploy\lib\env_spec.ps1")
 . (Join-Path $opsRoot "deploy\lib\legacy_deploy_status.ps1")
 
-$envList = if ($Environment -eq "ALL") { @("MAIN", "DEV", "HOM") } else { @($Environment) }
+$envList = if ($Environment -eq "ALL") {
+    @(Get-PplidEnabledEnvironments -ScriptRoot $opsRoot)
+} else {
+    @($Environment)
+}
+if ($envList.Count -eq 0) {
+    Write-Host "Nenhum ambiente habilitado; recover ignorado."
+    exit 0
+}
 $statusPath = Get-PplidStatusFile
+. (Join-Path $opsRoot "lib\ops_store.ps1")
 
 function Write-RecoveryLog {
-    param([string]$Message)
-    $logFile = Join-Path (Get-PplidLogDir) "recover_deploy.log"
-    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $logFile -Value "[$ts] $Message" -Encoding UTF8
+    param(
+        [string]$Message,
+        [ValidateSet("MAIN", "DEV", "HOM")]
+        [string]$LogEnvironment = "DEV"
+    )
+    Write-OpsEnvLog -Environment $LogEnvironment -Service "recover" -Message $Message
     Write-Host $Message
 }
 
 foreach ($env in $envList) {
-    Write-RecoveryLog "=== Recover $env ==="
+    Write-RecoveryLog -LogEnvironment $env -Message "=== Recover $env ==="
 
     $state = Get-DeployState -Environment $env
     $stale = Test-DeployStateStale -State $state -MaxDeployMinutes 45
@@ -58,10 +69,10 @@ foreach ($env in $envList) {
         }
         Set-DeployState -Environment $env -Updates $updates
         Clear-DeployBlockedSha -Environment $env | Out-Null
-        Write-RecoveryLog "deploy-state.json reset for $env (activeSha=$preservedSha, blockedSha cleared)"
+        Write-RecoveryLog -LogEnvironment $env -Message "deploy-state.json reset for $env (activeSha=$preservedSha, blockedSha cleared)"
     } elseif ($state.blockedSha) {
         Clear-DeployBlockedSha -Environment $env | Out-Null
-        Write-RecoveryLog "blockedSha cleared for $env (was $($state.blockedSha))"
+        Write-RecoveryLog -LogEnvironment $env -Message "blockedSha cleared for $env (was $($state.blockedSha))"
     }
 
     if (Test-Path $statusPath) {
@@ -79,7 +90,7 @@ foreach ($env in $envList) {
             $status.updatedAt = (Get-Date).ToString("o")
             $utf8 = New-Object System.Text.UTF8Encoding $false
             [System.IO.File]::WriteAllText($statusPath, ($status | ConvertTo-Json -Depth 20), $utf8)
-            Write-RecoveryLog "deploy-status.json phase reset for $env"
+            Write-RecoveryLog -LogEnvironment $env -Message "deploy-status.json phase reset for $env"
         }
     }
 
@@ -93,7 +104,7 @@ foreach ($env in $envList) {
             status      = "idle"
             lastError   = $null
         }
-        Write-RecoveryLog "activeSha restaurado para $preservedSha"
+        Write-RecoveryLog -LogEnvironment $env -Message "activeSha restaurado para $preservedSha"
     }
 
     if ($RestartServices) {
@@ -102,9 +113,9 @@ foreach ($env in $envList) {
         if (Test-Path (Join-Path $deployScript "start_env.ps1")) {
             & (Join-Path $deployScript "stop_env.ps1") -Environment $env
             & (Join-Path $deployScript "start_env.ps1") -Environment $env
-            Write-RecoveryLog "Services restarted for $env"
+            Write-RecoveryLog -LogEnvironment $env -Message "Services restarted for $env"
         }
     }
 }
 
-Write-RecoveryLog "Recovery concluido."
+Write-RecoveryLog -Message "Recovery concluido."

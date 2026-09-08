@@ -27,13 +27,6 @@ function Get-PplidSharedMediaDir {
     (Get-PplidSharedEnvPaths -Environment $Environment).Media
 }
 
-function Test-PplidPathIsReparsePoint {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    if (-not (Test-Path $Path)) { return $false }
-    $item = Get-Item $Path -Force
-    return [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
-}
-
 function Test-PplidDirectoryHasFiles {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path $Path)) { return $false }
@@ -129,6 +122,9 @@ function Seed-PplidSharedEnvIfMissing {
         }
     }
     Ensure-PplidEnvKey -FilePath $shared.Backend -Key "MEDIA_ROOT" -Value $mediaRootValue
+    # Cookies não são por porta: MAIN/DEV/HOM no mesmo host (ex.: 10.97.198.186)
+    # precisam de nomes distintos, senão o login de um ambiente invalida o outro.
+    Ensure-PplidEnvKey -FilePath $shared.Backend -Key "SESSION_COOKIE_NAME" -Value "pplid_$($Environment.ToLower())_sessionid"
 
     if (-not (Test-Path $shared.Frontend)) {
         $feCandidates = @(
@@ -166,6 +162,10 @@ function Install-PplidSharedEnv {
         [string]$AppRoot,
         [string]$RepoDir = ""
     )
+
+    if (-not (Test-Path -LiteralPath $AppRoot)) {
+        throw "AppRoot nao existe para install shared env: $AppRoot"
+    }
 
     Seed-PplidSharedEnvIfMissing -Environment $Environment -RepoDir $RepoDir
     $shared = Get-PplidSharedEnvPaths -Environment $Environment

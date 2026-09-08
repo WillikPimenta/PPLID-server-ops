@@ -5,6 +5,32 @@
 
   OC.expandedEnvCards = OC.expandedEnvCards || new Set();
 
+  OC.refreshHomeHostSummary = OC.refreshHomeHostSummary || async function refreshHomeHostSummary() {
+    const age = Date.now() - Number(OC._homeHostFetchedAt || 0);
+    if (OC._homeHostInFlight || (OC.lastHostSummary && age < 10000)) return OC._homeHostInFlight;
+    OC._homeHostInFlight = OC.fetchJson("/api/v1/host/summary")
+      .then((data) => {
+        OC.lastHostSummary = data;
+        OC._homeHostFetchedAt = Date.now();
+        if (OC.currentRoute?.view === "deploy" && OC.lastOverview) OC.renderDeployHomeShell?.(OC.lastOverview);
+      })
+      .catch(() => {})
+      .finally(() => { OC._homeHostInFlight = null; });
+    return OC._homeHostInFlight;
+  };
+
+  async function ensureDeployRuntime(feature) {
+    await OC.ensureFeature?.(feature || "deployDetails");
+    if (OC.bindDrawer && !OC._drawerEventsBound) {
+      OC.bindDrawer();
+      OC._drawerEventsBound = true;
+    }
+    if (OC.bindDeployDrawerEvents && !OC._deployDrawerEventsBound) {
+      OC.bindDeployDrawerEvents();
+      OC._deployDrawerEventsBound = true;
+    }
+  }
+
   OC.rowDurationLabel = function rowDurationLabel(row) {
     if (row.isRunning) return `Rodando · ${OC.formatLiveDuration(row.startedAt)}`;
     if (row.durationSeconds != null) return `${OC.STATUS_META[row.statusKey]?.label || "Concluído"} · ${OC.formatDuration(row.durationSeconds)}`;
@@ -47,7 +73,57 @@
         </div>
         <p class="detail-muted">O watcher nao repete este commit apos falha. Use o botao abaixo para limpar o bloqueio e publicar o commit mais recente do remoto.</p>
         <button type="button" class="btn btn-primary btn-sm" data-card-action="clear-block" data-env="${name}" ${busy ? "disabled" : ""}>Limpar bloqueio e deployar</button>
-      </div>`;
+       </div>`;
+  }
+
+  function shortCommit(value) {
+    if (!value || value === "—") return "—";
+    return String(value).slice(0, 8);
+  }
+
+  function envReleaseSummaryHtml(data) {
+    const phase = data.displayPhase || data.phase;
+    const busy = phase === "deploying";
+    const deployedSha = OC.resolveCommitSha(data);
+    const repoSha = data.repoSha || data.currentCommit?.sha || data.gitSha || "";
+    const deployedAt = busy
+      ? data.lastDeployStartedAt || data.deployState?.startedAt
+      : data.deployedAt || data.lastDeployFinishedAt;
+    const timeLabel = deployedAt
+      ? busy
+        ? `desde ${OC.formatTimeShort(deployedAt)}`
+        : OC.formatRelativeTime(deployedAt)
+      : "Sem registro";
+
+    let syncLabel = "Verificando";
+    let syncClass = "is-muted";
+    if (data.enabled === false) {
+      syncLabel = "Pausado";
+    } else if (data.deployPending) {
+      syncLabel = "Atualização pendente";
+      syncClass = "is-warn";
+    } else if (data.shaInSync === false) {
+      syncLabel = "Versão divergente";
+      syncClass = "is-alert";
+    } else if (data.shaInSync === true || (repoSha && deployedSha !== "—" && repoSha === deployedSha)) {
+      syncLabel = "Sincronizado";
+      syncClass = "is-ok";
+    }
+
+    return `<dl class="summary-release-grid" aria-label="Versão implantada">
+      <div class="summary-release-item">
+        <dt>${busy ? "Alvo" : "Versão"}</dt>
+        <dd><code title="${OC.escapeHtml(deployedSha)}">${OC.escapeHtml(shortCommit(deployedSha))}</code></dd>
+      </div>
+      <div class="summary-release-item">
+        <dt>${busy ? "Deploy iniciado" : "Implantado"}</dt>
+        <dd>${OC.escapeHtml(timeLabel || "—")}</dd>
+      </div>
+      <div class="summary-release-item">
+        <dt>Repositório</dt>
+        <dd><span class="summary-sync ${syncClass}">${OC.escapeHtml(syncLabel)}</span></dd>
+      </div>
+    </dl>`;
   }
 
   function envExpandPanelHtml(name, data, isExpanded) {
@@ -58,17 +134,23 @@
     const diskMatch =
       !data.deployPending && data.shaInSync !== false && deployedSha !== "—" && repoSha !== "—";
     const phase = data.displayPhase || data.phase;
+    const envEnabled = data.enabled !== false;
     const busy = phase === "deploying";
     const timeLabel = busy
       ? `iniciado ${OC.formatTimeShort(data.lastDeployStartedAt || data.deployState?.startedAt)}`
       : `implantado ${OC.formatRelativeTime(data.deployedAt || data.lastDeployFinishedAt)}`;
     const lastGood = data.lastGoodSha || data.deployState?.lastGoodSha || "";
-    const canRollback = !busy && !!lastGood;
+    const canRollback = envEnabled && !busy && !!lastGood;
     const expandClass = isExpanded ? "env-card-expand" : "env-card-expand hidden";
+    const toggleAction = envEnabled ? "disable-env" : "enable-env";
+    const toggleLabel = envEnabled ? "Desativar" : "Ativar";
+    const toggleClass = envEnabled ? "btn btn-outline-danger btn-sm" : "btn btn-primary btn-sm";
+    const toggleDisabled = busy ? "disabled" : "";
 
     return `
-      <div class="${expandClass}" data-env-expand="${name}">
+      <div class="${expandClass}" id="env-config-${name}" data-env-expand="${name}">
         <div class="env-expand-panel">
+          <h4 class="env-expand-title">Detalhes do deploy</h4>
           <dl class="detail-grid env-expand-grid">
             <dt class="detail-label">${busy ? "Alvo" : "Commit"}</dt>
             <dd class="detail-value"><code>${OC.escapeHtml(deployedSha)}</code>${busy && previousSha && previousSha !== "—" && previousSha !== deployedSha ? ` <span class="detail-muted">(anterior ${OC.escapeHtml(previousSha)})</span>` : ""}</dd>
@@ -79,13 +161,22 @@
             <dt class="detail-label">No disco</dt>
             <dd class="detail-value"><code>${OC.escapeHtml(repoSha)}</code> ${diskMatch ? '<span class="disk-ok">✓</span>' : '<span class="disk-warn">≠</span>'}</dd>
           </dl>
-          <div class="env-expand-actions">
-            <a class="btn btn-secondary btn-sm" href="/env/${name}">Variáveis</a>
-            <a class="btn btn-secondary btn-sm" href="/database/${name}">Banco</a>
-            ${data.githubCommitUrl ? `<a class="btn btn-secondary btn-sm" href="${data.githubCommitUrl}" target="_blank" rel="noopener">GitHub</a>` : ""}
-            <button type="button" class="btn btn-outline-danger btn-sm" data-card-action="rollback" data-env="${name}" ${!canRollback ? "disabled" : ""}>Rollback</button>
-            ${busy ? `<button type="button" class="btn btn-danger btn-sm" data-card-action="cancel-deploy" data-env="${name}">Cancelar deploy</button>` : ""}
-            <button type="button" class="btn btn-primary btn-sm" data-card-action="redeploy" data-env="${name}" ${busy ? "disabled" : ""}>Re-deploy</button>
+          <div class="env-expand-action-group">
+            <p class="env-expand-action-label">Configuração</p>
+            <div class="env-expand-actions">
+              <a class="btn btn-secondary btn-sm" href="/env/${name}">Variáveis</a>
+              <a class="btn btn-secondary btn-sm" href="/database/${name}">Banco</a>
+              ${data.githubCommitUrl ? `<a class="btn btn-secondary btn-sm" href="${data.githubCommitUrl}" target="_blank" rel="noopener">GitHub ↗</a>` : ""}
+            </div>
+          </div>
+          <div class="env-expand-action-group env-expand-action-group--operational">
+            <p class="env-expand-action-label">Ações operacionais</p>
+            <div class="env-expand-actions">
+              <button type="button" class="btn btn-primary btn-sm" data-card-action="redeploy" data-env="${name}" ${!envEnabled || busy ? "disabled" : ""}>Re-deploy</button>
+              <button type="button" class="btn btn-outline-danger btn-sm" data-card-action="rollback" data-env="${name}" title="${canRollback ? "Restaurar a última versão estável" : "Nenhuma versão estável disponível"}" ${!canRollback ? "disabled" : ""}>Rollback</button>
+              ${busy && envEnabled ? `<button type="button" class="btn btn-danger btn-sm" data-card-action="cancel-deploy" data-env="${name}">Cancelar deploy</button>` : ""}
+              <button type="button" class="${toggleClass}" data-card-action="${toggleAction}" data-env="${name}" ${toggleDisabled}>${toggleLabel}</button>
+            </div>
           </div>
         </div>
       </div>`;
@@ -94,9 +185,12 @@
   OC.envCardFingerprint = function envCardFingerprint(data) {
     if (!data) return "";
     const services = (data.services || [])
-      .map((s) => `${s.id}:${s.status}`)
+      .map((s) => `${s.id}:${s.status}:${s.port || ""}:${s.database || ""}:${s.connections ?? ""}:${s.sizeHuman || ""}`)
       .join(",");
+    const links = data.links || {};
     return [
+      data.enabled === false ? "0" : "1",
+      data.branch || "",
       data.displayPhase || data.phase || "",
       data.pipelineStatus || "",
       data.deployState?.status || "",
@@ -104,6 +198,13 @@
       data.runtime?.reachable ? "1" : "0",
       data.runtime?.status || "",
       data.runtime?.database || "",
+      data.repoSha || data.currentCommit?.sha || "",
+      data.shaInSync === false ? "0" : data.shaInSync === true ? "1" : "",
+      data.deployPending ? "1" : "0",
+      data.deployedAt || data.lastDeployFinishedAt || "",
+      links.frontend || "",
+      links.health || "",
+      links.api || "",
       services,
       data.lastDeployMessage || "",
       data.gitSha || data.deployedSha || "",
@@ -132,10 +233,21 @@
     const links = data.links || {};
     const linkChip = (url, label, extraClass) =>
       url
-        ? `<a class="link-chip ${extraClass || ""}" href="${url}" target="_blank" rel="noopener">${label}</a>`
+        ? `<a class="link-chip ${extraClass || ""}" href="${url}" target="_blank" rel="noopener">${label}<span class="link-chip-external" aria-hidden="true">↗</span></a>`
         : "";
+    const services = data.services || [];
+    const healthyServices = services.filter((service) => service.status === "ok").length;
+    const serviceTone = !services.length
+      ? "is-muted"
+      : healthyServices === services.length
+        ? "is-ok"
+        : services.some((service) => service.status === "fail")
+          ? "is-alert"
+          : "is-warn";
+    const serviceSummary = services.length ? `${healthyServices}/${services.length} saudáveis` : "Sem dados";
+    const disabledClass = data.enabled === false ? " summary-card--disabled" : "";
     return `
-        <article class="summary-card status-border-${OC.STATUS_META[statusKey]?.badgeClass || "idle"} ${isExpanded ? "is-config-expanded" : ""}" data-env="${name}" data-fingerprint="${OC.escapeHtml(OC.envCardFingerprint(data))}">
+        <article class="summary-card status-border-${OC.STATUS_META[statusKey]?.badgeClass || "idle"}${disabledClass}${isExpanded ? " is-config-expanded" : ""}" data-env="${name}" data-fingerprint="${OC.escapeHtml(OC.envCardFingerprint(data))}" aria-label="Ambiente ${name}">
           <header class="summary-card-header">
             <div class="summary-card-title">
               <h3 class="summary-env-name">${name}</h3>
@@ -147,19 +259,24 @@
           </header>
           ${blockedDeployBannerHtml(name, data)}
           ${deployingBannerHtml(name, data)}
+          ${envReleaseSummaryHtml(data)}
           <section class="summary-card-services">
-            ${OC.servicesHtml(data.services) || `<p class="summary-empty">Sem dados de serviços</p>`}
+            <div class="summary-section-heading">
+              <span>Serviços</span>
+              <span class="summary-service-count ${serviceTone}">${OC.escapeHtml(serviceSummary)}</span>
+            </div>
+            ${OC.servicesHtml(services) || `<p class="summary-empty">Sem dados de serviços</p>`}
           </section>
           ${envExpandPanelHtml(name, data, isExpanded)}
           <footer class="summary-card-footer">
-            <div class="summary-card-actions-row">
-              ${linkChip(links.frontend, "Abrir", "link-chip-primary")}
+            <div class="summary-card-actions-row summary-card-access">
+              ${linkChip(links.frontend, "Abrir aplicação", "link-chip-primary")}
               ${linkChip(links.health, "Health")}
               ${linkChip(links.api, "API")}
             </div>
             <div class="summary-card-actions-row summary-card-actions-meta">
-              <button type="button" class="card-meta-btn ${isExpanded ? "is-active" : ""}" data-card-toggle="config" data-env="${name}" title="Configuração e deploy">
-                <span class="card-meta-icon" aria-hidden="true">⚙</span> Configuração
+              <button type="button" class="card-meta-btn ${isExpanded ? "is-active" : ""}" data-card-toggle="config" data-env="${name}" aria-controls="env-config-${name}" aria-expanded="${isExpanded ? "true" : "false"}" title="Configuração e ações de deploy">
+                <span class="card-meta-icon" aria-hidden="true">⚙</span> Gerenciar
               </button>
               <button type="button" class="card-meta-btn" data-card-toggle="history" data-env="${name}" title="Histórico de deploys">
                 <span class="card-meta-icon" aria-hidden="true">🕘</span> Histórico
@@ -198,20 +315,31 @@
     if (rebound || !incremental) {
       OC.bindEnvCardEvents(overview);
       if (OC.bindDeployProgressEvents) OC.bindDeployProgressEvents();
-      if (OC.bindDeployDrawerEvents) OC.bindDeployDrawerEvents();
+      if (OC.bindDeployDrawerEvents && !OC._deployDrawerEventsBound) {
+        OC.bindDeployDrawerEvents();
+        OC._deployDrawerEventsBound = true;
+      }
       if (OC.syncDeployProgress) OC.syncDeployProgress(overview);
+      else if ((OC.getRunningEnvironments?.(overview) || []).length) {
+        ensureDeployRuntime("deployProgress").then(() => {
+          if (OC.currentRoute?.view !== "deploy") return;
+          OC.bindDeployProgressEvents?.();
+          OC.syncDeployProgress?.(OC.lastOverview || overview);
+        }).catch(() => {});
+      }
     }
   };
 
   OC.bindEnvCardEvents = function bindEnvCardEvents(overview) {
     document.querySelectorAll("[data-card-toggle]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
+      btn.addEventListener("click", async (e) => {
         e.stopPropagation();
         const env = btn.getAttribute("data-env");
         const mode = btn.getAttribute("data-card-toggle");
         if (mode === "config") {
           OC.toggleEnvConfigExpand(env);
         } else if (mode === "history") {
+          await ensureDeployRuntime("deployDetails");
           OC.openEnvHistoryDrawer(env, overview, btn);
         }
       });
@@ -231,6 +359,10 @@
           await OC.runClearBlockRedeploy(env, (err, result) => OC.afterActionRefresh(err, result, btn));
         } else if (action === "cancel-deploy") {
           await OC.runCancelDeploy(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+        } else if (action === "disable-env") {
+          await OC.runDisableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+        } else if (action === "enable-env") {
+          await OC.runEnableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
         }
       });
     });
@@ -248,11 +380,13 @@
       panel.classList.remove("hidden");
       card.classList.add("is-config-expanded");
       btn?.classList.add("is-active");
+      btn?.setAttribute("aria-expanded", "true");
     } else {
       OC.expandedEnvCards.delete(envName);
       panel.classList.add("hidden");
       card.classList.remove("is-config-expanded");
       btn?.classList.remove("is-active");
+      btn?.setAttribute("aria-expanded", "false");
     }
   };
 
@@ -647,7 +781,17 @@
     if (kpiRoot && OC.renderOpsKpiRow) {
       const alertTone = kpis.alertCount > 0 ? "warn" : "ok";
       const occurredTone = kpis.occurredCount > 0 ? "warn" : "ok";
-      kpiRoot.innerHTML = OC.renderOpsKpiRow([
+      const host = OC.lastHostSummary;
+      const hostThresholds = host?.thresholds || {};
+      const cpu = Number(host?.cpu?.usedPct);
+      const memory = Number(host?.memory?.usedPct);
+      const hostTone = (value, warn, critical) => {
+        if (!Number.isFinite(value)) return "info";
+        if (value >= Number(critical || 95)) return "critical";
+        if (value >= Number(warn || 85)) return "warn";
+        return "ok";
+      };
+      const items = [
         {
           label: "Ambientes saudáveis",
           value: `${kpis.healthy} de ${kpis.total}`,
@@ -681,7 +825,24 @@
           icon: "pulse",
           action: "alerts",
         },
-      ]);
+        {
+          label: "CPU do computador",
+          value: Number.isFinite(cpu) ? `${cpu.toFixed(0)}%` : "Carregando…",
+          hint: host?.collector?.status === "stale" ? "Coleta desatualizada" : "Abrir desempenho do host",
+          tone: hostTone(cpu, hostThresholds.cpuWarnPct, hostThresholds.cpuCriticalPct),
+          icon: "pulse",
+          action: "host",
+        },
+        {
+          label: "Memória RAM",
+          value: Number.isFinite(memory) ? `${memory.toFixed(0)}%` : "Carregando…",
+          hint: host?.collector?.status === "stale" ? "Coleta desatualizada" : "Abrir desempenho do host",
+          tone: hostTone(memory, hostThresholds.memoryWarnPct, hostThresholds.memoryCriticalPct),
+          icon: "pulse",
+          action: "host",
+        },
+      ];
+      kpiRoot.innerHTML = OC.renderOpsKpiRow(items);
     }
     const openAlerts = async () => {
       let groups = OC.lastAlertGroups || [];
@@ -692,7 +853,11 @@
       else OC.navigate("monitoring", null, { tab: "incidents" });
     };
     const shell = document.getElementById("view-deploy");
-    OC.bindOpsStatActions?.(shell, { alerts: openAlerts });
+    OC.bindOpsStatActions?.(shell, {
+      alerts: openAlerts,
+      host: () => OC.navigate("host"),
+    });
+    OC.refreshHomeHostSummary?.();
   };
 
   function deployingHint(count) {

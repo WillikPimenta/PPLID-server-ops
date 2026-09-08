@@ -10,16 +10,19 @@ function Write-PplidDeployLockLog {
         [string]$Environment = ""
     )
 
-    $logDir = (Get-PplidDeployEnvPaths -Environment $(if ($Environment) { $Environment } else { "DEV" })).Logs
-    if (-not $Environment) {
-        $logDir = Join-Path (Get-PplidDeployRoot) "logs"
+    $envName = if ($Environment -in @("MAIN", "DEV", "HOM")) { $Environment } else { "DEV" }
+    if (-not $script:OpsStoreLoaded) {
+        $opsRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        $opsLib = Join-Path $opsRoot "lib\ops_store.ps1"
+        if (Test-Path $opsLib) {
+            . $opsLib
+            $script:OpsStoreLoaded = $true
+        }
     }
-    if (-not (Test-Path $logDir)) {
-        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+
+    if (Get-Command Write-OpsEnvLog -ErrorAction SilentlyContinue) {
+        Write-OpsEnvLog -Environment $envName -Service "lock" -Message $Message
     }
-    $logFile = Join-Path $logDir "deploy-lock.log"
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $logFile -Value "[$timestamp] [$Environment] $Message" -Encoding UTF8
 }
 
 function Get-PplidDeployMutexName {

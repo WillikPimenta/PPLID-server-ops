@@ -31,6 +31,25 @@ function Get-PplidEnvSpec {
 
     $spec = $map[$Environment]
     . (Join-Path (Split-Path $PSScriptRoot -Parent) "..\lib\paths.ps1")
+
+    # Sobrescrever portas a partir de ops/config/env.config.json quando disponivel.
+    $envConfigPath = Get-PplidEnvConfigPath
+    if ($envConfigPath -and (Test-Path $envConfigPath)) {
+        try {
+            $root = Get-Content $envConfigPath -Raw | ConvertFrom-Json
+            $envCfg = $root.$Environment
+            if ($envCfg) {
+                if ($null -ne $envCfg.backendPort) { $spec.BackendPort = [int]$envCfg.backendPort }
+                if ($null -ne $envCfg.frontendPort) { $spec.FrontendPort = [int]$envCfg.frontendPort }
+                if ($envCfg.postgresDb) { $spec.PostgresDb = [string]$envCfg.postgresDb }
+                if ($envCfg.repoName) { $spec.RepoName = [string]$envCfg.repoName }
+                if ($envCfg.branch) { $spec.Branch = [string]$envCfg.branch }
+            }
+        } catch {
+            # Mantem defaults do mapa se o JSON estiver invalido.
+        }
+    }
+
     $spec.RepoDir = Get-PplidRepoDir -Name $spec.RepoName
     $spec.RepoUrl = "https://github.com/WillikPimenta/PPLID.git"
     return [PSCustomObject]$spec

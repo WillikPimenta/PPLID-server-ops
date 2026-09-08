@@ -21,16 +21,50 @@ from typing import Any
 
 ENV_ORDER = ("MAIN", "DEV", "HOM")
 BUSY_STATUSES = frozenset({"building", "validating", "promoting", "watching"})
+ENV_DISABLED_ERROR = "Ambiente desativado. Ative-o antes de executar esta acao."
+
+
+def is_env_enabled(config: dict[str, Any], env_name: str) -> bool:
+    """Missing enabled field defaults to True (backward compatible)."""
+    env_cfg = config.get(env_name)
+    if not isinstance(env_cfg, dict):
+        return False
+    enabled = env_cfg.get("enabled")
+    if enabled is None:
+        return True
+    return bool(enabled)
+
+
+def get_enabled_envs(config: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(name for name in ENV_ORDER if is_env_enabled(config, name))
+
+
+def require_env_enabled(config: dict[str, Any], env_name: str) -> dict[str, Any] | None:
+    """Return an error payload if env is disabled; otherwise None."""
+    if is_env_enabled(config, env_name):
+        return None
+    return {"ok": False, "error": ENV_DISABLED_ERROR, "enabled": False, "environment": env_name}
 SECRET_KEY_PATTERNS = re.compile(
     r"(SECRET|PASSWORD|TOKEN|KEY|CREDENTIAL|PRIVATE)",
     re.IGNORECASE,
 )
 MASK_VALUE = "••••••••"
+DERIVED_FRONTEND_ENV_KEYS = (
+    "VITE_DEV_SERVER_PORT",
+    "VITE_BACKEND_PORT",
+    "VITE_BACKEND_PROXY_TARGET",
+)
 
 _DB_METRICS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _DB_METRICS_CACHE_TTL_SEC = 45
+_MIGRATIONS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_MIGRATIONS_CACHE_TTL_SEC = 300
+_MIGRATIONS_LOCKS: dict[str, threading.Lock] = {}
+_MIGRATIONS_LOCKS_GUARD = threading.Lock()
+_MIGRATIONS_INFLIGHT: dict[str, bool] = {}
 _DEPLOY_PROGRESS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _DEPLOY_PROGRESS_CACHE_TTL_SEC = 2
+_ORPHAN_BOT_LOCK = threading.Lock()
 
 
 def fix_mojibake(text: str | None) -> str:
@@ -149,6 +183,25 @@ def get_base_dir(config: dict[str, Any]) -> Path:
 
 
 def audit_log(config: dict[str, Any], username: str, action: str, detail: str = "") -> None:
+    """Persist console audit events to SQLite (audit_events). File fallback for legacy only."""
+    base_dir = get_base_dir(config)
+    db_path = get_ops_store_db_path(base_dir) or (base_dir / "ops" / "data" / "ops-store.db")
+    try:
+        ops_lib = base_dir / "ops" / "lib"
+        if str(ops_lib) not in sys.path:
+            sys.path.insert(0, str(ops_lib))
+        import ops_store  # type: ignore
+
+        ops_store.append_audit_event(
+            username,
+            action,
+            detail,
+            db_path=db_path if Path(db_path).parent.is_dir() else None,
+        )
+        return
+    except Exception:
+        pass
+    # Legacy file fallback if SQLite unavailable
     log_dir = Path(config.get("logDir") or "C:/PPLID/logs")
     path = log_dir / "ops-console-audit.log"
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -242,6 +295,97 @@ def run_powershell_async(
     return {"accepted": True, "runId": run_id}
 
 
+def _run_orphan_bot_tool(
+    config: dict[str, Any], mode: str, *, log_name: str = "orphan-bots.log"
+) -> dict[str, Any]:
+    base_dir = get_base_dir(config)
+    script = base_dir / "ops" / "lib" / "orphan_bot_cleanup.ps1"
+    if not script.is_file():
+        return {"ok": False, "mode": mode, "detected": 0, "stopped": 0, "failed": 1, "items": [], "error": "utilitário ausente"}
+    state_path = base_dir / "ops" / "data" / "orphan-bots.json"
+    args = ["-Mode", mode, "-BaseDir", str(base_dir), "-StatePath", str(state_path)]
+    if log_name:
+        args.extend(["-LogPath", str(base_dir / "logs" / log_name)])
+    result = run_powershell(script, args, timeout=60)
+    try:
+        # The complete result may exceed run_powershell's diagnostic stdout tail.
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload["ok"] = bool(payload.get("ok")) and bool(result.get("ok"))
+            if not result.get("ok") and result.get("error"):
+                payload.setdefault("error", result.get("error"))
+            return payload
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    try:
+        lines = [line for line in str(result.get("stdout") or "").splitlines() if line.strip()]
+        payload = json.loads(lines[-1]) if lines else {}
+        if isinstance(payload, dict):
+            payload["ok"] = bool(payload.get("ok")) and bool(result.get("ok"))
+            return payload
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {"ok": False, "mode": mode, "detected": 0, "stopped": 0, "failed": 1, "items": [], "error": result.get("error") or result.get("stderr") or "varredura sem JSON"}
+
+
+def _public_orphan_bot_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    public_items: list[dict[str, Any]] = []
+    source_items = [] if payload.get("mode") == "scan" and not payload.get("ok") else payload.get("items") or []
+    for raw in source_items:
+        if not isinstance(raw, dict) or raw.get("classification") != "orphan":
+            continue
+        public_items.append(
+            {
+                key: raw.get(key)
+                for key in (
+                    "pid", "parentPid", "environment", "release", "activeRelease",
+                    "mode", "creationDate", "classification", "reason", "result",
+                )
+            }
+        )
+    return {
+        "ok": bool(payload.get("ok")),
+        "mode": payload.get("mode"),
+        "scannedAt": payload.get("scannedAt"),
+        "detected": len(public_items),
+        "stopped": int(payload.get("stopped") or 0),
+        "failed": int(payload.get("failed") or 0),
+        "items": public_items,
+        **({"error": str(payload.get("error"))} if payload.get("error") else {}),
+    }
+
+
+def run_orphan_bot_scan(config: dict[str, Any]) -> dict[str, Any]:
+    """Return a fresh, sanitized list of currently running orphan bots."""
+    with _ORPHAN_BOT_LOCK:
+        return _public_orphan_bot_payload(_run_orphan_bot_tool(config, "scan", log_name=""))
+
+
+def run_orphan_bot_cleanup(config: dict[str, Any], *, log_name: str = "orphan-bots.log") -> dict[str, Any]:
+    """Best-effort host-wide orphan cleanup shared by deploy/restart actions."""
+    with _ORPHAN_BOT_LOCK:
+        return _run_orphan_bot_tool(config, "cleanup", log_name=log_name)
+
+
+def action_cleanup_orphan_bots(config: dict[str, Any]) -> dict[str, Any]:
+    """Stop every revalidated orphan and return the post-cleanup live state."""
+    with _ORPHAN_BOT_LOCK:
+        cleanup = _run_orphan_bot_tool(config, "cleanup")
+        live = _run_orphan_bot_tool(config, "scan", log_name="")
+    public_live = _public_orphan_bot_payload(live)
+    failed = int(cleanup.get("failed") or 0)
+    return {
+        **public_live,
+        "ok": bool(cleanup.get("ok")) and bool(live.get("ok")) and failed == 0,
+        "action": "cleanup-orphan-bots",
+        "detectedBefore": int(cleanup.get("detected") or 0),
+        "stopped": int(cleanup.get("stopped") or 0),
+        "failed": failed,
+        "attempts": _public_orphan_bot_payload(cleanup).get("items", []),
+        **({"error": cleanup.get("error")} if cleanup.get("error") else {}),
+    }
+
+
 def action_rollback(
     config: dict[str, Any],
     env_name: str,
@@ -249,6 +393,10 @@ def action_rollback(
     target_sha: str = "",
     reason: str = "console",
 ) -> dict[str, Any]:
+    disabled = require_env_enabled(config, env_name)
+    if disabled:
+        return disabled
+
     base_dir = get_base_dir(config)
     if is_deploy_busy(base_dir, env_name):
         return {"ok": False, "error": "Deploy em andamento neste ambiente."}
@@ -276,6 +424,10 @@ def action_cancel_deploy(
     requested_by: str = "console",
 ) -> dict[str, Any]:
     """Cancela deploy em curso: mata o pipeline, libera o ambiente para novo redeploy."""
+    disabled = require_env_enabled(config, env_name)
+    if disabled:
+        return disabled
+
     base_dir = get_base_dir(config)
     state_before = load_deploy_state(base_dir, env_name)
     previous_run_id = str(state_before.get("runId") or "")
@@ -336,6 +488,10 @@ def action_redeploy(
     async_mode: bool = False,
     promote_source: str = "",
 ) -> dict[str, Any]:
+    disabled = require_env_enabled(config, env_name)
+    if disabled:
+        return disabled
+
     base_dir = get_base_dir(config)
     if is_deploy_busy(base_dir, env_name):
         return {"ok": False, "error": "Deploy em andamento neste ambiente."}
@@ -391,7 +547,7 @@ def action_redeploy(
         }
 
     run_id = f"console-{secrets.token_hex(6)}"
-    script = base_dir / "ops" / "deploy" / "deploy_pipeline.ps1"
+    script = base_dir / "ops" / "deploy" / "run_pipeline_locked.ps1"
     args = [
         "-Environment",
         env_name,
@@ -409,7 +565,17 @@ def action_redeploy(
         extra_env["PPLID_PROMOTE_SOURCE"] = promote_source.strip().upper()
 
     if async_mode:
-        run_powershell_async(script, args, extra_env=extra_env or None)
+        def _on_complete(result: dict[str, Any]) -> None:
+            if result.get("exitCode") == 2:
+                # Mutex held — surface as busy without leaving a failed deploy state
+                pass
+
+        run_powershell_async(
+            script,
+            args,
+            extra_env=extra_env or None,
+            on_complete=_on_complete,
+        )
         return {
             "ok": True,
             "accepted": True,
@@ -419,6 +585,14 @@ def action_redeploy(
         }
 
     result = run_powershell(script, args, timeout=2400, extra_env=extra_env or None)
+    if result.get("exitCode") == 2:
+        return {
+            "ok": False,
+            "error": "Deploy em andamento neste ambiente (mutex).",
+            "exitCode": 2,
+            "targetSha": sha,
+            "runId": run_id,
+        }
     state = load_deploy_state(base_dir, env_name)
     return {**result, "targetSha": sha, "activeSha": state.get("activeSha"), "runId": run_id}
 
@@ -427,6 +601,10 @@ def action_clear_block_and_redeploy(
     config: dict[str, Any],
     env_name: str,
 ) -> dict[str, Any]:
+    disabled = require_env_enabled(config, env_name)
+    if disabled:
+        return disabled
+
     base_dir = get_base_dir(config)
     if is_deploy_busy(base_dir, env_name):
         return {"ok": False, "error": "Deploy em andamento neste ambiente."}
@@ -448,6 +626,12 @@ def action_promote_cross_env(
     source_env: str,
     target_env: str,
 ) -> dict[str, Any]:
+    for name in (source_env, target_env):
+        disabled = require_env_enabled(config, name)
+        if disabled:
+            disabled["error"] = f"{name}: {ENV_DISABLED_ERROR}"
+            return disabled
+
     base_dir = get_base_dir(config)
     if is_deploy_busy(base_dir, target_env):
         return {"ok": False, "error": f"Deploy em andamento em {target_env}."}
@@ -481,11 +665,172 @@ def action_promote_cross_env(
     )
 
 
+def set_env_enabled(
+    config: dict[str, Any],
+    env_name: str,
+    enabled: bool,
+    *,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Persist ENV.enabled in env.config.json and update in-memory config."""
+    if env_name not in ENV_ORDER:
+        return {"ok": False, "error": "Ambiente invalido."}
+
+    env_cfg = config.get(env_name)
+    if not isinstance(env_cfg, dict):
+        return {"ok": False, "error": "Ambiente invalido."}
+
+    path = Path(config_path) if config_path else get_env_config_path(config)
+    if not path.is_file():
+        return {"ok": False, "error": f"env.config.json nao encontrado: {path}"}
+
+    try:
+        disk = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"Falha ao ler env.config.json: {exc}"}
+
+    if env_name not in disk or not isinstance(disk[env_name], dict):
+        return {"ok": False, "error": f"Bloco {env_name} ausente em env.config.json."}
+
+    disk[env_name]["enabled"] = bool(enabled)
+    try:
+        path.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError as exc:
+        return {"ok": False, "error": f"Falha ao gravar env.config.json: {exc}"}
+
+    env_cfg["enabled"] = bool(enabled)
+    return {
+        "ok": True,
+        "environment": env_name,
+        "enabled": bool(enabled),
+        "path": str(path),
+    }
+
+
+def _can_disable_auth_env(config: dict[str, Any], env_name: str) -> dict[str, Any] | None:
+    """Block disabling authEnv when bootstrap auth is off (avoids lockout)."""
+    ops_console = config.get("opsConsole") or {}
+    auth_env = str(ops_console.get("authEnv") or "MAIN").upper()
+    if env_name != auth_env:
+        return None
+    bootstrap = ops_console.get("bootstrapAuth") or {}
+    if bool(bootstrap.get("enabled")):
+        return None
+    return {
+        "ok": False,
+        "error": (
+            f"Nao e possivel desativar {env_name}: e o authEnv do ops-console "
+            "e bootstrapAuth esta desligado. Ative bootstrapAuth ou troque authEnv."
+        ),
+    }
+
+
+def action_disable_environment(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    if env_name not in ENV_ORDER:
+        return {"ok": False, "error": "Ambiente invalido."}
+
+    auth_block = _can_disable_auth_env(config, env_name)
+    if auth_block:
+        return auth_block
+
+    base_dir = get_base_dir(config)
+    if is_deploy_busy(base_dir, env_name):
+        return {"ok": False, "error": "Deploy em andamento neste ambiente."}
+
+    if not is_env_enabled(config, env_name):
+        # Still ensure processes are stopped.
+        env_cfg = config.get(env_name, {})
+        repo_dir = Path(env_cfg.get("repoDir", ""))
+        stop_script = repo_dir / "scripts" / "deploy" / "stop_env.ps1"
+        if stop_script.is_file():
+            run_powershell(stop_script, ["-Environment", env_name], timeout=120)
+        return {
+            "ok": True,
+            "action": "disable",
+            "environment": env_name,
+            "enabled": False,
+            "alreadyDisabled": True,
+            "message": f"Ambiente {env_name} ja estava desativado.",
+        }
+
+    env_cfg = config.get(env_name, {})
+    repo_dir = Path(env_cfg.get("repoDir", ""))
+    stop_script = repo_dir / "scripts" / "deploy" / "stop_env.ps1"
+    stop = run_powershell(stop_script, ["-Environment", env_name], timeout=120)
+    if not stop.get("ok"):
+        return {
+            "ok": False,
+            "error": stop.get("error") or f"Falha ao parar {env_name}.",
+            "exitCode": stop.get("exitCode"),
+            "stderr": stop.get("stderr"),
+        }
+
+    persisted = set_env_enabled(config, env_name, False, config_path=config_path)
+    if not persisted.get("ok"):
+        return persisted
+
+    return {
+        "ok": True,
+        "action": "disable",
+        "environment": env_name,
+        "enabled": False,
+        "message": f"Ambiente {env_name} desativado. Watch/deploy/probes pausados.",
+    }
+
+
+def action_enable_environment(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    if env_name not in ENV_ORDER:
+        return {"ok": False, "error": "Ambiente invalido."}
+
+    base_dir = get_base_dir(config)
+    if is_deploy_busy(base_dir, env_name):
+        return {"ok": False, "error": "Deploy em andamento neste ambiente."}
+
+    persisted = set_env_enabled(config, env_name, True, config_path=config_path)
+    if not persisted.get("ok"):
+        return persisted
+
+    env_cfg = config.get(env_name, {})
+    repo_dir = Path(env_cfg.get("repoDir", ""))
+    start_script = repo_dir / "scripts" / "deploy" / "start_env.ps1"
+    start = run_powershell(start_script, ["-Environment", env_name], timeout=300)
+    if not start.get("ok"):
+        return {
+            "ok": False,
+            "error": start.get("error") or f"Flag ativada, mas falha ao iniciar {env_name}.",
+            "enabled": True,
+            "exitCode": start.get("exitCode"),
+            "stderr": start.get("stderr"),
+        }
+
+    return {
+        "ok": True,
+        "action": "enable",
+        "environment": env_name,
+        "enabled": True,
+        "message": f"Ambiente {env_name} ativado e iniciado.",
+    }
+
+
 def action_restart_service(
     config: dict[str, Any],
     env_name: str,
     service: str,
 ) -> dict[str, Any]:
+    disabled = require_env_enabled(config, env_name)
+    if disabled:
+        return disabled
+
     base_dir = get_base_dir(config)
     if is_deploy_busy(base_dir, env_name):
         return {"ok": False, "error": "Deploy em andamento neste ambiente."}
@@ -497,12 +842,15 @@ def action_restart_service(
     if service not in ("backend", "frontend", "all"):
         return {"ok": False, "error": "Servico invalido (backend|frontend|all)."}
 
+    cleanup = run_orphan_bot_cleanup(config, log_name=f"restart-{env_name.lower()}.log")
+
     if service == "all":
         stop = run_powershell(deploy_script / "stop_env.ps1", ["-Environment", env_name])
         if not stop["ok"]:
-            return stop
+            return {**stop, "orphanBots": cleanup}
         time.sleep(2)
-        return run_powershell(deploy_script / "start_env.ps1", ["-Environment", env_name])
+        started = run_powershell(deploy_script / "start_env.ps1", ["-Environment", env_name])
+        return {**started, "orphanBots": cleanup}
 
     env_cfg = config.get(env_name, {})
     port = env_cfg.get("backendPort") if service == "backend" else env_cfg.get("frontendPort")
@@ -519,7 +867,14 @@ def action_restart_service(
         timeout=30,
     )
     time.sleep(1)
-    return run_powershell(deploy_script / "start_env.ps1", ["-Environment", env_name])
+
+    start_name = "start_backend.ps1" if service == "backend" else "start_frontend.ps1"
+    start_script = deploy_script / start_name
+    if start_script.is_file():
+        started = run_powershell(start_script, ["-Environment", env_name])
+    else:
+        started = run_powershell(deploy_script / "start_env.ps1", ["-Environment", env_name])
+    return {**started, "orphanBots": cleanup}
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -681,6 +1036,12 @@ def ensure_shared_env_seeded(config: dict[str, Any], env_name: str) -> None:
                 encoding="utf-8",
             )
 
+    # Garante VITE_* alinhadas as portas de infraestrutura.
+    try:
+        sync_derived_vite_env(config, env_name)
+    except Exception:
+        pass
+
 
 def mirror_shared_env_to_current(config: dict[str, Any], env_name: str) -> None:
     backend_shared, frontend_shared = get_env_paths(config, env_name)
@@ -715,6 +1076,11 @@ def build_env_payload(config: dict[str, Any], env_name: str) -> dict[str, Any]:
         "frontendMeta": file_meta(frontend_path),
         "backend": mask_env_vars(backend),
         "frontend": mask_env_vars(frontend),
+        "derivedFrontendKeys": list(DERIVED_FRONTEND_ENV_KEYS),
+        "infra": {
+            "backendPort": int(env_cfg.get("backendPort") or 0),
+            "frontendPort": int(env_cfg.get("frontendPort") or 0),
+        },
     }
 
 
@@ -760,13 +1126,22 @@ def update_env_vars(
     env_name: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    disabled = require_env_enabled(config, env_name)
+    if disabled:
+        raise ValueError(disabled["error"])
+
     ensure_shared_env_seeded(config, env_name)
     backend_path, frontend_path = get_env_paths(config, env_name)
     backend_updates = payload.get("backend") or {}
-    frontend_updates = payload.get("frontend") or {}
+    frontend_updates = dict(payload.get("frontend") or {})
+    # Portas VITE_* sao derivadas de env.config.json — ignorar edicao manual.
+    for key in DERIVED_FRONTEND_ENV_KEYS:
+        frontend_updates.pop(key, None)
     remove = payload.get("remove") or {}
     backend_remove = remove.get("backend") or []
-    frontend_remove = remove.get("frontend") or []
+    frontend_remove = [
+        k for k in (remove.get("frontend") or []) if k not in DERIVED_FRONTEND_ENV_KEYS
+    ]
 
     if env_name == "MAIN":
         blocked_without_confirm = {"SECRET_KEY", "DEBUG"}
@@ -799,6 +1174,239 @@ def apply_env_vars(config: dict[str, Any], env_name: str) -> dict[str, Any]:
     return action_restart_service(config, env_name, "backend")
 
 
+def get_env_config_path(config: dict[str, Any] | None = None) -> Path:
+    """Caminho de ops/config/env.config.json (fonte de portas)."""
+    if config:
+        explicit = config.get("_configPath") or config.get("envConfigPath")
+        if explicit:
+            return Path(explicit)
+        base = get_base_dir(config)
+        candidate = base / "ops" / "config" / "env.config.json"
+        if candidate.is_file():
+            return candidate
+    default = Path("C:/PPLID/ops/config/env.config.json")
+    return default
+
+
+def derived_vite_vars(backend_port: int, frontend_port: int) -> dict[str, str]:
+    return {
+        "VITE_DEV_SERVER_PORT": str(frontend_port),
+        "VITE_BACKEND_PORT": str(backend_port),
+        "VITE_BACKEND_PROXY_TARGET": f"http://localhost:{backend_port}",
+    }
+
+
+def build_infra_payload(config: dict[str, Any], env_name: str) -> dict[str, Any]:
+    env_cfg = config.get(env_name) or {}
+    backend_port = int(env_cfg.get("backendPort") or 0)
+    frontend_port = int(env_cfg.get("frontendPort") or 0)
+    return {
+        "environment": env_name,
+        "backendPort": backend_port,
+        "frontendPort": frontend_port,
+        "configPath": str(get_env_config_path(config)),
+        "derivedVite": derived_vite_vars(backend_port, frontend_port),
+        "hint": (
+            "Estas portas controlam o start real (Django e vite preview --port). "
+            "VITE_DEV_SERVER_PORT / VITE_BACKEND_* sao derivadas automaticamente."
+        ),
+    }
+
+
+def _validate_port(value: Any, label: str) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} invalida.") from exc
+    if port < 1 or port > 65535:
+        raise ValueError(f"{label} deve estar entre 1 e 65535.")
+    return port
+
+
+def _collect_used_ports(config: dict[str, Any], *, exclude_env: str | None = None) -> dict[int, str]:
+    used: dict[int, str] = {}
+    ops_port = config.get("opsConsolePort")
+    if ops_port:
+        used[int(ops_port)] = "opsConsole"
+    for name in ENV_ORDER:
+        if exclude_env and name == exclude_env:
+            continue
+        env_cfg = config.get(name) or {}
+        for key, label in (("backendPort", "backend"), ("frontendPort", "frontend")):
+            raw = env_cfg.get(key)
+            if raw is None:
+                continue
+            used[int(raw)] = f"{name}.{label}"
+    return used
+
+
+def sync_derived_vite_env(config: dict[str, Any], env_name: str) -> None:
+    """Atualiza VITE_* derivadas em shared/frontend.env e espelha para current."""
+    env_cfg = config.get(env_name) or {}
+    backend_port = int(env_cfg.get("backendPort") or 0)
+    frontend_port = int(env_cfg.get("frontendPort") or 0)
+    if not backend_port or not frontend_port:
+        return
+    shared = get_shared_dir(config, env_name)
+    shared.mkdir(parents=True, exist_ok=True)
+    (shared / "media").mkdir(parents=True, exist_ok=True)
+    frontend_path = shared / "frontend.env"
+    write_env_file(
+        frontend_path,
+        derived_vite_vars(backend_port, frontend_port),
+        parse_env_file(frontend_path),
+    )
+    mirror_shared_env_to_current(config, env_name)
+
+
+def update_infra_ports(
+    config: dict[str, Any],
+    env_name: str,
+    payload: dict[str, Any],
+    *,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    disabled = require_env_enabled(config, env_name)
+    if disabled:
+        raise ValueError(disabled["error"])
+
+    env_cfg = config.get(env_name)
+    if not isinstance(env_cfg, dict):
+        raise ValueError("Ambiente invalido.")
+
+    old_backend = int(env_cfg.get("backendPort") or 0)
+    old_frontend = int(env_cfg.get("frontendPort") or 0)
+    backend_port = _validate_port(
+        payload.get("backendPort", old_backend),
+        "backendPort",
+    )
+    frontend_port = _validate_port(
+        payload.get("frontendPort", old_frontend),
+        "frontendPort",
+    )
+    if backend_port == frontend_port:
+        raise ValueError("backendPort e frontendPort devem ser diferentes.")
+
+    used = _collect_used_ports(config, exclude_env=env_name)
+    for port, owner in ((backend_port, "backendPort"), (frontend_port, "frontendPort")):
+        if port in used:
+            raise ValueError(f"Porta {port} ({owner}) ja em uso por {used[port]}.")
+
+    path = Path(config_path) if config_path else get_env_config_path(config)
+    if not path.is_file():
+        raise ValueError(f"env.config.json nao encontrado: {path}")
+
+    disk = json.loads(path.read_text(encoding="utf-8"))
+    if env_name not in disk or not isinstance(disk[env_name], dict):
+        raise ValueError(f"Bloco {env_name} ausente em env.config.json.")
+    disk[env_name]["backendPort"] = backend_port
+    disk[env_name]["frontendPort"] = frontend_port
+    path.write_text(json.dumps(disk, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    env_cfg["backendPort"] = backend_port
+    env_cfg["frontendPort"] = frontend_port
+    sync_derived_vite_env(config, env_name)
+
+    return {
+        "ok": True,
+        "environment": env_name,
+        "backendPort": backend_port,
+        "frontendPort": frontend_port,
+        "previous": {"backendPort": old_backend, "frontendPort": old_frontend},
+        "derivedVite": derived_vite_vars(backend_port, frontend_port),
+        "needsRestart": True,
+        "changed": {
+            "backend": backend_port != old_backend,
+            "frontend": frontend_port != old_frontend,
+        },
+    }
+
+
+def apply_infra_ports(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    previous: dict[str, Any] | None = None,
+    restart: str = "changed",
+) -> dict[str, Any]:
+    """Reinicia servicos apos troca de portas.
+
+    restart: 'changed' | 'backend' | 'frontend' | 'all'
+    """
+    disabled = require_env_enabled(config, env_name)
+    if disabled:
+        return disabled
+
+    env_cfg = config.get(env_name) or {}
+    prev = previous or {}
+    old_backend = int(prev.get("backendPort") or env_cfg.get("backendPort") or 0)
+    old_frontend = int(prev.get("frontendPort") or env_cfg.get("frontendPort") or 0)
+    new_backend = int(env_cfg.get("backendPort") or 0)
+    new_frontend = int(env_cfg.get("frontendPort") or 0)
+
+    backend_changed = old_backend != new_backend
+    frontend_changed = old_frontend != new_frontend
+
+    if restart == "all":
+        do_backend = do_frontend = True
+    elif restart == "backend":
+        do_backend, do_frontend = True, False
+    elif restart == "frontend":
+        do_backend, do_frontend = False, True
+    else:
+        do_backend = backend_changed
+        do_frontend = frontend_changed
+        if not do_backend and not do_frontend:
+            do_frontend = True
+
+    results: dict[str, Any] = {"ok": True, "backend": None, "frontend": None}
+
+    def _kill_port(port: int) -> None:
+        if not port:
+            return
+        ps_kill = (
+            f"$p={port}; Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | "
+            f"ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_kill],
+            capture_output=True,
+            timeout=30,
+        )
+
+    repo_dir = Path(env_cfg.get("repoDir", ""))
+    deploy_script = repo_dir / "scripts" / "deploy"
+
+    if do_backend:
+        _kill_port(old_backend)
+        _kill_port(new_backend)
+        time.sleep(1)
+        start_backend = deploy_script / "start_backend.ps1"
+        if start_backend.is_file():
+            results["backend"] = run_powershell(start_backend, ["-Environment", env_name])
+        else:
+            results["backend"] = action_restart_service(config, env_name, "backend")
+
+    if do_frontend:
+        _kill_port(old_frontend)
+        _kill_port(new_frontend)
+        time.sleep(1)
+        start_frontend = deploy_script / "start_frontend.ps1"
+        if start_frontend.is_file():
+            results["frontend"] = run_powershell(start_frontend, ["-Environment", env_name])
+        else:
+            results["frontend"] = action_restart_service(config, env_name, "frontend")
+
+    for key in ("backend", "frontend"):
+        part = results.get(key)
+        if isinstance(part, dict) and not part.get("ok", True):
+            results["ok"] = False
+            results["error"] = part.get("error") or f"Falha ao reiniciar {key}."
+            break
+
+    return results
+
+
 def _pg_connect_params(env_path: Path) -> dict[str, str] | None:
     env = parse_env_file(env_path)
     host = env.get("POSTGRES_HOST", "localhost")
@@ -811,19 +1419,127 @@ def _pg_connect_params(env_path: Path) -> dict[str, str] | None:
     return {"host": host, "port": port, "dbname": db, "user": user, "password": password}
 
 
+def _migrations_lock_for(env_name: str) -> threading.Lock:
+    with _MIGRATIONS_LOCKS_GUARD:
+        lock = _MIGRATIONS_LOCKS.get(env_name)
+        if lock is None:
+            lock = threading.Lock()
+            _MIGRATIONS_LOCKS[env_name] = lock
+        return lock
+
+
+def fetch_migrations_status(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    force: bool = False,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    """
+    Explicit showmigrations — cached >=5 min, single-flight per env.
+    Not called from health, overview-lite, or the periodic collector.
+    """
+    now = time.time()
+    if use_cache and not force:
+        cached = _MIGRATIONS_CACHE.get(env_name)
+        if cached and (now - cached[0]) < _MIGRATIONS_CACHE_TTL_SEC:
+            result = dict(cached[1])
+            result["fromCache"] = True
+            result["stale"] = False
+            return result
+
+    lock = _migrations_lock_for(env_name)
+    if not lock.acquire(blocking=False):
+        cached = _MIGRATIONS_CACHE.get(env_name)
+        if cached:
+            result = dict(cached[1])
+            result["fromCache"] = True
+            result["stale"] = True
+            result["inflight"] = True
+            return result
+        return {
+            "ok": False,
+            "pending": None,
+            "output": "",
+            "inflight": True,
+            "fromCache": False,
+            "error": "migrations probe in flight",
+        }
+
+    try:
+        if use_cache and not force:
+            cached = _MIGRATIONS_CACHE.get(env_name)
+            if cached and (time.time() - cached[0]) < _MIGRATIONS_CACHE_TTL_SEC:
+                result = dict(cached[1])
+                result["fromCache"] = True
+                return result
+
+        _MIGRATIONS_INFLIGHT[env_name] = True
+        base_dir = get_base_dir(config)
+        current = base_dir / "deploy" / env_name / "current" / "backend"
+        venv_python = current / ".venv" / "Scripts" / "python.exe"
+        if not venv_python.is_file():
+            result = {
+                "ok": False,
+                "pending": None,
+                "output": "venv python not found",
+                "fromCache": False,
+                "inflight": False,
+            }
+            _MIGRATIONS_CACHE[env_name] = (time.time(), result)
+            return result
+
+        try:
+            proc = subprocess.run(
+                [str(venv_python), "manage.py", "showmigrations", "--plan"],
+                cwd=str(current),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            output = (proc.stdout or "") + (proc.stderr or "")
+            pending = sum(1 for line in output.splitlines() if "[ ]" in line)
+            result = {
+                "ok": proc.returncode == 0,
+                "pending": pending,
+                "output": output[-3000:],
+                "fromCache": False,
+                "inflight": False,
+                "checkedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            result = {
+                "ok": False,
+                "pending": None,
+                "output": str(exc),
+                "fromCache": False,
+                "inflight": False,
+                "checkedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        _MIGRATIONS_CACHE[env_name] = (time.time(), result)
+        return result
+    finally:
+        _MIGRATIONS_INFLIGHT[env_name] = False
+        lock.release()
+
+
 def fetch_database_metrics(
     config: dict[str, Any],
     env_name: str,
     *,
     backend_reachable: bool | None = None,
     use_cache: bool = True,
+    include_migrations: bool = False,
 ) -> dict[str, Any]:
     cache_key = env_name
     now = time.time()
     if use_cache:
         cached = _DB_METRICS_CACHE.get(cache_key)
         if cached and (now - cached[0]) < _DB_METRICS_CACHE_TTL_SEC:
-            return cached[1]
+            result = dict(cached[1])
+            if include_migrations and not (result.get("migrations") or {}).get("checkedAt"):
+                result["migrations"] = fetch_migrations_status(config, env_name, use_cache=True)
+            return result
 
     backend_path, _ = get_env_paths(config, env_name)
     params = _pg_connect_params(backend_path)
@@ -861,28 +1577,15 @@ def fetch_database_metrics(
     except Exception:
         pass
 
-    base_dir = get_base_dir(config)
-    current = base_dir / "deploy" / env_name / "current" / "backend"
-    venv_python = current / ".venv" / "Scripts" / "python.exe"
-    run_migrations = backend_reachable is not False and venv_python.is_file()
-    if run_migrations:
-        try:
-            proc = subprocess.run(
-                [str(venv_python), "manage.py", "showmigrations", "--plan"],
-                cwd=str(current),
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            output = (proc.stdout or "") + (proc.stderr or "")
-            pending = sum(1 for line in output.splitlines() if "[ ]" in line)
-            result["migrations"] = {
-                "ok": proc.returncode == 0,
-                "pending": pending,
-                "output": output[-3000:],
-            }
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            result["migrations"] = {"ok": False, "pending": None, "output": str(exc)}
+    if include_migrations and backend_reachable is not False:
+        result["migrations"] = fetch_migrations_status(config, env_name, use_cache=use_cache)
+    else:
+        # Surface cached migrations if present, without spawning subprocess.
+        cached_mig = _MIGRATIONS_CACHE.get(env_name)
+        if cached_mig:
+            mig = dict(cached_mig[1])
+            mig["fromCache"] = True
+            result["migrations"] = mig
 
     if use_cache:
         _DB_METRICS_CACHE[cache_key] = (time.time(), result)
@@ -909,9 +1612,9 @@ def probe_frontend(port: int, timeout: float = 3.0) -> dict[str, Any]:
         return {"ok": False, "status": None}
 
 
-def probe_port_listening(port: int) -> bool:
+def probe_port_listening(port: int, timeout: float = 1.0) -> bool:
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
             return True
     except OSError:
         return False
@@ -921,36 +1624,94 @@ def build_availability_extended(
     runtime: dict[str, Any],
     env_cfg: dict[str, Any],
     db_metrics: dict[str, Any] | None = None,
+    *,
+    probe_io: bool = True,
 ) -> dict[str, Any]:
+    """
+    Build availability aggregate.
+
+    probe_io=False: use only runtime snapshot fields (overview-lite hot path).
+    Never mark offline solely because health timed out while the port is up.
+    """
     backend_port = int(env_cfg.get("backendPort") or 0)
     frontend_port = int(env_cfg.get("frontendPort") or 0)
     reachable = bool(runtime.get("reachable"))
-    backend_ok = reachable and runtime.get("status") in ("healthy", "degraded")
+    avail_class = str(runtime.get("availabilityClass") or "")
+    timed_out = bool(runtime.get("timedOut"))
+    consecutive = int(runtime.get("consecutiveFailures") or 0)
+
+    backend_port_up = runtime.get("backendPortUp")
+    frontend_port_up = runtime.get("frontendPortUp")
+
+    if probe_io:
+        if backend_port_up is None and backend_port:
+            backend_port_up = probe_port_listening(backend_port)
+        if frontend_port and frontend_port_up is None:
+            frontend_probe = probe_frontend(frontend_port)
+            frontend_ok = bool(frontend_probe.get("ok"))
+        elif frontend_port_up is not None:
+            frontend_ok = bool(frontend_port_up)
+        else:
+            frontend_ok = False
+    else:
+        frontend_ok = bool(frontend_port_up) if frontend_port_up is not None else False
+        if backend_port_up is None:
+            backend_port_up = reachable  # best effort from snapshot
+
+    backend_ok = bool(backend_port_up) and (
+        reachable and runtime.get("status") in ("healthy", "degraded")
+        or avail_class in ("stale", "saturated", "degraded")
+    )
+    # Port up + health timeout => saturated/degraded, not offline.
+    if timed_out and backend_port_up:
+        backend_ok = True
+
     db_ok = reachable and runtime.get("database") == "ok"
-    frontend_probe = probe_frontend(frontend_port) if frontend_port else {"ok": False}
+    if not db_ok and avail_class in ("stale", "saturated") and runtime.get("database") == "ok":
+        db_ok = True
+    if not db_ok:
+        if db_metrics and db_metrics.get("ok"):
+            db_ok = True
+        elif probe_io:
+            pg_port = int(env_cfg.get("postgresPort") or env_cfg.get("POSTGRES_PORT") or 5432)
+            db_ok = probe_port_listening(pg_port)
+
     components = runtime.get("components") or {}
     version = runtime.get("version")
-    version_ok = version and version != "unknown"
+    version_ok = bool(version and version != "unknown")
 
     availability = {
-        "backend": backend_ok and probe_port_listening(backend_port),
-        "frontend": frontend_probe.get("ok", False),
-        "database": db_ok,
+        "backend": bool(backend_ok),
+        "frontend": frontend_ok,
+        "database": bool(db_ok),
         "version": version_ok,
         "falhas": components.get("falhas", "skip"),
+        "availabilityClass": avail_class or None,
+        "backendPortUp": backend_port_up,
+        "frontendPortUp": frontend_port_up if frontend_port_up is not None else frontend_ok,
+        "stale": bool(runtime.get("stale")),
+        "ageMs": runtime.get("ageMs"),
+        "consecutiveFailures": consecutive,
     }
 
     if db_metrics and db_metrics.get("ok"):
         conns = db_metrics.get("connections") or {}
         availability["dbConnections"] = conns.get("total", 0)
 
-    healthy_count = sum(1 for k in ("backend", "frontend", "database") if availability.get(k))
-    if healthy_count == 3 and version_ok:
-        aggregate = "healthy"
-    elif healthy_count == 0 or not availability.get("backend"):
-        aggregate = "unhealthy"
+    if avail_class == "offline" or (backend_port_up is False and consecutive >= 3 and not reachable):
+        aggregate = "offline"
+    elif avail_class == "saturated" or (timed_out and backend_port_up):
+        aggregate = "saturated"
+    elif avail_class == "stale" or runtime.get("stale"):
+        aggregate = "stale"
     else:
-        aggregate = "degraded"
+        healthy_count = sum(1 for k in ("backend", "frontend", "database") if availability.get(k))
+        if healthy_count == 3 and version_ok:
+            aggregate = "healthy"
+        elif healthy_count == 0 or not availability.get("backend"):
+            aggregate = "unhealthy"
+        else:
+            aggregate = "degraded"
 
     return {"aggregate": aggregate, "components": availability}
 
@@ -1335,8 +2096,7 @@ def get_ops_store_db_path(base_dir: Path) -> Path | None:
         db_raw = store.get("path")
         if not db_raw:
             return None
-        db_path = Path(str(db_raw))
-        return db_path if db_path.is_file() else None
+        return Path(str(db_raw))
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -1353,6 +2113,23 @@ def _read_lines_from_offset(path: Path, offset: int = 0, limit: int = 500) -> tu
         return chunk, total
     except OSError:
         return [], offset
+
+
+def _format_deploy_log_display_ts(logged_at: str) -> str:
+    """Normalize SQLite ISO timestamps to file-log style for UI parsers."""
+    raw = str(logged_at or "").strip()
+    if not raw:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone()
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", raw):
+            return raw[:19]
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _load_log_chunk_from_sqlite(
@@ -1383,7 +2160,8 @@ def _load_log_chunk_from_sqlite(
     next_offset = since_id
     for row in rows:
         next_offset = max(next_offset, int(row.get("id") or 0))
-        text = f"[{row.get('logged_at', '')}] [{row.get('level', 'INFO')}] {row.get('message', '')}"
+        display_ts = _format_deploy_log_display_ts(str(row.get("logged_at") or ""))
+        text = f"[{display_ts}] [{row.get('level', 'INFO')}] {row.get('message', '')}"
         lines.append(redact_log_line(text))
         parsed.append(parse_log_line(lines[-1]))
     return {"lines": lines, "parsed": parsed, "nextOffset": next_offset}

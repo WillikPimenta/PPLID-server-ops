@@ -20,10 +20,11 @@ $opsRoot = Split-Path $PSScriptRoot -Parent
 
 Initialize-PplidGitSafeDirectories
 Initialize-PplidDeployLayout -Environment $Environment
+& (Join-Path $opsRoot "lib\orphan_bot_cleanup.ps1") -Mode cleanup -BaseDir (Split-Path $opsRoot -Parent) -LogPath (Join-Path (Get-PplidLogDir) "orphan-bots.log") | Out-Null
 
 $spec = Get-PplidEnvSpec -Environment $Environment
 $paths = Get-PplidDeployEnvPaths -Environment $Environment
-$logFile = Join-Path (Get-PplidLogDir) "PPLID_$Environment.log"
+. (Join-Path $opsRoot "lib\ops_store.ps1")
 
 function Invoke-PplidDeployScript {
     param(
@@ -82,8 +83,7 @@ function Invoke-EnsureDatabaseSafe {
 }
 
 function Log([string]$msg) {
-    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $logFile -Value "[$ts] [bootstrap_first_release] $msg" -Encoding UTF8
+    Write-OpsEnvLog -Environment $Environment -Service "bootstrap" -Message "[bootstrap_first_release] $msg"
     Write-Host $msg
 }
 

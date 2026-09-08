@@ -5,13 +5,26 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$opsRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path $opsRoot "lib\paths.ps1")
 . (Join-Path $PSScriptRoot "lib\deploy_paths.ps1")
 . (Join-Path $PSScriptRoot "lib\deploy_state.ps1")
 . (Join-Path $PSScriptRoot "lib\deploy_lock.ps1")
 . (Join-Path $PSScriptRoot "lib\env_spec.ps1")
 . (Join-Path $PSScriptRoot "lib\shared_env.ps1")
-. (Join-Path (Split-Path $PSScriptRoot -Parent) "lib\version_drift.ps1")
-. (Join-Path (Split-Path $PSScriptRoot -Parent) "lib\port_utils.ps1")
+. (Join-Path $opsRoot "lib\version_drift.ps1")
+. (Join-Path $opsRoot "lib\port_utils.ps1")
+
+if (-not (Test-PplidEnvironmentEnabled -Environment $Environment -ScriptRoot $opsRoot)) {
+    Write-Host "Ambiente $Environment desativado (enabled=false); bootstrap ignorado."
+    exit 0
+}
+
+try {
+    & (Join-Path $opsRoot "lib\orphan_bot_cleanup.ps1") -Mode cleanup -BaseDir (Split-Path $opsRoot -Parent) -LogPath (Join-Path (Get-PplidLogDir) "orphan-bots.log") | Out-Null
+} catch {
+    Write-Host "orphan_bot_cleanup falhou (nao bloqueia bootstrap): $($_.Exception.Message)"
+}
 
 $spec = Get-PplidEnvSpec -Environment $Environment
 $paths = Get-PplidDeployEnvPaths -Environment $Environment

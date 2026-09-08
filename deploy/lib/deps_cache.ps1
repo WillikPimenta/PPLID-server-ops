@@ -155,18 +155,20 @@ function Get-PipOutputNewLines {
         [int]$AfterLine = 0
     )
 
+    # Retorna UM objeto (hashtable). return $lines, $n polui o pipeline do caller
+    # (Object[] misturado com o resultado de Invoke-PplidPipInstall).
     if (-not (Test-Path $OutputFile)) {
-        return @(), $AfterLine
+        return @{ Lines = @(); NextOffset = [int]$AfterLine }
     }
     try {
         $all = @(Get-Content -Path $OutputFile -ErrorAction Stop)
         if ($AfterLine -ge $all.Count) {
-            return @(), $all.Count
+            return @{ Lines = @(); NextOffset = [int]$all.Count }
         }
         $new = @($all | Select-Object -Skip $AfterLine)
-        return $new, $all.Count
+        return @{ Lines = $new; NextOffset = [int]$all.Count }
     } catch {
-        return @(), $AfterLine
+        return @{ Lines = @(); NextOffset = [int]$AfterLine }
     }
 }
 
@@ -256,6 +258,8 @@ function Write-PipOutputToDeployLog {
     )
 
     if (-not $Environment -or -not $RunId -or -not $Lines) { return }
+
+    $entries = @()
     foreach ($line in $Lines) {
         if (-not $line) { continue }
         $trimmed = $line.Trim()
@@ -263,7 +267,34 @@ function Write-PipOutputToDeployLog {
         $level = "INFO"
         if ($trimmed -match '(?i)^ERROR:|^CRITICAL:') { $level = "ERROR" }
         elseif ($trimmed -match '(?i)^WARNING:|^WARN:') { $level = "WARN" }
-        Write-DeployLogEntry -Environment $Environment -RunId $RunId -Level $level -Message $trimmed -LogName $LogName
+        $safe = Protect-DeployLogText -Text $trimmed
+        $entries += @{ level = $level; message = $safe }
+
+        # Always mirror high-volume pip output to file so UI stays live even if SQLite lags
+        $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $runDir = Get-PplidDeployRunDir -Environment $Environment -RunId $RunId
+        if (-not (Test-Path $runDir)) {
+            New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+        }
+        $logFile = Join-Path $runDir $LogName
+        try {
+            Add-DeployLogLineToFile -LogFile $logFile -Line "[$ts] [$level] $safe"
+        } catch { }
+    }
+
+    if ($entries.Count -eq 0) { return }
+
+    if ($script:OpsStoreEnabled) {
+        try {
+            Add-OpsDeployLogLines -Environment $Environment -RunId $RunId -LogName $LogName -Entries $entries
+        } catch {
+            # Fall back to per-line only if batch fails
+            foreach ($e in $entries) {
+                try {
+                    Add-OpsDeployLogLine -Environment $Environment -RunId $RunId -LogName $LogName -Level $e.level -Message $e.message
+                } catch { }
+            }
+        }
     }
 }
 
@@ -273,7 +304,7 @@ function Install-PplidAutomacoesEditable {
         [string]$ReleaseDir,
         [Parameter(Mandatory = $true)]
         [string]$VenvPython,
-        [int]$TimeoutSec = 180,
+        [int]$TimeoutSec = 900,
         [ValidateSet("MAIN", "DEV", "HOM")][string]$Environment = "",
         [string]$RunId = "",
         [string]$LogName = "build.log"
@@ -281,11 +312,12 @@ function Install-PplidAutomacoesEditable {
 
     $automacoesDir = Join-Path $ReleaseDir "automacoes"
     if (-not (Test-Path (Join-Path $automacoesDir "pyproject.toml"))) {
-        return @{ exitCode = -1; outputTail = @(); command = ""; errorDetail = $null }
+        return ,@{ exitCode = -1; outputTail = @(); command = ""; errorDetail = $null }
     }
     Initialize-PplidPipCache | Out-Null
-    return Invoke-PplidPipInstall -VenvPython $VenvPython -Args @("-e", $automacoesDir) -TimeoutSec $TimeoutSec `
+    $pipResult = Invoke-PplidPipInstall -VenvPython $VenvPython -Args @("-e", $automacoesDir) -TimeoutSec $TimeoutSec `
         -Environment $Environment -RunId $RunId -LogName $LogName
+    return ,$pipResult
 }
 
 function Invoke-PplidPipInstall {
@@ -325,12 +357,14 @@ function Invoke-PplidPipInstall {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
 
     while ($true) {
-        $newLines, $lineOffset = Get-PipOutputNewLines -OutputFile $outputFile -AfterLine $lineOffset
-        $errLines, $errOffset = Get-PipOutputNewLines -OutputFile $stderrFile -AfterLine $errOffset
-        $combined = @($newLines) + @($errLines)
+        $outChunk = Get-PipOutputNewLines -OutputFile $outputFile -AfterLine $lineOffset
+        $errChunk = Get-PipOutputNewLines -OutputFile $stderrFile -AfterLine $errOffset
+        $lineOffset = [int]$outChunk.NextOffset
+        $errOffset = [int]$errChunk.NextOffset
+        $combined = @($outChunk.Lines) + @($errChunk.Lines)
         if ($combined.Count -gt 0) {
-            Write-PipOutputToDeployLog -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined
-            Write-PipProgressMarkers -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined
+            Write-PipOutputToDeployLog -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined | Out-Null
+            Write-PipProgressMarkers -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined | Out-Null
         }
 
         if ($proc.WaitForExit(800)) {
@@ -366,17 +400,17 @@ function Invoke-PplidPipInstall {
 
     try { $proc.Dispose() } catch { }
 
-    $newLines, $lineOffset = Get-PipOutputNewLines -OutputFile $outputFile -AfterLine $lineOffset
-    $errLines, $errOffset = Get-PipOutputNewLines -OutputFile $stderrFile -AfterLine $errOffset
-    $combined = @($newLines) + @($errLines)
+    $outChunk = Get-PipOutputNewLines -OutputFile $outputFile -AfterLine $lineOffset
+    $errChunk = Get-PipOutputNewLines -OutputFile $stderrFile -AfterLine $errOffset
+    $combined = @($outChunk.Lines) + @($errChunk.Lines)
     if ($combined.Count -gt 0) {
-        Write-PipOutputToDeployLog -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined
-        Write-PipProgressMarkers -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined
+        Write-PipOutputToDeployLog -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined | Out-Null
+        Write-PipProgressMarkers -Environment $Environment -RunId $RunId -LogName $LogName -Lines $combined | Out-Null
     }
 
     $tailOut = @(Get-PipOutputTail -OutputFile $outputFile -Tail 20)
     $tailErr = @(Get-PipOutputTail -OutputFile $stderrFile -Tail 20)
-    $tail = $tailOut + $tailErr
+    $tail = @($tailOut) + @($tailErr)
     if ($tail.Count -gt 20) { $tail = $tail[-20..-1] }
 
     if ($exitCode -eq 124 -and $Environment -and $RunId -and ((Test-Path $outputFile) -or (Test-Path $stderrFile))) {
@@ -392,7 +426,7 @@ function Invoke-PplidPipInstall {
                 Copy-Item -Path $stderrFile -Destination (Join-Path $runDir "deps_backend.pip.err.log") -Force
             }
             Write-DeployLogWarn -Environment $Environment -RunId $RunId `
-                -Message "pip timeout: log completo preservado em deps_backend.pip.log" -LogName $LogName
+                -Message "pip timeout: log completo preservado em deps_backend.pip.log" -LogName $LogName | Out-Null
         } catch { }
     }
 
@@ -409,7 +443,8 @@ function Invoke-PplidPipInstall {
         $errorDetail.command = $cmdDisplay
     }
 
-    return @{
+    # Virgula: forca um unico objeto no pipeline (evita Object[] no caller).
+    return ,@{
         exitCode    = $exitCode
         outputTail  = $tail
         command     = $cmdDisplay

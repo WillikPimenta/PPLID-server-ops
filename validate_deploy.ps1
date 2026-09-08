@@ -19,7 +19,13 @@ function Add-Result {
 . (Join-Path $opsRoot "deploy\lib\deploy_state.ps1")
 . (Join-Path $opsRoot "deploy\lib\deploy_lock.ps1")
 
-foreach ($env in @("MAIN", "DEV", "HOM")) {
+$envList = @(Get-PplidEnabledEnvironments -ScriptRoot $opsRoot)
+if ($envList.Count -eq 0) {
+    Write-Host "Nenhum ambiente habilitado; validate_deploy ignorado."
+    exit 0
+}
+
+foreach ($env in $envList) {
     $paths = Get-PplidDeployEnvPaths -Environment $env
     Add-Result "layout_$env" (Test-Path $paths.StateFile) $paths.StateFile
     $state = Get-DeployState -Environment $env
@@ -51,7 +57,8 @@ foreach ($env in @("MAIN", "DEV", "HOM")) {
 Add-Result "verify_stack" ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
 
 if (-not $Quick) {
-    $lock1 = Enter-DeployLock -Environment "DEV"
+    $lockEnv = $envList[0]
+    $lock1 = Enter-DeployLock -Environment $lockEnv
     $lock2 = $false
     if ($lock1) {
         $lockTestScript = Join-Path $env:TEMP "pplid_lock_test.ps1"
@@ -60,16 +67,16 @@ if (-not $Quick) {
 . '$opsRoot\deploy\lib\deploy_paths.ps1'
 . '$opsRoot\deploy\lib\deploy_state.ps1'
 . '$opsRoot\deploy\lib\deploy_lock.ps1'
-if (Enter-DeployLock -Environment DEV) { exit 1 } else { exit 0 }
+if (Enter-DeployLock -Environment $lockEnv) { exit 1 } else { exit 0 }
 "@ | Set-Content -Path $lockTestScript -Encoding UTF8
         $lock2Proc = Start-Process powershell -ArgumentList @(
             "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $lockTestScript
         ) -Wait -PassThru -WindowStyle Hidden
         $lock2 = ($lock2Proc.ExitCode -eq 1)
         Remove-Item -LiteralPath $lockTestScript -Force -ErrorAction SilentlyContinue
-        Exit-DeployLock -Environment "DEV"
+        Exit-DeployLock -Environment $lockEnv
     }
-    Add-Result "lock_exclusive_DEV" ($lock1 -and -not $lock2) "second=$lock2"
+    Add-Result "lock_exclusive_$lockEnv" ($lock1 -and -not $lock2) "second=$lock2"
 }
 
 $results | Format-Table -AutoSize

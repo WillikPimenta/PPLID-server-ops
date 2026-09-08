@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$opsRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot "lib\deploy_paths.ps1")
 . (Join-Path $PSScriptRoot "lib\deploy_state.ps1")
 . (Join-Path $PSScriptRoot "lib\junction.ps1")
@@ -22,9 +23,12 @@ $paths = Get-PplidDeployEnvPaths -Environment $Environment
 $deployScript = Join-Path $spec.RepoDir "scripts\deploy"
 $state = Get-DeployState -Environment $Environment
 
+$orphanResult = & (Join-Path $opsRoot "lib\orphan_bot_cleanup.ps1") -Mode cleanup -BaseDir (Split-Path $opsRoot -Parent) -LogPath (Join-Path (Get-PplidLogDir) "orphan-bots.log") 2>&1 | Select-Object -Last 1
+
 function Log([string]$msg) {
     Write-RunLog -Environment $Environment -RunId $RunId -Message $msg -LogName "rollback.log"
 }
+Log "orphan-bots cleanup: $orphanResult"
 
 $deployLib = Join-Path $deployScript "lib.ps1"
 if (Test-Path $deployLib) {

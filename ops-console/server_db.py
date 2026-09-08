@@ -691,7 +691,15 @@ def handle_db_request(
 
     try:
         if action == "metrics" and method == "GET":
-            return fetch_database_metrics(config, env_name), 200
+            include_mig = (query.get("migrations") or ["0"])[0] in ("1", "true", "yes")
+            return (
+                fetch_database_metrics(
+                    config,
+                    env_name,
+                    include_migrations=include_mig,
+                ),
+                200,
+            )
         if action == "tables" and method == "GET":
             return list_tables(config, env_name), 200
         if action == "schema" and table and method == "GET":

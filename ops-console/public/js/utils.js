@@ -2,10 +2,11 @@
 window.OpsConsole = window.OpsConsole || {};
 
 window.OpsConsole.ENV_ORDER = ["MAIN", "DEV", "HOM"];
-window.OpsConsole.REFRESH_MS = 2000;
-window.OpsConsole.LITE_REFRESH_MS = 2000;
+window.OpsConsole.REFRESH_MS = 5000;
+window.OpsConsole.LITE_REFRESH_MS = 5000;
 window.OpsConsole.FULL_REFRESH_MS = 30000;
 window.OpsConsole.DEPLOY_REFRESH_MS = 2000;
+window.OpsConsole.FETCH_TIMEOUT_MS = 8000;
 window.OpsConsole.THEME_STORAGE_KEY = "pplid-theme";
 
 window.OpsConsole.escapeHtml = function escapeHtml(text) {

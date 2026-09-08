@@ -17,6 +17,7 @@
       <header class="app-header" id="app-header">
         <div class="header-container">
           <div class="header-brand">
+            <button type="button" class="sidebar-toggle" id="sidebar-toggle" aria-label="Abrir navegação" aria-expanded="false">☰</button>
             <div class="brand-icon" aria-hidden="true">
               <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
                 <rect width="32" height="32" rx="6" fill="currentColor" />
@@ -92,30 +93,117 @@
       </div>
 
       <main class="app-main" id="app-main">
-        <div id="global-error" class="global-error hidden" role="alert"></div>
-        <div id="loading-panel" class="loading-panel">
-          <div class="loading-spinner"></div>
-          <p>Carregando status…</p>
-        </div>
-
-        <div id="dashboard" class="dashboard hidden">
-          <div id="view-deploy">
-            <div id="deploy-hero"></div>
-            <div id="deploy-kpi"></div>
-            <section class="ops-section monitor-section" aria-labelledby="summary-heading">
-              <div class="ops-section-head monitor-section-head">
-                <h3 id="summary-heading" class="ops-section-title monitor-section-title">Ambientes</h3>
-                <div class="deploy-section-actions">
-                  <button type="button" class="btn btn-primary btn-sm" id="btn-open-monitoring">Monitoramento</button>
-                </div>
+        <div class="app-body-layout">
+          <aside class="app-sidebar" id="app-sidebar" aria-label="Navegação principal">
+            <div class="sidebar-top">
+              <div class="sidebar-toolbar">
+                <span class="sidebar-title">Navegação</span>
+                <button type="button" class="sidebar-collapse" id="sidebar-collapse" aria-label="Recolher navegação" aria-controls="app-sidebar" aria-expanded="true" title="Recolher navegação">
+                  <span class="sidebar-collapse-icon" id="sidebar-collapse-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="m14.5 5-7 7 7 7" />
+                    </svg>
+                  </span>
+                </button>
               </div>
-              <p class="section-hint">Use <strong>Configuração</strong> para deploy e <strong>Histórico</strong> para ver eventos.</p>
-              <div id="env-summary" class="env-summary-grid"></div>
-            </section>
+              <nav class="sidebar-nav">
+                <a class="sidebar-link" href="/" data-sidebar-view="deploy" title="Visão geral">
+                  <span class="sidebar-link-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+                      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+                      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+                      <rect x="14" y="14" width="7" height="7" rx="1.5" />
+                    </svg>
+                  </span>
+                  <span>Visão geral</span>
+                </a>
+                <a class="sidebar-link" href="/host" data-sidebar-view="host" title="Host">
+                  <span class="sidebar-link-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="4" width="18" height="13" rx="2" />
+                      <path d="M8 21h8M12 17v4" />
+                      <path d="M7 8h.01M10 8h.01" stroke-width="2.4" />
+                    </svg>
+                  </span>
+                  <span>Host</span>
+                </a>
+                <a class="sidebar-link" href="/monitoring/incidents" data-sidebar-view="incidents" title="Incidentes">
+                  <span class="sidebar-link-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M10.3 4.2 2.7 18a2 2 0 0 0 1.75 3h15.1a2 2 0 0 0 1.75-3L13.7 4.2a2 2 0 0 0-3.4 0Z" />
+                      <path d="M12 9v5M12 18h.01" stroke-width="2.2" />
+                    </svg>
+                  </span>
+                  <span>Incidentes</span>
+                </a>
+                <a class="sidebar-link" href="/monitoring/latency" data-sidebar-view="performance" title="Desempenho">
+                  <span class="sidebar-link-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M3 12h4l2.5-6 5 12 2.5-6h4" />
+                    </svg>
+                  </span>
+                  <span>Desempenho</span>
+                </a>
+                <a class="sidebar-link" href="/monitoring/logs" data-sidebar-view="logs" title="Logs">
+                  <span class="sidebar-link-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M6 3h9l3 3v15H6z" />
+                      <path d="M14 3v4h4M9 12h6M9 16h6" />
+                    </svg>
+                  </span>
+                  <span>Logs</span>
+                </a>
+                <a class="sidebar-link" href="/monitoring/tv" target="_blank" rel="noopener" title="Abrir painel para TV">
+                  <span class="sidebar-link-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="4" width="18" height="13" rx="2" />
+                      <path d="m8 21 4-4 4 4M8 10h2l1.5-3 2.5 6 1.5-3H18" />
+                    </svg>
+                  </span>
+                  <span>Painel TV</span>
+                </a>
+                <a class="sidebar-link" href="/database/DEV" data-sidebar-view="database" title="Banco">
+                  <span class="sidebar-link-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <ellipse cx="12" cy="5" rx="8" ry="3" />
+                      <path d="M4 5v6c0 1.65 3.58 3 8 3s8-1.35 8-3V5" />
+                      <path d="M4 11v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" />
+                    </svg>
+                  </span>
+                  <span>Banco</span>
+                </a>
+              </nav>
+            </div>
+            <div class="sidebar-footer"><span class="sidebar-health-dot" aria-hidden="true"></span><span>Operação PPLID</span></div>
+          </aside>
+          <button type="button" class="sidebar-scrim hidden" id="sidebar-scrim" aria-label="Fechar navegação"></button>
+
+          <div class="app-content">
+            <div id="global-error" class="global-error hidden" role="alert"></div>
+            <div id="loading-panel" class="loading-panel">
+              <div class="loading-spinner"></div>
+              <p>Carregando status…</p>
+            </div>
+
+            <div id="dashboard" class="dashboard hidden">
+              <div id="view-deploy">
+                <div id="deploy-hero"></div>
+                <div id="deploy-kpi"></div>
+                <section class="ops-section monitor-section" aria-labelledby="summary-heading">
+                  <div class="ops-section-head monitor-section-head">
+                    <h3 id="summary-heading" class="ops-section-title monitor-section-title">Ambientes</h3>
+                  </div>
+                  <p class="section-hint">Status dos serviços, versão implantada e ações operacionais por ambiente.</p>
+                  <div id="env-summary" class="env-summary-grid"></div>
+                </section>
+              </div>
+              <div id="view-env" class="hidden"></div>
+              <div id="view-database" class="hidden"></div>
+              <div id="view-host" class="hidden"></div>
+              <div id="view-monitoring" class="hidden"></div>
+            </div>
           </div>
-          <div id="view-env" class="hidden"></div>
-          <div id="view-database" class="hidden"></div>
-          <div id="view-monitoring" class="hidden"></div>
         </div>
       </main>
 
@@ -181,20 +269,12 @@
     </aside>
 
     <script src="/js/utils.js"></script>
-    <script src="/js/ops-perf.js"></script>
+    <script src="/js/feature-loader.js"></script>
     <script src="/js/ops-ui.js"></script>
     <script src="/js/status.js"></script>
     <script src="/js/actions.js"></script>
     <script src="/js/router.js"></script>
-    <script src="/js/env-config.js"></script>
-    <script src="/js/database-explorer.js"></script>
     <script src="/js/history.js"></script>
-    <script src="/js/deploy-progress.js"></script>
-    <script src="/js/deploy-drawer.js"></script>
-    <script src="/js/filters.js"></script>
-    <script src="/js/drawer.js"></script>
-    <script src="/js/monitoring.js"></script>
-    <script src="/js/monitor-drawer.js"></script>
     <script src="/js/render.js"></script>
     <script src="/js/app.js"></script>
   </body>

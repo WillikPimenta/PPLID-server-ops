@@ -1,0 +1,16 @@
+{
+  "scenario": "before_estimate",
+  "note": "Pre-fix: build_overview probed 3 envs in parallel then again via dict.get(default=fetch_health(...)); frontend polled every 2s with setInterval overlap; collector had separate probes.",
+  "assumptions": {
+    "clients": 10,
+    "seconds": 15,
+    "interval_sec": 0.5,
+    "envs": 3,
+    "probes_per_overview": 6
+  },
+  "theoretical_backend_health_hits": 900,
+  "formula": "clients * (seconds/interval) * probes_per_overview = 10 * 30 * 6",
+  "overview_lite_blocking": "yes — synchronous HTTP up to 5s * 3 serial extras",
+  "showmigrations_on_health": "yes on DEV/HOM every probe",
+  "channel_timeout_sec": 600
+}

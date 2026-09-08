@@ -44,10 +44,11 @@ function Get-PplidPreservedActiveSha {
         $State = Get-DeployState -Environment $Environment
     }
 
+    # Prefer live junction/current over stale deploy-state (parallel promote can advance current)
     foreach ($candidate in @(
-            $State.activeSha,
-            $State.lastGoodSha,
             (Get-PplidCurrentReleaseSha -Environment $Environment),
+            $State.lastGoodSha,
+            $State.activeSha,
             (Get-PplidDeployedSha -Environment $Environment)
         )) {
         $sha = [string]$candidate

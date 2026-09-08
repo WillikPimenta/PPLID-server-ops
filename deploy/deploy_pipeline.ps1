@@ -23,7 +23,7 @@ $opsRoot = Split-Path $PSScriptRoot -Parent
 if (-not $RunId) { $RunId = New-DeployRunId }
 $spec = Get-PplidEnvSpec -Environment $Environment
 $repoDeploy = Join-Path $spec.RepoDir "scripts\deploy"
-$logFile = Join-Path (Get-PplidLogDir) "PPLID_$Environment.log"
+. (Join-Path $opsRoot "lib\ops_store.ps1")
 $startedAt = (Get-Date).ToString("o")
 $script:PipelineFailedStep = ""
 
@@ -73,8 +73,7 @@ if ($env:PPLID_PROMOTE_SOURCE) {
 }
 
 function Write-PipelineLog([string]$msg, [string]$Level = "INFO") {
-    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $logFile -Value "[$ts] $msg" -Encoding UTF8
+    Write-OpsEnvLog -Environment $Environment -Service "pipeline" -Message $msg
     Write-DeployLogEntry -Environment $Environment -RunId $RunId -Level $Level -Message $msg -LogName "pipeline.log"
 }
 
@@ -389,7 +388,10 @@ try {
     if (-not $preserveActive -and $oldActive) {
         $preserveActive = $oldActive
     }
-    $preserveGood = if ($state.lastGoodSha) { $state.lastGoodSha } else { $preserveActive }
+    $preserveGood = $preserveActive
+    if (-not $preserveGood -and $state.lastGoodSha) {
+        $preserveGood = $state.lastGoodSha
+    }
     Set-DeployState -Environment $Environment -Updates @{
         status        = "failed"
         lastError     = $err

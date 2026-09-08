@@ -19,13 +19,16 @@ const STATUS_META = {
   waiting: { label: "Aguardando", icon: "○", badgeClass: "waiting" },
   idle: { label: "Ocioso", icon: "○", badgeClass: "idle" },
   cancelled: { label: "Cancelado", icon: "–", badgeClass: "idle" },
+  disabled: { label: "Desativado", icon: "∅", badgeClass: "disabled" },
   unknown: { label: "Sem dados", icon: "?", badgeClass: "idle" },
 };
 
 window.OpsConsole.STATUS_META = STATUS_META;
 
 window.OpsConsole.phaseToStatusKey = function phaseToStatusKey(phase, envData) {
+  if (envData && envData.enabled === false) return "disabled";
   const p = phase || "idle";
+  if (p === "disabled") return "disabled";
   if (p === "deploying" || p === "building" || p === "validating" || p === "promoting") return "deploying";
   if (p === "deploy_pending") return "deploy_pending";
   if (p === "rolled_back") return "rolled_back";
@@ -83,6 +86,7 @@ window.OpsConsole.statusBadgeHtml = function statusBadgeHtml(statusKey, extraCla
 };
 
 window.OpsConsole.summaryStatusKey = function summaryStatusKey(envData) {
+  if (envData && envData.enabled === false) return "disabled";
   const ps = envData?.pipelineStatus;
   if (ps === "building" || ps === "validating" || ps === "promoting") {
     return ps;

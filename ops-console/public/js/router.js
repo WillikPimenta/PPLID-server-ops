@@ -70,6 +70,9 @@
       const env = (parts[1] || "DEV").toUpperCase();
       return { view: "database", env: OC.ENV_ORDER.includes(env) ? env : "DEV", query: {} };
     }
+    if (parts[0] === "host") {
+      return { view: "host", env: null, query };
+    }
     if (parts[0] === "monitoring") {
       const mon = OC.parseMonitoringRoute(parts, query);
       return {
@@ -85,6 +88,7 @@
   OC.buildAppPath = function buildAppPath(view, env, opts) {
     if (view === "env") return `/env/${env || "DEV"}`;
     if (view === "database") return `/database/${env || "DEV"}`;
+    if (view === "host") return "/host";
     if (view === "monitoring") {
       const tab = opts?.tab || OC.monitorState?.activeTab || "summary";
       const params = new URLSearchParams(opts?.query || {});
@@ -154,6 +158,7 @@
   };
 
   OC.renderRoute = function renderRoute() {
+    const previousRoute = OC.currentRoute;
     OC.currentRoute = OC.parseRoute();
     if (OC.currentRoute.view === "monitoring") {
       OC.monitorState = OC.monitorState || {};
@@ -173,24 +178,43 @@
     const deployView = document.getElementById("view-deploy");
     const envView = document.getElementById("view-env");
     const dbView = document.getElementById("view-database");
+    const hostView = document.getElementById("view-host");
     const monitorView = document.getElementById("view-monitoring");
 
     deployView?.classList.toggle("hidden", OC.currentRoute.view !== "deploy");
     envView?.classList.toggle("hidden", OC.currentRoute.view !== "env");
     dbView?.classList.toggle("hidden", OC.currentRoute.view !== "database");
+    hostView?.classList.toggle("hidden", OC.currentRoute.view !== "host");
     monitorView?.classList.toggle("hidden", OC.currentRoute.view !== "monitoring");
 
     OC.stopMonitoringRefresh?.();
+    OC.stopHostRefresh?.();
 
     const onMonitoring = OC.currentRoute.view === "monitoring";
+    const onHost = OC.currentRoute.view === "host";
     const wasMonitoring = OC._wasOnMonitoringView === true;
+    const wasHost = OC._wasOnHostView === true;
+    const monitoringRouteChanged =
+      previousRoute?.view === "monitoring" &&
+      onMonitoring &&
+      ((previousRoute.tab || "summary") !== (OC.currentRoute.tab || "summary") ||
+        (previousRoute.env || "") !== (OC.currentRoute.env || "") ||
+        JSON.stringify(previousRoute.query || {}) !== JSON.stringify(OC.currentRoute.query || {}));
     OC._wasOnMonitoringView = onMonitoring;
+    OC._wasOnHostView = onHost;
 
-    if (onMonitoring) {
+    if (onMonitoring || onHost) {
       OC.stopAutoRefresh?.();
+      if (OC._refreshAbort) {
+        try {
+          OC._refreshAbort.abort();
+        } catch {
+          /* ignore */
+        }
+      }
       const statusEl = document.getElementById("refresh-status");
       if (statusEl && OC.lastOverview?.generatedAt) {
-        statusEl.textContent = `Última atualização: ${OC.formatDate(OC.lastOverview.generatedAt)} · monitoramento`;
+        statusEl.textContent = `Última atualização: ${OC.formatDate(OC.lastOverview.generatedAt)} · ${onHost ? "host" : "monitoramento"}`;
       }
     } else if (!OC.authState?.locked && !OC.refreshPaused) {
       OC.startAutoRefresh?.();
@@ -198,15 +222,40 @@
 
     if (OC.currentRoute.view === "deploy" && OC.lastOverview) {
       OC.renderDashboard(OC.lastOverview);
-    } else if (OC.currentRoute.view === "env" && OC.renderEnvConfig) {
-      OC.renderEnvConfig(OC.currentRoute.env);
-    } else if (OC.currentRoute.view === "database" && OC.renderDatabaseExplorer) {
-      OC.renderDatabaseExplorer(OC.currentRoute.env);
-    } else if (onMonitoring && OC.refreshMonitoring) {
-      if (!wasMonitoring) OC.showMonitoringLoading?.();
-      OC.refreshMonitoring({ showLoading: !wasMonitoring });
-      OC.startMonitoringRefresh?.();
+    } else if (OC.currentRoute.view === "env") {
+      if (OC.renderEnvConfig) OC.renderEnvConfig(OC.currentRoute.env);
+      else OC.ensureFeature?.("env").then(() => {
+        if (OC.currentRoute?.view === "env") OC.renderEnvConfig?.(OC.currentRoute.env);
+      }).catch((err) => OC.setGlobalError?.(err.message));
+    } else if (OC.currentRoute.view === "database") {
+      if (OC.renderDatabaseExplorer) OC.renderDatabaseExplorer(OC.currentRoute.env);
+      else OC.ensureFeature?.("database").then(() => {
+        if (OC.currentRoute?.view === "database") OC.renderDatabaseExplorer?.(OC.currentRoute.env);
+      }).catch((err) => OC.setGlobalError?.(err.message));
+    } else if (onHost) {
+      const startHost = () => {
+        if (OC.currentRoute?.view !== "host") return;
+        if (!wasHost) OC.showHostLoading?.();
+        OC.refreshHost?.({ force: !wasHost });
+        OC.startHostRefresh?.();
+      };
+      if (OC.refreshHost) startHost();
+      else OC.ensureFeature?.("host").then(startHost).catch((err) => OC.setGlobalError?.(err.message));
+    } else if (onMonitoring) {
+      const startMonitoring = () => {
+        if (OC.currentRoute?.view !== "monitoring") return;
+        if (!wasMonitoring) OC.showMonitoringLoading?.();
+        OC.refreshMonitoring?.({
+          showLoading: !wasMonitoring,
+          force: monitoringRouteChanged,
+          showFeedback: wasMonitoring && monitoringRouteChanged,
+        });
+        OC.startMonitoringRefresh?.();
+      };
+      if (OC.refreshMonitoring) startMonitoring();
+      else OC.ensureFeature?.("monitoring").then(startMonitoring).catch((err) => OC.setGlobalError?.(err.message));
     }
+    OC.updateSidebarActive?.();
   };
 
   function isAppPath(pathname) {
@@ -214,12 +263,76 @@
     if (p === "/" || p === "/deploy") return true;
     if (p.startsWith("/env/") || p === "/env") return true;
     if (p.startsWith("/database/") || p === "/database") return true;
+    if (p === "/host") return true;
     if (p.startsWith("/monitoring/") || p === "/monitoring") return true;
     return false;
   }
 
   OC.bindRouter = function bindRouter() {
     window.addEventListener("popstate", () => OC.renderRoute());
+
+    const sidebar = document.getElementById("app-sidebar");
+    const toggle = document.getElementById("sidebar-toggle");
+    const scrim = document.getElementById("sidebar-scrim");
+    const layout = document.querySelector(".app-body-layout");
+    const collapseToggle = document.getElementById("sidebar-collapse");
+    const collapseIcon = document.getElementById("sidebar-collapse-icon");
+    const sidebarPreferenceKey = "pplid-sidebar-collapsed";
+    const setSidebarCollapsed = (collapsed, persist = false) => {
+      layout?.classList.toggle("is-sidebar-collapsed", collapsed);
+      sidebar?.classList.toggle("is-collapsed", collapsed);
+      collapseToggle?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      if (collapseToggle) {
+        const label = collapsed ? "Expandir navegação" : "Recolher navegação";
+        collapseToggle.setAttribute("aria-label", label);
+        collapseToggle.title = label;
+      }
+      collapseIcon?.classList.toggle("is-reversed", collapsed);
+      if (persist) {
+        try {
+          window.localStorage.setItem(sidebarPreferenceKey, collapsed ? "1" : "0");
+        } catch {
+          // A navegação continua funcional quando o armazenamento está indisponível.
+        }
+      }
+    };
+    let sidebarCollapsed = false;
+    try {
+      sidebarCollapsed = window.localStorage.getItem(sidebarPreferenceKey) === "1";
+    } catch {
+      sidebarCollapsed = false;
+    }
+    setSidebarCollapsed(sidebarCollapsed);
+    collapseToggle?.addEventListener("click", () => {
+      setSidebarCollapsed(!sidebar?.classList.contains("is-collapsed"), true);
+    });
+    const closeSidebar = () => {
+      sidebar?.classList.remove("is-open");
+      scrim?.classList.add("hidden");
+      toggle?.setAttribute("aria-expanded", "false");
+    };
+    toggle?.addEventListener("click", () => {
+      const open = !sidebar?.classList.contains("is-open");
+      sidebar?.classList.toggle("is-open", open);
+      scrim?.classList.toggle("hidden", !open);
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    scrim?.addEventListener("click", closeSidebar);
+
+    OC.updateSidebarActive = function updateSidebarActive() {
+      let active = OC.currentRoute?.view || "deploy";
+      if (active === "monitoring") {
+        if (OC.currentRoute?.tab === "incidents") active = "incidents";
+        else if (OC.currentRoute?.tab === "logs") active = "logs";
+        else active = "performance";
+      }
+      document.querySelectorAll("[data-sidebar-view]").forEach((link) => {
+        const selected = link.getAttribute("data-sidebar-view") === active;
+        link.classList.toggle("is-active", selected);
+        if (selected) link.setAttribute("aria-current", "page");
+        else link.removeAttribute("aria-current");
+      });
+    };
 
     // Internal SPA links (/monitoring/..., legacy #/...) without full reload
     document.addEventListener("click", (e) => {
@@ -255,6 +368,8 @@
         window.history.pushState({}, "", path);
       }
       OC.renderRoute();
+      closeSidebar();
     });
+    OC.updateSidebarActive();
   };
 })();

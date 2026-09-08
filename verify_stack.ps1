@@ -90,7 +90,15 @@ function Get-EnvPorts {
     }
 }
 
-$envList = if ($Environment -eq "ALL") { @("MAIN", "DEV", "HOM") } else { @($Environment) }
+$envList = if ($Environment -eq "ALL") {
+    @(Get-PplidEnabledEnvironments -ScriptRoot $PSScriptRoot)
+} else {
+    @($Environment)
+}
+if ($envList.Count -eq 0) {
+    Write-Host "Nenhum ambiente habilitado para verificar."
+    exit 0
+}
 
 Write-Host "=== PPLID Stack Verification ==="
 Write-Host ""

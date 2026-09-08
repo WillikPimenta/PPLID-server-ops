@@ -30,26 +30,44 @@ if (-not (Test-Path $ConfigPath)) {
 function Resolve-OpsConsolePython {
     param([string]$BaseDir)
 
-    $devRepoDir = Get-PplidRepoDir -Name "PPLID_DEV"
-    $candidates = @(
-        (Join-Path $BaseDir "deploy\DEV\current\backend\.venv\Scripts\python.exe")
-        (Join-Path $devRepoDir "backend\.venv\Scripts\python.exe")
-    )
-    foreach ($candidate in $candidates) {
-        if (-not (Test-Path $candidate)) { continue }
-        try {
-            $check = & $candidate -c "import psycopg; print('ok')" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $check -eq "ok") {
-                return $candidate
-            }
-        } catch { }
+    $venvDir = Join-Path $OpsDir ".venv"
+    $venvPython = Join-Path $venvDir "Scripts\python.exe"
+    $requirements = Join-Path $OpsDir "requirements.txt"
+    if (-not (Test-Path $venvPython)) {
+        $systemPython = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $systemPython) {
+            throw "Python nao encontrado para criar o ambiente do Ops Console."
+        }
+        Write-Host "Criando ambiente Python proprio do Ops Console..."
+        & $systemPython.Source -m venv $venvDir
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPython)) {
+            throw "Falha ao criar ambiente Python em $venvDir"
+        }
     }
 
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) {
-        return $python.Source
+    $dependencyCheck = ""
+    $dependencyExitCode = 1
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "SilentlyContinue"
+        $dependencyCheck = & $venvPython -c "import psycopg, psutil; print('ok')" 2>$null
+        $dependencyExitCode = $LASTEXITCODE
+    } catch {
+        $dependencyExitCode = 1
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
-    throw "Python com psycopg nao encontrado. Instale deps do backend ou use o venv em deploy/DEV/current."
+    if ($dependencyExitCode -ne 0 -or $dependencyCheck -ne "ok") {
+        if (-not (Test-Path $requirements)) {
+            throw "Dependencias do Ops Console nao encontradas: $requirements"
+        }
+        Write-Host "Instalando dependencias do Ops Console..."
+        & $venvPython -m pip install --disable-pip-version-check -r $requirements
+        if ($LASTEXITCODE -ne 0) {
+            throw "Falha ao instalar dependencias do Ops Console."
+        }
+    }
+    return $venvPython
 }
 
 $baseDir = Get-PplidBaseDir
@@ -75,11 +93,18 @@ if ($existingPid) {
         Write-Host "Reiniciando Ops Console (PID $existingPid) na porta $consolePort..."
         try {
             Stop-Process -Id $existingPid -Force -ErrorAction Stop
-            Start-Sleep -Seconds 1
+            Start-Sleep -Milliseconds 500
         } catch {
             Write-Warning "Nao foi possivel encerrar PID ${existingPid}: $_"
         }
-        $existingPid = Get-PortListenOwnerPid -Port $consolePort
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $existingPid = Get-PortListenOwnerPid -Port $consolePort
+            if (-not $existingPid -or -not (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
+                $existingPid = $null
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        }
         if ($existingPid) {
             throw "Porta $consolePort ainda em uso (PID $existingPid) apos tentativa de restart."
         }

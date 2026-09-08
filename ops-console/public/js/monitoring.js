@@ -8,14 +8,26 @@
   const STORAGE_FILTERS = "pplid-monitor-filters";
   const MONITOR_REFRESH_MS = 30000;
   const MONITOR_APIS_REFRESH_MS = 15000;
-  const MONITOR_LOGS_REFRESH_MS = 60000;
-  const STATUS_FOCUS_ENVS = ["MAIN", "HOM"];
+  const MONITOR_LOGS_REFRESH_MS = 15000;
   const STORAGE_API_WINDOW = "pplid-monitor-api-window";
   const STORAGE_LATENCY_WINDOW = "pplid-monitor-latency-window";
   const STORAGE_LOGS_PATTERN = "pplid-monitor-logs-pattern";
+  const STORAGE_LOGS_FILTERS = "pplid-monitor-logs-filters-v2";
+  const STORAGE_LOGS_FOLLOWING = "pplid-monitor-logs-following";
+  const LOG_LEVELS = ["ERROR", "WARN", "INFO", "DEBUG", "OTHER"];
+  const DEFAULT_LOG_FILTERS = {
+    q: "",
+    levels: [],
+    services: [],
+    streams: [],
+    period: "24h",
+    since: "",
+    until: "",
+    order: "asc",
+  };
 
   const ENV_COLORS = { MAIN: "#2a5595", DEV: "#0fac67", HOM: "#ff8a00" };
-  const CATEGORY_KEYS = ["api", "availability", "postgres", "syncs", "deploy", "logs"];
+  const CATEGORY_KEYS = ["api", "availability", "postgres", "syncs", "deploy", "logs", "host"];
   const CATEGORY_LABELS = {
     api: "APIs",
     availability: "Disponibilidade",
@@ -23,6 +35,7 @@
     syncs: "Syncs",
     deploy: "Deploy",
     logs: "Logs",
+    host: "Host",
   };
   const TAB_LABELS = {
     summary: "Resumo",
@@ -64,6 +77,7 @@
       syncs: true,
       deploy: true,
       logs: true,
+      host: true,
     },
     eventFilters: { severity: "", category: "", hours: 24 },
     dataByEnv: {},
@@ -72,8 +86,43 @@
     apiWindow: "6h",
     latencyWindow: "24h",
     logsPattern: "",
+    logFilters: { ...DEFAULT_LOG_FILTERS },
+    logsPaused: false,
+    logsFollowing: true,
+    logExpanded: new Set(),
+    logNewCount: 0,
+    logHistoryMode: false,
     dayDrill: null,
   };
+
+  function normalizeLogFilterList(values, allowed = null) {
+    const list = Array.isArray(values) ? values : String(values || "").split(",");
+    const normalized = [...new Set(list.map((value) => String(value).trim()).filter(Boolean))];
+    return allowed ? normalized.filter((value) => allowed.includes(value)) : normalized;
+  }
+
+  function applyLogRoutePrefs() {
+    if (OC.currentRoute?.tab !== "logs") return;
+    const query = OC.currentRoute.query || {};
+    const filters = OC.monitorState.logFilters;
+    if (query.q != null) filters.q = query.q;
+    if (query.levels != null) filters.levels = normalizeLogFilterList(query.levels, LOG_LEVELS);
+    if (query.services != null) filters.services = normalizeLogFilterList(query.services);
+    if (query.streams != null) filters.streams = normalizeLogFilterList(query.streams);
+    if (query.period && ["15m", "1h", "6h", "24h", "custom"].includes(query.period)) {
+      filters.period = query.period;
+    }
+    if (query.since != null) {
+      filters.since = query.since;
+      filters.period = "custom";
+    }
+    if (query.until != null) filters.until = query.until;
+    if (query.order && ["asc", "desc"].includes(query.order)) filters.order = query.order;
+    if (query.envs) {
+      const envs = normalizeLogFilterList(query.envs.toUpperCase(), OC.ENV_ORDER);
+      if (envs.length) OC.monitorState.selectedEnvs = envs;
+    }
+  }
 
   function loadPrefs() {
     try {
@@ -100,7 +149,7 @@
     }
     try {
       const win = localStorage.getItem(STORAGE_API_WINDOW);
-      if (win && ["1h", "6h", "24h"].includes(win)) OC.monitorState.apiWindow = win;
+      if (win && ["1h", "6h", "24h", "7d"].includes(win)) OC.monitorState.apiWindow = win;
     } catch {
       /* ignore */
     }
@@ -114,13 +163,31 @@
     }
     try {
       const pat = localStorage.getItem(STORAGE_LOGS_PATTERN);
-      if (pat != null && ["", "ERROR", "WARN", "Traceback"].includes(pat)) {
+      if (pat != null) {
         OC.monitorState.logsPattern = pat;
       }
     } catch {
       /* ignore */
     }
+    try {
+      const filters = JSON.parse(localStorage.getItem(STORAGE_LOGS_FILTERS) || "null");
+      if (filters && typeof filters === "object") {
+        OC.monitorState.logFilters = {
+          ...DEFAULT_LOG_FILTERS,
+          ...filters,
+          levels: normalizeLogFilterList(filters.levels, LOG_LEVELS),
+          services: normalizeLogFilterList(filters.services),
+          streams: normalizeLogFilterList(filters.streams),
+        };
+      } else if (OC.monitorState.logsPattern) {
+        OC.monitorState.logFilters.q = OC.monitorState.logsPattern;
+      }
+      OC.monitorState.logsFollowing = localStorage.getItem(STORAGE_LOGS_FOLLOWING) !== "0";
+    } catch {
+      /* ignore */
+    }
     if (OC.currentRoute?.tab) OC.monitorState.activeTab = OC.currentRoute.tab;
+    applyLogRoutePrefs();
   }
 
   function savePrefs() {
@@ -129,8 +196,81 @@
     localStorage.setItem(STORAGE_FILTERS, JSON.stringify(OC.monitorState.eventFilters));
     localStorage.setItem(STORAGE_API_WINDOW, OC.monitorState.apiWindow || "6h");
     localStorage.setItem(STORAGE_LATENCY_WINDOW, OC.monitorState.latencyWindow || "24h");
-    localStorage.setItem(STORAGE_LOGS_PATTERN, OC.monitorState.logsPattern ?? "");
+    localStorage.setItem(STORAGE_LOGS_PATTERN, OC.monitorState.logFilters?.q ?? "");
+    localStorage.setItem(STORAGE_LOGS_FILTERS, JSON.stringify(OC.monitorState.logFilters || DEFAULT_LOG_FILTERS));
+    localStorage.setItem(STORAGE_LOGS_FOLLOWING, OC.monitorState.logsFollowing ? "1" : "0");
   }
+
+  function syncLogFiltersToUrl() {
+    if (OC.currentRoute?.view !== "monitoring" || OC.monitorState.activeTab !== "logs") return;
+    const filters = OC.monitorState.logFilters || DEFAULT_LOG_FILTERS;
+    const query = { ...(OC.currentRoute.query || {}) };
+    ["q", "levels", "services", "streams", "period", "since", "until", "order", "envs"].forEach(
+      (key) => delete query[key]
+    );
+    if (filters.q) query.q = filters.q;
+    if (filters.levels.length) query.levels = filters.levels.join(",");
+    if (filters.services.length) query.services = filters.services.join(",");
+    if (filters.streams.length) query.streams = filters.streams.join(",");
+    if (filters.period !== "24h") query.period = filters.period;
+    if (filters.period === "custom" && filters.since) query.since = filters.since;
+    if (filters.period === "custom" && filters.until) query.until = filters.until;
+    if (filters.order !== "asc") query.order = filters.order;
+    if (OC.monitorState.selectedEnvs.length !== OC.ENV_ORDER.length) {
+      query.envs = OC.monitorState.selectedEnvs.join(",");
+    }
+    const path = OC.buildAppPath("monitoring", null, { tab: "logs", query });
+    window.history.replaceState({ view: "monitoring" }, "", path);
+    OC.currentRoute.query = query;
+  }
+
+  function setMonitoringBusy(isBusy, message = "") {
+    const root = document.getElementById("view-monitoring");
+    if (!root) return;
+
+    root.classList.toggle("is-monitor-loading", isBusy);
+    root.setAttribute("aria-busy", isBusy ? "true" : "false");
+    root.querySelectorAll("[data-monitor-tab]").forEach((tab) => {
+      tab.classList.toggle("is-loading", isBusy && tab.classList.contains("is-active"));
+    });
+
+    const current = root.querySelector(".monitor-loading-feedback");
+    if (!isBusy) {
+      current?.remove();
+      return;
+    }
+
+    const panel = root.querySelector(".monitor-tab-panel");
+    if (!panel) return;
+    const feedback = current || document.createElement("div");
+    if (!current) {
+      feedback.className = "monitor-loading-feedback";
+      feedback.setAttribute("role", "status");
+      feedback.setAttribute("aria-live", "polite");
+      feedback.innerHTML = '<span class="loading-spinner loading-spinner-sm" aria-hidden="true"></span><span></span>';
+      panel.prepend(feedback);
+    }
+    const text = feedback.querySelector("span:last-child");
+    if (text && (message || !text.textContent)) text.textContent = message || "Atualizando dados…";
+  }
+
+  function setSelectedMonitoringTab(root, activeTab) {
+    root.querySelectorAll("[data-monitor-tab]").forEach((tab) => {
+      const active = tab.getAttribute("data-monitor-tab") === activeTab;
+      tab.classList.toggle("is-active", active);
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+    });
+  }
+
+  function refreshFromMonitoringControl(message) {
+    return OC.refreshMonitoring({
+      force: true,
+      showFeedback: true,
+      feedbackMessage: message || "Aplicando filtros…",
+    });
+  }
+
+  OC.setMonitoringBusy = setMonitoringBusy;
 
   function getSlos(config) {
     return { ...DEFAULT_SLOS, ...(config?.slos || {}) };
@@ -343,10 +483,7 @@
       occurredOverall = worstLevel(occurredOverall, api.level);
       occurredReasons.push(api.label);
     }
-    if (sync.level === "warn") {
-      occurredOverall = worstLevel(occurredOverall, "warn");
-      occurredReasons.push(`${sync.value} falha(s) de sync`);
-    }
+    // Sync é um indicador operacional independente. Não compõe saúde/disponibilidade.
     if (deploy.level === "warn" || deploy.level === "critical") {
       occurredOverall = worstLevel(occurredOverall, deploy.level);
       if (!deployBrokenNow) {
@@ -405,6 +542,17 @@
     return String(Math.round(n));
   }
 
+  function formatChartMetricValue(value, format = "latency") {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    if (format === "integer") return Math.round(number).toLocaleString("pt-BR");
+    if (format === "rate") {
+      const rounded = Math.round(number * 10) / 10;
+      return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+    }
+    return formatLatencyMs(number);
+  }
+
   /** Scale Y to observed data; don't stretch the chart to a far-away SLO (e.g. 0.1ms vs 2000ms). */
   function chartValueDomain(values, sloMs) {
     const nums = (values || []).filter((v) => Number.isFinite(v));
@@ -458,7 +606,10 @@
     const innerH = height - pad.top - pad.bottom;
     const chartId = options.chartId || `chart-${Math.random().toString(36).slice(2, 9)}`;
     const windowHours = options.windowHours;
-    const fingerprint = `${chartId}|${metricLabel}|${sloMs ?? ""}|${windowHours ?? ""}|${chartPointsFingerprint(seriesByEnv)}`;
+    const valueFormat = options.valueFormat || "latency";
+    const valueSuffix = options.valueSuffix ?? " ms";
+    const formatValue = (value) => formatChartMetricValue(value, valueFormat);
+    const fingerprint = `${chartId}|${metricLabel}|${sloMs ?? ""}|${windowHours ?? ""}|${valueFormat}|${valueSuffix}|${chartPointsFingerprint(seriesByEnv)}`;
     OC._chartSvgCache = OC._chartSvgCache || {};
     if (OC._chartSvgCache[chartId]?.fp === fingerprint) {
       return OC._chartSvgCache[chartId].built;
@@ -555,7 +706,7 @@
           });
         }
       });
-      legend += `<span class="monitor-legend-item"><span class="monitor-legend-swatch" style="background:${color}"></span>${env} · atual ${formatLatencyMs(last.v)} ms</span>`;
+      legend += `<span class="monitor-legend-item"><span class="monitor-legend-swatch" style="background:${color}"></span>${env} · atual ${formatValue(last.v)}${OC.escapeHtml(valueSuffix)}</span>`;
     });
 
     spikes.sort((a, b) => b.v - a.v);
@@ -567,7 +718,7 @@
       const val = vMin + vSpan * f;
       const yy = y(val);
       return `<line x1="${pad.left}" y1="${yy}" x2="${width - pad.right}" y2="${yy}" class="monitor-grid-line" />
-        <text x="${pad.left - 6}" y="${yy + 4}" text-anchor="end" class="monitor-axis-label">${formatLatencyMs(val)}</text>`;
+        <text x="${pad.left - 6}" y="${yy + 4}" text-anchor="end" class="monitor-axis-label">${formatValue(val)}</text>`;
     });
 
     const positions =
@@ -602,7 +753,7 @@
 
     const worst = summaries.sort((a, b) => b.last - a.last)[0];
     const trendNote = worst
-      ? `${worst.env} em ${formatLatencyMs(worst.last)} ms no período (média ${formatLatencyMs(worst.avg || 0)} ms).`
+      ? `${worst.env} em ${formatValue(worst.last)}${valueSuffix} no último ponto (média ${formatValue(worst.avg || 0)}${valueSuffix}).`
       : "Sem amostras no período solicitado.";
     const freshnessNote = lastSampleAt
       ? `Última amostra: ${OC.formatDate(lastSampleAt)}`
@@ -623,7 +774,7 @@
     OC._chartHoverData[chartId] = hoverPts;
 
     const html = `<p class="monitor-chart-summary">${OC.escapeHtml(trendNote)} · ${OC.escapeHtml(freshnessNote)}</p>
-    <div class="monitor-chart-wrap" data-chart-id="${OC.escapeHtml(chartId)}" data-slo="${sloMs != null ? sloMs : ""}">
+    <div class="monitor-chart-wrap" data-chart-id="${OC.escapeHtml(chartId)}" data-slo="${sloMs != null ? sloMs : ""}" data-value-format="${OC.escapeHtml(valueFormat)}" data-value-suffix="${OC.escapeHtml(valueSuffix)}">
       <svg class="monitor-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${OC.escapeHtml(metricLabel)}" data-chart-svg="${OC.escapeHtml(chartId)}">
         ${gridY.join("")}
         ${sloLine}
@@ -661,36 +812,32 @@
     return "24 horas";
   }
 
-  function renderLatencyToolbar() {
-    const win = OC.monitorState.latencyWindow || "24h";
-    return OC.renderOpsChipToolbar({
-      id: "latency-window",
-      label: "Janela",
-      attr: "data-monitor-chip",
-      value: win,
-      options: [
-        { value: "1h", label: "1h" },
-        { value: "6h", label: "6h" },
-        { value: "24h", label: "24h" },
-        { value: "7d", label: "7d" },
-      ],
-      extra: `<span class="monitor-meta-muted">Tendência · status diário permanece em 7 dias</span>`,
-    });
-  }
-
   function buildEnvLatencyCharts(seriesByEnv, sloMs) {
     const hours = latencyWindowHours(OC.monitorState.latencyWindow || "24h");
-    const envs = STATUS_FOCUS_ENVS.filter((e) => seriesByEnv[e]).concat(
-      Object.keys(seriesByEnv).filter((e) => !STATUS_FOCUS_ENVS.includes(e))
-    );
+    const selected = OC.monitorState.selectedEnvs?.length
+      ? OC.monitorState.selectedEnvs
+      : OC.ENV_ORDER;
+    const envs = selected.filter((env) => seriesByEnv[env]);
     if (!envs.length) {
       return `<p class="monitor-empty monitor-empty-neutral">Sem séries de latência.</p>`;
     }
     return `<div class="monitor-latency-env-grid">${envs
       .map((env) => {
         const single = { [env]: seriesByEnv[env] };
+        const points = seriesByEnv[env]?.points || [];
+        const latest = points[points.length - 1];
+        const average = seriesAvg(points);
         return `<article class="monitor-latency-env-card">
-          <h4 class="monitor-latency-env-title">${OC.escapeHtml(env)}</h4>
+          <header class="monitor-latency-chart-head">
+            <div>
+              <h4 class="monitor-latency-env-title">${OC.escapeHtml(env)}</h4>
+              <span>${points.length} amostra(s) no período</span>
+            </div>
+            <div class="monitor-latency-chart-stats">
+              <span>Atual <strong>${latest ? `${formatLatencyMs(latest.v)} ms` : "—"}</strong></span>
+              <span>Média <strong>${average != null ? `${formatLatencyMs(average)} ms` : "—"}</strong></span>
+            </div>
+          </header>
           ${chartHtml(single, `latência ${env}`, sloMs, { windowHours: hours, chartId: `lat-${env}` })}
         </article>`;
       })
@@ -698,7 +845,9 @@
   }
 
   function renderUptimeStatusBars(uptimeByEnv, { compact = false, drillable = false } = {}) {
-    const envs = STATUS_FOCUS_ENVS;
+    const envs = OC.monitorState.selectedEnvs?.length
+      ? OC.monitorState.selectedEnvs
+      : OC.ENV_ORDER;
     const drill = OC.monitorState.dayDrill;
     const cards = envs
       .map((env) => {
@@ -746,10 +895,38 @@
         </article>`;
       })
       .join("");
-    const hint = drillable
-      ? `<p class="monitor-section-hint">Clique em um dia para ver o detalhe por hora.</p>`
-      : "";
-    return `${hint}<div class="monitor-status-grid monitor-uptime-panel">${cards}</div>`;
+    return `<div class="monitor-status-grid monitor-uptime-panel">${cards}</div>`;
+  }
+
+  function renderLatencyOverview(overviews, uptimeByEnv, slos) {
+    if (!overviews?.length) {
+      return `<p class="monitor-empty monitor-empty-neutral">Sem indicadores de latência para os ambientes selecionados.</p>`;
+    }
+    const cards = overviews.map((overview) => {
+      const metric = overview.health || {};
+      const level = ["ok", "warn", "critical"].includes(metric.level) ? metric.level : "unknown";
+      const uptime = uptimeByEnv?.[overview.env]?.uptimePct;
+      return `<article class="monitor-latency-summary-card is-${OC.escapeHtml(level)}">
+        <header class="monitor-latency-summary-head">
+          <div>
+            <span class="monitor-latency-summary-env">${OC.escapeHtml(overview.env)}</span>
+            <span class="monitor-latency-summary-caption">Endpoint de health</span>
+          </div>
+          <span class="monitor-latency-health is-${OC.escapeHtml(level)}"><span aria-hidden="true"></span>${OC.escapeHtml(metric.label || "Sem dados")}</span>
+        </header>
+        <dl class="monitor-latency-summary-metrics">
+          <div><dt>Atual</dt><dd>${OC.escapeHtml(metric.latest || metric.value || "—")}</dd></div>
+          <div><dt>p95 · 24h</dt><dd>${OC.escapeHtml(metric.p95 || "—")}</dd></div>
+          <div><dt>Máxima · 24h</dt><dd>${OC.escapeHtml(metric.max || "—")}</dd></div>
+          <div><dt>Disponibilidade · 7d</dt><dd>${uptime != null ? `${OC.escapeHtml(String(uptime))}%` : "—"}</dd></div>
+        </dl>
+        <footer class="monitor-latency-summary-foot">
+          <span>Meta: p95 ≤ ${OC.escapeHtml(String(slos.healthP95WarnMs))} ms</span>
+          ${metric.delta ? `<strong class="is-${OC.escapeHtml(level)}">${OC.escapeHtml(metric.delta)}</strong>` : ""}
+        </footer>
+      </article>`;
+    }).join("");
+    return `<div class="monitor-latency-summary-grid">${cards}</div>`;
   }
 
   function renderDayHourDrill(drill) {
@@ -829,17 +1006,19 @@
   function renderMonitorHero(kpis, opts) {
     const compact = opts?.compact === true;
     const tabLabel = opts?.tabLabel || "Resumo";
+    const tab = opts?.tab || "summary";
     const uptimeLabel = kpis.avgUptime != null ? `${kpis.avgUptime}%` : "—";
     const collectLabel = kpis.lastSampleAt
       ? OC.formatRelativeTime(kpis.lastSampleAt)
       : kpis.collectorLabel || "—";
     return OC.renderOpsHero({
-      title: `Monitoramento · ${tabLabel}`,
+      title: tab === "summary" ? "Monitoramento" : `Monitoramento · ${tabLabel}`,
       subtitle: compact
-        ? "Indicadores operacionais do período selecionado."
+        ? tab === "latency"
+          ? "Latência atual, tendência e disponibilidade dos ambientes selecionados."
+          : "Indicadores operacionais dos ambientes selecionados."
         : "Visão consolidada da saúde dos ambientes e serviços.",
       compact,
-      back: true,
       stats: [
         { label: "Disponibilidade 7d", value: uptimeLabel },
         { label: "Alertas ativos", value: String(kpis.alertCount ?? 0), action: "alerts" },
@@ -917,7 +1096,10 @@
       });
     });
     const collector = config?.collectorStatus || {};
-    const uptimes = STATUS_FOCUS_ENVS.map((env) => uptimeByEnv?.[env]?.uptimePct).filter(
+    const uptimeEnvs = OC.monitorState.selectedEnvs?.length
+      ? OC.monitorState.selectedEnvs
+      : OC.ENV_ORDER;
+    const uptimes = uptimeEnvs.map((env) => uptimeByEnv?.[env]?.uptimePct).filter(
       (v) => v != null && !Number.isNaN(Number(v))
     );
     const avgUptime = uptimes.length
@@ -1009,60 +1191,106 @@
           : MONITOR_REFRESH_MS) / 1000
     );
     const recentErr = (collector.recentErrors || []).slice(-1)[0];
-    return `<div class="monitor-meta-bar">
-      <div class="monitor-meta-items">
-        <span>Atualizado: <strong>${OC.escapeHtml(refreshed)}</strong></span>
-        <span>Auto-refresh: <strong>${refreshSec}s</strong></span>
-        <span>Coleta: <strong class="monitor-collector-${collectorClass}">${OC.escapeHtml(collector.label || "—")}</strong></span>
-        ${collector.lastSampleAt ? `<span class="monitor-meta-muted">amostra ${OC.formatRelativeTime(collector.lastSampleAt)}</span>` : ""}
+    return `<div class="monitor-meta-wrap">
+      <div class="monitor-meta-bar" aria-label="Atualização dos dados">
+        <div class="monitor-meta-items">
+          <span class="monitor-collector-state monitor-collector-${collectorClass}"><span class="monitor-collector-dot" aria-hidden="true"></span><strong>${OC.escapeHtml(collector.label || "Coleta indisponível")}</strong></span>
+          <span>Atualizado <strong>${OC.escapeHtml(refreshed)}</strong></span>
+          <span>Atualização automática <strong>${refreshSec}s</strong></span>
+          ${collector.lastSampleAt ? `<span class="monitor-meta-muted">Última amostra ${OC.formatRelativeTime(collector.lastSampleAt)}</span>` : ""}
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm" id="monitor-refresh-now">Atualizar dados</button>
       </div>
-      <button type="button" class="btn btn-secondary btn-sm" id="monitor-refresh-now">Atualizar agora</button>
-    </div>
-    ${renderStaleBanner(config)}
-    ${recentErr ? `<div class="monitor-section-hint">Último erro de coleta: ${OC.escapeHtml(recentErr.message || recentErr)} (${OC.escapeHtml(OC.formatRelativeTime(recentErr.at))})</div>` : ""}
-    ${warnings.length ? `<div class="global-error" role="alert">${warnings.map((w) => OC.escapeHtml(w)).join("<br>")}</div>` : ""}`;
+      ${renderStaleBanner(config)}
+      ${recentErr ? `<div class="monitor-section-hint">Último erro de coleta: ${OC.escapeHtml(recentErr.message || recentErr)} (${OC.escapeHtml(OC.formatRelativeTime(recentErr.at))})</div>` : ""}
+      ${warnings.length ? `<div class="global-error" role="alert">${warnings.map((w) => OC.escapeHtml(w)).join("<br>")}</div>` : ""}
+    </div>`;
   }
 
-  function activeFilterCount() {
+  function activeFilterCount(tab) {
     const envDiff = OC.ENV_ORDER.length - OC.monitorState.selectedEnvs.length;
-    const catOff = CATEGORY_KEYS.filter((k) => !OC.monitorState.categories[k]).length;
-    return envDiff + catOff;
+    const catOff = tab === "summary"
+      ? CATEGORY_KEYS.filter((k) => !OC.monitorState.categories[k]).length
+      : 0;
+    const windowDiff = tab === "latency" && OC.monitorState.latencyWindow !== "24h" ? 1 : 0;
+    const logFilters = OC.monitorState.logFilters || DEFAULT_LOG_FILTERS;
+    const logDiff = tab === "logs"
+      ? Number(!!logFilters.q) +
+        logFilters.levels.length +
+        logFilters.services.length +
+        logFilters.streams.length +
+        Number(logFilters.period !== "24h") +
+        Number(logFilters.order !== "asc")
+      : 0;
+    return envDiff + catOff + windowDiff + logDiff;
   }
 
   OC.renderMonitoringFilters = function renderMonitoringFilters() {
+    const activeTab = OC.monitorState.activeTab || "summary";
+    const showCategories = activeTab === "summary";
+    const showLatencyWindow = activeTab === "latency";
     const envPills = OC.ENV_ORDER.map((env) => {
       const active = OC.monitorState.selectedEnvs.includes(env);
-      return `<button type="button" class="monitor-pill ${active ? "is-active" : ""}" data-monitor-env="${env}">${env}</button>`;
+      return `<button type="button" class="monitor-pill ${active ? "is-active" : ""}" data-monitor-env="${env}" aria-pressed="${active ? "true" : "false"}">${env}</button>`;
     }).join("");
     const catPills = CATEGORY_KEYS.map((key) => {
       const active = OC.monitorState.categories[key];
-      return `<button type="button" class="monitor-pill ${active ? "is-active" : ""}" data-monitor-cat="${key}">${CATEGORY_LABELS[key]}</button>`;
+      return `<button type="button" class="monitor-pill ${active ? "is-active" : ""}" data-monitor-cat="${key}" aria-pressed="${active ? "true" : "false"}">${CATEGORY_LABELS[key]}</button>`;
     }).join("");
-    const count = activeFilterCount();
-    return `<div class="monitor-filters">
-      <div class="monitor-filter-group">
-        <span class="monitor-filter-label">Ambientes</span>
-        <div class="monitor-pill-row">${envPills}</div>
+    const latencyWindow = OC.monitorState.latencyWindow || "24h";
+    const latencyPills = ["1h", "6h", "24h", "7d"].map((value) => {
+      const active = latencyWindow === value;
+      return `<button type="button" class="monitor-pill ${active ? "is-active" : ""}" data-monitor-chip="latency-window" data-value="${value}" aria-pressed="${active ? "true" : "false"}">${value}</button>`;
+    }).join("");
+    const count = activeFilterCount(activeTab);
+    const selectedCount = OC.monitorState.selectedEnvs.length;
+    const scopeLabel = selectedCount === OC.ENV_ORDER.length
+      ? "Todos os ambientes"
+      : `${selectedCount} de ${OC.ENV_ORDER.length} ambientes`;
+    const descriptions = {
+      summary: "Escolha os ambientes e as categorias exibidas no resumo.",
+      incidents: "Escolha os ambientes; severidade e período ficam na lista de incidentes.",
+      latency: "Compare latência e disponibilidade usando o mesmo escopo.",
+      syncs: "Escolha os ambientes que deseja comparar.",
+      apis: "Escolha os ambientes que deseja analisar.",
+      logs: "Escolha os ambientes que terão logs carregados.",
+    };
+    return `<section class="monitor-filters monitor-filter-panel" aria-label="Filtros do monitoramento">
+      <header class="monitor-filter-header">
+        <div>
+          <h2 class="monitor-filter-title">Escopo da análise</h2>
+          <p class="monitor-filter-description">${OC.escapeHtml(descriptions[activeTab] || descriptions.summary)}</p>
+        </div>
+        <div class="monitor-filter-actions">
+          <span class="monitor-filter-count">${OC.escapeHtml(scopeLabel)}${showLatencyWindow ? ` · ${OC.escapeHtml(latencyWindowLabel(latencyWindow))}` : ""}</span>
+          ${count ? `<button type="button" class="btn btn-ghost btn-sm" id="monitor-clear-filters">Restaurar padrão</button>` : ""}
+        </div>
+      </header>
+      <div class="monitor-filter-body">
+        <div class="monitor-filter-group">
+          <span class="monitor-filter-label">Ambientes</span>
+          <div class="monitor-pill-row">${envPills}</div>
+        </div>
+        ${showLatencyWindow ? `<div class="monitor-filter-group">
+          <span class="monitor-filter-label">Período</span>
+          <div class="monitor-pill-row">${latencyPills}</div>
+        </div>` : ""}
+        ${showCategories ? `<div class="monitor-filter-group monitor-filter-group--categories">
+          <span class="monitor-filter-label">Categorias</span>
+          <div class="monitor-pill-row">${catPills}</div>
+        </div>` : ""}
       </div>
-      <div class="monitor-filter-group">
-        <span class="monitor-filter-label">Categorias</span>
-        <div class="monitor-pill-row">${catPills}</div>
-      </div>
-      <div class="monitor-filter-actions">
-        ${count ? `<span class="monitor-filter-count">${count} filtro(s)</span>` : ""}
-        <button type="button" class="btn btn-ghost btn-sm" id="monitor-clear-filters">Limpar</button>
-      </div>
-    </div>`;
+    </section>`;
   };
 
   function renderTabBar(activeTab) {
     const tabs = Object.entries(TAB_LABELS)
       .map(
         ([key, label]) =>
-          `<button type="button" class="monitor-tab ${key === activeTab ? "is-active" : ""}" data-monitor-tab="${key}">${OC.escapeHtml(label)}</button>`
+          `<button type="button" role="tab" class="monitor-tab ${key === activeTab ? "is-active" : ""}" data-monitor-tab="${key}" aria-selected="${key === activeTab ? "true" : "false"}" aria-controls="monitor-tab-panel">${OC.escapeHtml(label)}</button>`
       )
       .join("");
-    return `<nav class="monitor-tabs" aria-label="Abas de monitoramento">${tabs}</nav>`;
+    return `<nav class="monitor-tabs" role="tablist" aria-label="Visões de monitoramento">${tabs}</nav>`;
   }
 
   function renderStatusOverview(overviews, uptimeByEnv) {
@@ -1128,7 +1356,7 @@
         <h3 class="monitor-section-title">Problemas ocorridos (24h)</h3>
         <span class="monitor-meta-muted">Histórico — sem impacto ativo</span>
       </div>
-      <p class="monitor-overview-note">Falhas de sync, 5xx, deploy e p95 no período, mesmo já estabilizado.</p>
+      <p class="monitor-overview-note">Erros 5xx, deploy e p95 no período, mesmo já estabilizado. Sync é acompanhado separadamente.</p>
       <div class="monitor-env-vision-grid">${occurredCards}</div>
     </section>`;
   }
@@ -1247,7 +1475,7 @@
     sorted.forEach((o) => {
       cards.push(metricCard({ env: o.env, title: "Health latência", metric: o.health }));
       if (OC.monitorState.categories.api) cards.push(metricCard({ env: o.env, title: "Erros 5xx", metric: o.api }));
-      if (OC.monitorState.categories.syncs) cards.push(metricCard({ env: o.env, title: "Falhas de sync", metric: o.sync }));
+      // Sync possui painel/indicador próprios e não compõe os cartões de saúde.
       if (OC.monitorState.categories.deploy) cards.push(metricCard({ env: o.env, title: "Pipeline deploy", metric: o.deploy }));
       if (OC.monitorState.categories.postgres) {
         const pg = o.summary?.postgres?.connections || {};
@@ -1269,6 +1497,9 @@
     );
     const rows = [];
     const instrumentationNotes = [];
+    const sampleTotals = { samples: 0, success: 0, status4xx: 0, status5xx: 0 };
+    let hasStructuredSampling = false;
+    let normalRatePct = 10;
     Object.entries(routesByEnv).forEach(([env, data]) => {
       const instr = data.instrumentation || "unavailable";
       if (data.error && instr === "unavailable") {
@@ -1283,18 +1514,60 @@
         instrumentationNotes.push(`${env}: sem tráfego detectado nas últimas 24h`);
         return;
       }
-      (data.slowRoutes || []).forEach((r) => {
+      const totals = data.totals || {};
+      const samples = Number(totals.sampleCount ?? totals.requests ?? 0);
+      const status4xx = Number(totals.status4xx ?? totals.errors4xx ?? 0);
+      const status5xx = Number(totals.status5xx ?? totals.errors5xx ?? 0);
+      const success = Number(
+        totals.successSamples ??
+        ((totals.status2xx != null || totals.status3xx != null)
+          ? Number(totals.status2xx || 0) + Number(totals.status3xx || 0)
+          : Math.max(0, samples - status4xx - status5xx))
+      );
+      sampleTotals.samples += samples;
+      sampleTotals.success += success;
+      sampleTotals.status4xx += status4xx;
+      sampleTotals.status5xx += status5xx;
+      if (data.sampling?.mode) {
+        hasStructuredSampling = true;
+        normalRatePct = Number(data.sampling.normalRatePct || normalRatePct);
+      }
+
+      const sourceRows = data.routeStats?.length ? data.routeStats : (data.slowRoutes || []);
+      sourceRows.forEach((r) => {
         const key = `${String(r.method || "").toUpperCase()} ${r.route || ""}`.trim();
         const matched = !filterSet.size || filterSet.has(key);
         if (filterSet.size && !matched) return;
-        rows.push(`<tr class="${filterSet.size ? "is-api-filter-hit" : ""}" data-api-route="${OC.escapeHtml(key)}">
-          <td>${OC.escapeHtml(env)}</td>
-          <td><code>${OC.escapeHtml(r.method || "")} ${OC.escapeHtml(r.route || "")}</code></td>
-          <td>${r.avgMs ?? "—"}</td>
-          <td>${r.maxMs ?? "—"}</td>
-          <td>${r.errors5xx ?? 0}</td>
-          <td>${r.count ?? 0}</td>
-        </tr>`);
+        const routeSamples = Number(r.sampleCount ?? r.count ?? 0);
+        const route4xx = Number(r.status4xx ?? r.errors4xx ?? 0);
+        const route5xx = Number(r.status5xx ?? r.errors5xx ?? 0);
+        const routeSuccess = Number(
+          r.successSamples ??
+          ((r.status2xx != null || r.status3xx != null)
+            ? Number(r.status2xx || 0) + Number(r.status3xx || 0)
+            : Math.max(0, routeSamples - route4xx - route5xx))
+        );
+        const structured = r.successAvgMs !== undefined || r.clientErrorAvgMs !== undefined;
+        const successAvgMs = structured
+          ? r.successAvgMs
+          : route4xx || route5xx
+            ? null
+            : r.avgMs;
+        rows.push({
+          env,
+          key,
+          method: r.method || "",
+          route: r.route || "",
+          samples: routeSamples,
+          success: routeSuccess,
+          status4xx: route4xx,
+          status5xx: route5xx,
+          successAvgMs,
+          clientErrorAvgMs: structured ? r.clientErrorAvgMs : null,
+          serverErrorAvgMs: structured ? r.serverErrorAvgMs : null,
+          maxMs: r.maxMs,
+          rank: route5xx > 0 ? 0 : routeSuccess > 0 ? 1 : route4xx > 0 ? 2 : 3,
+        });
       });
     });
     if (instrumentationNotes.length && !rows.length) {
@@ -1303,12 +1576,76 @@
     if (!rows.length) {
       return filterSet.size
         ? `<p class="monitor-empty monitor-empty-neutral">Nenhuma das rotas do instante selecionado aparece no ranking da janela atual.</p>`
-        : `<p class="monitor-empty monitor-empty-ok">Nenhuma rota lenta encontrada no período.</p>`;
+        : `<p class="monitor-empty monitor-empty-ok">Nenhuma amostra de rota encontrada no período.</p>`;
     }
-    return `<div class="monitor-table-wrap ops-table-wrap" id="monitor-api-routes-table"><table class="monitor-table">
-      <thead><tr><th>Ambiente</th><th>Rota</th><th>Média ms</th><th>Max ms</th><th>5xx</th><th>Amostras</th></tr></thead>
-      <tbody>${rows.join("")}</tbody>
-    </table></div>`;
+    rows.sort((a, b) =>
+      a.rank - b.rank ||
+      Number(b.successAvgMs || 0) - Number(a.successAvgMs || 0) ||
+      b.status5xx - a.status5xx ||
+      b.status4xx - a.status4xx ||
+      b.samples - a.samples
+    );
+    const successPct = sampleTotals.samples
+      ? (sampleTotals.success / sampleTotals.samples) * 100
+      : 0;
+    const clientErrorPct = sampleTotals.samples
+      ? (sampleTotals.status4xx / sampleTotals.samples) * 100
+      : 0;
+    const latencyValue = (value) =>
+      value == null ? "—" : Number(value) === 0 ? "< 1 ms" : `${formatLatencyMs(value)} ms`;
+    const statusBadge = (kind, label, value) =>
+      `<span class="monitor-api-http-badge is-${kind}"><span>${label}</span><strong>${formatAccessNumber(value)}</strong></span>`;
+    const rowHtml = rows.map((row) => {
+      const state = row.status5xx
+        ? { kind: "critical", label: "Falha de servidor" }
+        : row.success
+          ? { kind: row.status4xx ? "mixed" : "healthy", label: row.status4xx ? "Sucesso + 4xx" : "Com sucesso" }
+          : row.status4xx
+            ? { kind: "warning", label: "Somente 4xx" }
+            : { kind: "neutral", label: "Sem classificação" };
+      return `<tr class="${filterSet.size ? "is-api-filter-hit" : ""} is-${state.kind}" data-api-route="${OC.escapeHtml(row.key)}">
+        <td><strong>${OC.escapeHtml(row.env)}</strong></td>
+        <td class="monitor-api-route-cell">
+          <code>${OC.escapeHtml(row.method)} ${OC.escapeHtml(row.route)}</code>
+          <span class="monitor-api-route-state is-${state.kind}">${OC.escapeHtml(state.label)}</span>
+        </td>
+        <td><div class="monitor-api-latency-stack">
+          <span class="is-success"><small>Sucesso</small><strong>${latencyValue(row.successAvgMs)}</strong></span>
+          <span class="is-4xx"><small>4xx</small><strong>${latencyValue(row.clientErrorAvgMs)}</strong></span>
+          <span class="is-5xx"><small>5xx</small><strong>${latencyValue(row.serverErrorAvgMs)}</strong></span>
+        </div></td>
+        <td class="monitor-api-max-cell">${latencyValue(row.maxMs)}</td>
+        <td><div class="monitor-api-http-badges">
+          ${statusBadge("ok", "2xx/3xx", row.success)}
+          ${statusBadge("4xx", "4xx", row.status4xx)}
+          ${statusBadge("5xx", "5xx", row.status5xx)}
+        </div></td>
+        <td class="monitor-api-sample-count"><strong>${formatAccessNumber(row.samples)}</strong><small>registros</small></td>
+      </tr>`;
+    }).join("");
+    const policyNote = hasStructuredSampling
+      ? "Erros HTTP e requisições lentas são registrados integralmente; respostas normais usam amostragem."
+      : "O ambiente ainda usa o contrato antigo; reinicie o backend para separar a latência por resultado HTTP.";
+    const concentrationWarning = clientErrorPct >= 25
+      ? `<div class="monitor-api-sampling-alert" role="note"><strong>${clientErrorPct.toFixed(1)}% das amostras são 4xx.</strong> Esta proporção é amostral e não deve ser lida como taxa real de erro; use o bloco de volume exato acima.</div>`
+      : "";
+    return `<section class="monitor-api-diagnostics" aria-labelledby="monitor-api-diagnostics-title">
+      <div class="monitor-api-diagnostics-head">
+        <div><h5 id="monitor-api-diagnostics-title">Leitura das amostras</h5><p>${policyNote}</p></div>
+        <span class="monitor-api-sampling-policy">Normais ~${formatAccessNumber(normalRatePct)}%</span>
+      </div>
+      <div class="monitor-api-sample-kpis">
+        <article><span>Amostras</span><strong>${formatAccessNumber(sampleTotals.samples)}</strong><small>não equivale a acessos</small></article>
+        <article class="is-success"><span>2xx/3xx</span><strong>${formatAccessNumber(sampleTotals.success)}</strong><small>${successPct.toFixed(1)}% das amostras</small></article>
+        <article class="${sampleTotals.status4xx ? "is-warning" : ""}"><span>4xx</span><strong>${formatAccessNumber(sampleTotals.status4xx)}</strong><small>cliente, autenticação ou permissão</small></article>
+        <article class="${sampleTotals.status5xx ? "is-critical" : ""}"><span>5xx</span><strong>${formatAccessNumber(sampleTotals.status5xx)}</strong><small>falhas de servidor</small></article>
+      </div>
+      ${concentrationWarning}
+      <div class="monitor-table-wrap ops-table-wrap" id="monitor-api-routes-table"><table class="monitor-table monitor-api-route-diagnostics-table">
+        <thead><tr><th>Ambiente</th><th>Rota</th><th>Latência por resultado</th><th>Máximo</th><th>Respostas amostradas</th><th>Amostras</th></tr></thead>
+        <tbody>${rowHtml}</tbody>
+      </table></div>
+    </section>`;
   }
 
   function applyApiRouteFilter(routes) {
@@ -1346,14 +1683,185 @@
   function apiWindowHours(window) {
     if (window === "1h") return 1;
     if (window === "24h") return 24;
+    if (window === "7d") return 168;
     return 6;
+  }
+
+  function formatAccessNumber(value) {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? Math.round(number).toLocaleString("pt-BR") : "0";
+  }
+
+  function selectedApiEnvs() {
+    const selected = OC.monitorState.selectedEnvs?.length
+      ? OC.monitorState.selectedEnvs
+      : OC.ENV_ORDER;
+    return selected.filter((env) => OC.ENV_ORDER.includes(env));
+  }
+
+  function aggregateApiTraffic(apiRoutes, envs) {
+    const totals = {
+      requests: 0,
+      totalDurationMs: 0,
+      maxMs: 0,
+      peakRpm: 0,
+      uniqueUsers: 0,
+      status2xx: 0,
+      status3xx: 0,
+      status4xx: 0,
+      status5xx: 0,
+    };
+    const rpmByTime = new Map();
+    let available = false;
+    let unavailable = 0;
+
+    envs.forEach((env) => {
+      const traffic = apiRoutes?.[env]?.traffic;
+      if (!traffic || traffic.available === false) {
+        unavailable += 1;
+        return;
+      }
+      available = true;
+      const current = traffic.totals || {};
+      const requests = Number(current.requests || 0);
+      totals.requests += requests;
+      totals.totalDurationMs += requests * Number(current.avgMs || 0);
+      totals.maxMs = Math.max(totals.maxMs, Number(current.maxMs || 0));
+      totals.uniqueUsers += Number(current.uniqueUsers || 0);
+      ["status2xx", "status3xx", "status4xx", "status5xx"].forEach((key) => {
+        totals[key] += Number(current[key] || 0);
+      });
+      (traffic.points || []).forEach((point) => {
+        rpmByTime.set(point.at, (rpmByTime.get(point.at) || 0) + Number(point.rpm || 0));
+      });
+    });
+
+    totals.peakRpm = Math.max(0, ...rpmByTime.values());
+    totals.avgMs = totals.requests ? totals.totalDurationMs / totals.requests : 0;
+    totals.errorRatePct = totals.requests
+      ? ((totals.status4xx + totals.status5xx) / totals.requests) * 100
+      : 0;
+    return { available, unavailable, totals };
+  }
+
+  function renderApiTrafficStatus(totals) {
+    const total = Math.max(1, Number(totals.requests || 0));
+    const ok = Number(totals.status2xx || 0) + Number(totals.status3xx || 0);
+    const client = Number(totals.status4xx || 0);
+    const server = Number(totals.status5xx || 0);
+    const width = (value) => `${Math.max(0, Math.min(100, (value / total) * 100)).toFixed(2)}%`;
+    return `<div class="monitor-access-status" aria-label="Distribuição por status HTTP">
+      <div class="monitor-access-status-bar" aria-hidden="true">
+        <span class="is-ok" style="width:${width(ok)}"></span>
+        <span class="is-4xx" style="width:${width(client)}"></span>
+        <span class="is-5xx" style="width:${width(server)}"></span>
+      </div>
+      <div class="monitor-access-status-legend">
+        <span><i class="is-ok"></i>2xx/3xx <strong>${formatAccessNumber(ok)}</strong></span>
+        <span><i class="is-4xx"></i>4xx <strong>${formatAccessNumber(client)}</strong></span>
+        <span><i class="is-5xx"></i>5xx <strong>${formatAccessNumber(server)}</strong></span>
+      </div>
+    </div>`;
+  }
+
+  function renderApiTrafficRoutes(apiRoutes, envs) {
+    const rows = [];
+    envs.forEach((env) => {
+      const total = Number(apiRoutes?.[env]?.traffic?.totals?.requests || 0);
+      (apiRoutes?.[env]?.traffic?.topRoutes || []).forEach((route) => {
+        const requests = Number(route.requests || 0);
+        rows.push({ env, total, requests, ...route });
+      });
+    });
+    rows.sort((a, b) => b.requests - a.requests);
+    if (!rows.length) {
+      return `<p class="monitor-empty monitor-empty-neutral">As rotas mais acessadas aparecerão após os primeiros minutos de coleta.</p>`;
+    }
+    return `<div class="monitor-table-wrap ops-table-wrap"><table class="monitor-table monitor-access-routes-table">
+      <thead><tr><th>Ambiente</th><th>Rota</th><th>Acessos</th><th>Participação</th><th>Média ms</th><th>4xx</th><th>5xx</th></tr></thead>
+      <tbody>${rows.slice(0, 15).map((row) => `<tr>
+        <td>${OC.escapeHtml(row.env)}</td>
+        <td><code>${OC.escapeHtml(row.method || "")} ${OC.escapeHtml(row.route || "")}</code></td>
+        <td><strong>${formatAccessNumber(row.requests)}</strong></td>
+        <td>${row.total ? ((row.requests / row.total) * 100).toFixed(1) : "0.0"}%</td>
+        <td>${formatLatencyMs(row.avgMs)}</td>
+        <td>${formatAccessNumber(row.errors4xx)}</td>
+        <td>${formatAccessNumber(row.errors5xx)}</td>
+      </tr>`).join("")}</tbody>
+    </table></div>`;
+  }
+
+  function renderApiTrafficOverview(apiRoutes, envs, win, hours) {
+    const aggregate = aggregateApiTraffic(apiRoutes, envs);
+    const totals = aggregate.totals;
+    const series = {};
+    envs.forEach((env) => {
+      const traffic = apiRoutes?.[env]?.traffic;
+      if (!traffic || traffic.available === false) return;
+      const leadingRoute = traffic.topRoutes?.[0];
+      const leadingRouteLabel = leadingRoute
+        ? `${leadingRoute.method || ""} ${leadingRoute.route || ""}`.trim()
+        : "";
+      series[env] = {
+        windowFrom: traffic.since,
+        windowTo: traffic.until,
+        lastSampleAt: traffic.until,
+        points: (traffic.points || []).map((point) => ({
+          t: point.at,
+          v: Number(point.rpm || 0),
+          labels: {
+            requests: Number(point.requests || 0),
+            avgMs: Number(point.avgMs || 0),
+            status4xx: Number(point.status4xx || 0),
+            status5xx: Number(point.status5xx || 0),
+            leadingRoute: leadingRouteLabel,
+          },
+        })),
+      };
+    });
+    const graph = totals.requests
+      ? buildSvgLineChart(series, "Volume de acessos por minuto", null, {
+          windowHours: hours,
+          chartId: "api-access-volume",
+          valueFormat: "rate",
+          valueSuffix: " req/min",
+        }).html
+      : `<p class="monitor-empty monitor-empty-neutral">Nenhum acesso contabilizado em ${win}. A coleta exata começa a preencher o gráfico após a implantação desta versão.</p>`;
+    const availability = !aggregate.available
+      ? `<div class="monitor-section-hint is-warning">A agregação exata ainda não está disponível nos ambientes selecionados. Verifique a migration 0003 e reinicie os backends.</div>`
+      : aggregate.unavailable
+        ? `<div class="monitor-section-hint is-warning">${aggregate.unavailable} ambiente(s) ainda não fornecem a série exata.</div>`
+        : "";
+
+    return `<section class="monitor-access-overview" aria-labelledby="monitor-access-title">
+      <header class="monitor-access-head">
+        <div>
+          <h4 id="monitor-access-title">Volume de acessos</h4>
+          <p>Contagem exata agregada no backend · ${OC.escapeHtml(envs.join(", "))}</p>
+        </div>
+        <span class="monitor-access-source ${aggregate.available ? "" : "is-unavailable"}"><span aria-hidden="true"></span>${aggregate.available ? "Contagem real" : "Aguardando coleta"}</span>
+      </header>
+      ${availability}
+      <div class="monitor-access-kpis">
+        <article><span>Total de acessos</span><strong>${formatAccessNumber(totals.requests)}</strong><small>janela ${OC.escapeHtml(win)}</small></article>
+        <article><span>Pico de tráfego</span><strong>${formatChartMetricValue(totals.peakRpm, "rate")}</strong><small>requisições/min</small></article>
+        <article><span>Usuários autenticados</span><strong>${formatAccessNumber(totals.uniqueUsers)}</strong><small>${envs.length > 1 ? "soma por ambiente" : "únicos no período"}</small></article>
+        <article class="${totals.errorRatePct > 2 ? "is-warning" : ""}"><span>Taxa de erro</span><strong>${totals.errorRatePct.toFixed(2)}%</strong><small>respostas 4xx + 5xx</small></article>
+      </div>
+      <div class="monitor-access-chart">${graph}</div>
+      ${renderApiTrafficStatus(totals)}
+      <div class="monitor-access-routes">
+        <div class="monitor-access-subhead"><h5>Rotas mais acessadas</h5><span>contagem real no período</span></div>
+        ${renderApiTrafficRoutes(apiRoutes, envs)}
+      </div>
+    </section>`;
   }
 
   function renderApisSection(apiRoutes, apiSeries, slos) {
     const win = OC.monitorState.apiWindow || "6h";
     const hours = apiWindowHours(win);
     const sloMs = slos?.healthP95WarnMs ?? 2000;
-    const focus = STATUS_FOCUS_ENVS;
+    const focus = selectedApiEnvs();
     const charts = focus
       .map((env) => {
         const series = apiSeries?.[env];
@@ -1403,11 +1911,14 @@
         { value: "1h", label: "1h" },
         { value: "6h", label: "6h" },
         { value: "24h", label: "24h" },
+        { value: "7d", label: "7d" },
       ],
-      extra: `<span class="monitor-meta-muted">Atualização a cada 15s · MAIN e HOM · SLO ${sloMs} ms</span>`,
+      extra: `<span class="monitor-meta-muted">Atualização a cada 15s · ${OC.escapeHtml(focus.join(", "))} · SLO ${sloMs} ms</span>`,
     })}
+    ${renderApiTrafficOverview(apiRoutes, focus, win, hours)}
+    <div class="monitor-access-subhead monitor-access-subhead--latency"><h4>Desempenho das APIs</h4><span>latência média e picos acima do SLO</span></div>
     <div class="monitor-latency-env-grid">${charts}</div>
-    <h4 class="monitor-drawer-subtitle">Rotas mais lentas</h4>
+    <div class="monitor-access-subhead monitor-access-subhead--diagnostics"><h4>Diagnóstico por rota</h4><span>latência de sucesso separada de respostas 4xx e 5xx</span></div>
     <p class="monitor-section-hint" id="monitor-api-routes-filter-note" hidden></p>
     <div id="monitor-api-routes-wrap">${renderApiRoutesTable(routesFocus)}</div>
     <p class="monitor-meta-muted">Dica: clique em um ponto do gráfico para ver as APIs avaliadas naquele instante.</p>`;
@@ -1444,59 +1955,415 @@
     return `<p class="monitor-section-hint">${total} execução(ões) recentes</p><ul class="monitor-sync-list">${items.join("")}</ul>`;
   }
 
-  function renderLogsToolbar(since) {
-    const pat = OC.monitorState.logsPattern ?? "";
-    const sinceChip = since
-      ? `<span class="monitor-meta-muted">desde ${OC.escapeHtml(OC.formatDate(since))}</span>
-         <button type="button" class="btn btn-ghost btn-sm" id="monitor-logs-clear-since">Limpar horário</button>`
-      : `<span class="monitor-meta-muted">últimas 24h</span>`;
-    return OC.renderOpsChipToolbar({
-      id: "logs-pattern",
-      label: "Filtro",
-      attr: "data-monitor-chip",
-      value: pat,
-      options: [
-        { value: "", label: "Todas" },
-        { value: "ERROR", label: "ERROR" },
-        { value: "WARN", label: "WARN" },
-        { value: "Traceback", label: "Traceback" },
-      ],
-      extra: sinceChip,
+  function logIcon(name) {
+    const paths = {
+      search: '<circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path>',
+      pause: '<rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect>',
+      play: '<path d="m8 5 11 7-11 7z"></path>',
+      follow: '<path d="M12 5v14M6 13l6 6 6-6"></path>',
+      copy: '<rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>',
+      related: '<path d="M4 7h10M4 12h16M4 17h10"></path><path d="m16 5 3 2-3 2M14 15l-3 2 3 2"></path>',
+      chevron: '<path d="m9 18 6-6-6-6"></path>',
+      download: '<path d="M12 3v12m0 0 5-5m-5 5-5-5"></path><path d="M5 21h14"></path>',
+    };
+    return `<svg class="monitor-log-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ""}</svg>`;
+  }
+
+  function logPeriodLabel(filters) {
+    if (filters.period === "custom") {
+      const from = filters.since ? OC.formatDate(filters.since) : "início aberto";
+      const to = filters.until ? OC.formatDate(filters.until) : "agora";
+      return `${from} até ${to}`;
+    }
+    return { "15m": "Últimos 15 min", "1h": "Última hora", "6h": "Últimas 6 h", "24h": "Últimas 24 h" }[
+      filters.period
+    ] || "Últimas 24 h";
+  }
+
+  function periodStartIso(period) {
+    const millis = { "15m": 15 * 60_000, "1h": 60 * 60_000, "6h": 6 * 60 * 60_000, "24h": 24 * 60 * 60_000 }[
+      period
+    ];
+    return millis ? new Date(Date.now() - millis).toISOString() : "";
+  }
+
+  function toDateTimeLocal(iso) {
+    if (!iso) return "";
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "";
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+    return local.toISOString().slice(0, 16);
+  }
+
+  function collectLogViewData(logsByEnv) {
+    const services = new Set();
+    const streams = new Set();
+    const sources = new Set();
+    const lines = [];
+    const errors = [];
+    let hasMore = false;
+    let refreshedAt = "";
+    Object.entries(logsByEnv || {}).forEach(([env, data]) => {
+      if (data?.error) errors.push({ env, message: data.error });
+      (data?.facets?.services || []).forEach((value) => value && services.add(value));
+      (data?.facets?.streams || []).forEach((value) => value && streams.add(value));
+      (data?.sources || []).forEach((source) => {
+        if (source?.service) services.add(source.service);
+        if (source?.stream) streams.add(source.stream);
+        if (source?.exists) sources.add(`${env}:${source.service}:${source.stream}:${source.file}`);
+      });
+      (data?.lines || []).forEach((line) => lines.push({ ...line, environment: env }));
+      hasMore = hasMore || !!data?.hasMore;
+      if ((data?.refreshedAt || "") > refreshedAt) refreshedAt = data.refreshedAt;
     });
+    const seen = new Set();
+    const chronological = lines
+      .filter((line) => {
+        const key = `${line.environment}:${line.key || `${line.logged_at}|${line.service}|${line.line}`}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => {
+        const cmp = String(a.logged_at || "").localeCompare(String(b.logged_at || ""));
+        return cmp || String(a.key || "").localeCompare(String(b.key || ""));
+      });
+    const capped = OC.monitorState.logHistoryMode
+      ? chronological.slice(0, 1000)
+      : chronological.slice(-1000);
+    const unique = (OC.monitorState.logFilters?.order || "asc") === "desc"
+      ? [...capped].reverse()
+      : capped;
+    const byLevel = Object.fromEntries(LOG_LEVELS.map((level) => [level, 0]));
+    unique.forEach((line) => {
+      byLevel[LOG_LEVELS.includes(line.level) ? line.level : "OTHER"] += 1;
+    });
+    return {
+      lines: unique,
+      services: [...services].sort(),
+      streams: [...streams].sort(),
+      sourceCount: sources.size,
+      errors,
+      hasMore,
+      refreshedAt,
+      byLevel,
+    };
+  }
+
+  function renderLogSummary(view) {
+    const cards = [
+      { label: "Registros carregados", value: view.lines.length, tone: "neutral" },
+      { label: "Erros", value: view.byLevel.ERROR, tone: "error" },
+      { label: "Avisos", value: view.byLevel.WARN, tone: "warn" },
+      { label: "Fontes disponíveis", value: view.sourceCount, tone: "ok" },
+    ];
+    return `<div class="monitor-log-summary" aria-label="Resumo dos logs">${cards
+      .map(
+        (card) => `<article class="monitor-log-summary-card is-${card.tone}">
+          <span>${OC.escapeHtml(card.label)}</span><strong>${OC.escapeHtml(card.value)}</strong>
+        </article>`
+      )
+      .join("")}</div>`;
+  }
+
+  function renderLogsToolbar(logsByEnv) {
+    const filters = OC.monitorState.logFilters || DEFAULT_LOG_FILTERS;
+    const view = collectLogViewData(logsByEnv);
+    const serviceValues = [...new Set([...view.services, ...filters.services])].sort();
+    const streamValues = [...new Set([...view.streams, ...filters.streams])].sort();
+    const selectedService = filters.services[0] || "";
+    const selectedStream = filters.streams[0] || "";
+    const activeChips = [];
+    if (filters.q) activeChips.push({ key: "q", label: `Texto: ${filters.q}` });
+    filters.levels.forEach((value) => activeChips.push({ key: `level:${value}`, label: value }));
+    if (selectedService) activeChips.push({ key: "services", label: `Serviço: ${selectedService}` });
+    if (selectedStream) activeChips.push({ key: "streams", label: `Stream: ${selectedStream}` });
+    if (filters.period !== "24h") activeChips.push({ key: "period", label: logPeriodLabel(filters) });
+    const customFields = filters.period === "custom"
+      ? `<div class="monitor-log-custom-period">
+          <label>De<input type="datetime-local" id="monitor-log-since" value="${OC.escapeHtml(toDateTimeLocal(filters.since))}"></label>
+          <label>Até<input type="datetime-local" id="monitor-log-until" value="${OC.escapeHtml(toDateTimeLocal(filters.until))}"></label>
+          <button type="button" class="btn btn-secondary btn-sm" id="monitor-log-apply-period">Aplicar período</button>
+        </div>`
+      : "";
+    return `${renderLogSummary(view)}
+      <div class="monitor-log-toolbar">
+        <form class="monitor-log-search" id="monitor-log-search-form" role="search">
+          ${logIcon("search")}
+          <label class="visually-hidden" for="monitor-log-search">Buscar nos logs</label>
+          <input id="monitor-log-search" type="search" value="${OC.escapeHtml(filters.q)}" placeholder="Buscar mensagem, código ou identificador…" autocomplete="off">
+          <kbd>Enter</kbd>
+        </form>
+        <label class="monitor-log-select">Período
+          <select id="monitor-log-period">
+            ${[["15m", "15 minutos"], ["1h", "1 hora"], ["6h", "6 horas"], ["24h", "24 horas"], ["custom", "Personalizado"]]
+              .map(([value, label]) => `<option value="${value}" ${filters.period === value ? "selected" : ""}>${label}</option>`)
+              .join("")}
+          </select>
+        </label>
+        <label class="monitor-log-select">Serviço
+          <select id="monitor-log-service"><option value="">Todos</option>${serviceValues
+            .map((value) => `<option value="${OC.escapeHtml(value)}" ${selectedService === value ? "selected" : ""}>${OC.escapeHtml(value)}</option>`)
+            .join("")}</select>
+        </label>
+        <label class="monitor-log-select">Stream
+          <select id="monitor-log-stream"><option value="">Todos</option>${streamValues
+            .map((value) => `<option value="${OC.escapeHtml(value)}" ${selectedStream === value ? "selected" : ""}>${OC.escapeHtml(value)}</option>`)
+            .join("")}</select>
+        </label>
+        <label class="monitor-log-select">Ordem
+          <select id="monitor-log-order"><option value="asc" ${filters.order === "asc" ? "selected" : ""}>Mais antigos primeiro</option><option value="desc" ${filters.order === "desc" ? "selected" : ""}>Mais recentes primeiro</option></select>
+        </label>
+      </div>
+      ${customFields}
+      <div class="monitor-log-levels" aria-label="Níveis do log">
+        <span>Nível</span>
+        ${LOG_LEVELS.map((level) => {
+          const active = filters.levels.includes(level);
+          return `<button type="button" class="monitor-log-level is-${level.toLowerCase()} ${active ? "is-active" : ""}" data-log-level="${level}" aria-pressed="${active}">${level}</button>`;
+        }).join("")}
+      </div>
+      ${activeChips.length
+        ? `<div class="monitor-log-active-filters"><span>Filtros ativos</span>${activeChips
+            .map((chip) => `<button type="button" data-log-remove-filter="${OC.escapeHtml(chip.key)}">${OC.escapeHtml(chip.label)} <span aria-hidden="true">×</span></button>`)
+            .join("")}<button type="button" class="monitor-log-clear" id="monitor-log-clear-filters">Limpar tudo</button></div>`
+        : ""}
+      <div class="monitor-log-actions">
+        <div class="monitor-log-live-state" role="status">
+          <span class="monitor-log-live-dot ${OC.monitorState.logsPaused ? "is-paused" : ""}"></span>
+          <strong>${OC.monitorState.logsPaused ? "Atualização pausada" : "Atualizando a cada 15 s"}</strong>
+          <span>${OC.escapeHtml(logPeriodLabel(filters))}${view.refreshedAt ? ` · atualizado ${OC.escapeHtml(OC.formatRelativeTime(view.refreshedAt))}` : ""}</span>
+        </div>
+        <div class="monitor-log-action-buttons">
+          <button type="button" class="btn btn-secondary btn-sm" id="monitor-log-toggle-pause">${logIcon(OC.monitorState.logsPaused ? "play" : "pause")}${OC.monitorState.logsPaused ? "Retomar" : "Pausar"}</button>
+          <button type="button" class="btn btn-secondary btn-sm ${OC.monitorState.logsFollowing ? "is-active" : ""}" id="monitor-log-toggle-follow" aria-pressed="${OC.monitorState.logsFollowing}">${logIcon("follow")}Seguir novos</button>
+          <label class="monitor-log-export-env"><span class="visually-hidden">Ambiente para exportar</span><select id="monitor-log-export-env">${OC.monitorState.selectedEnvs
+            .map((env) => `<option value="${env}">${env}</option>`)
+            .join("")}</select></label>
+          <button type="button" class="btn btn-secondary btn-sm" data-log-export="csv">${logIcon("download")}CSV</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-log-export="json">JSON</button>
+        </div>
+      </div>`;
+  }
+
+  function prettyLogLine(line) {
+    const raw = String(line || "");
+    if (!raw.trim().startsWith("{") && !raw.trim().startsWith("[")) return raw;
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      return raw;
+    }
+  }
+
+  function renderLogEntry(line) {
+    const key = `${line.environment}:${line.key || `${line.logged_at}|${line.service}|${line.line}`}`;
+    const expanded = OC.monitorState.logExpanded?.has(key);
+    const level = LOG_LEVELS.includes(line.level) ? line.level : "OTHER";
+    const sourceDetail = [line.source, line.file].filter(Boolean).join(" · ");
+    return `<article class="monitor-log-entry is-${level.toLowerCase()} ${expanded ? "is-expanded" : ""}" data-log-entry="${OC.escapeHtml(key)}">
+      <button type="button" class="monitor-log-entry-main" data-log-toggle="${OC.escapeHtml(key)}" aria-expanded="${expanded ? "true" : "false"}">
+        <span class="monitor-log-time"><time datetime="${OC.escapeHtml(line.logged_at || "")}" title="${OC.escapeHtml(OC.formatDate(line.logged_at))}">${OC.escapeHtml(OC.formatDate(line.logged_at))}</time></span>
+        <span class="monitor-log-env-badge is-${String(line.environment || "").toLowerCase()}">${OC.escapeHtml(line.environment || "—")}</span>
+        <span class="monitor-log-level-badge">${OC.escapeHtml(level)}</span>
+        <span class="monitor-log-origin">${OC.escapeHtml(line.service || "—")}<small>${OC.escapeHtml(line.stream || "—")}</small></span>
+        <code class="monitor-log-message">${OC.escapeHtml(line.line || "")}</code>
+        ${logIcon("chevron")}
+      </button>
+      ${expanded
+        ? `<div class="monitor-log-detail">
+            <div class="monitor-log-detail-meta"><span><strong>Horário</strong>${OC.escapeHtml(line.logged_at || "—")}</span><span><strong>Origem</strong>${OC.escapeHtml(sourceDetail || "Não informada")}</span><span><strong>Chave</strong>${OC.escapeHtml(line.key || "—")}</span></div>
+            <pre><code>${OC.escapeHtml(prettyLogLine(line.line))}</code></pre>
+            <div class="monitor-log-detail-actions">
+              <button type="button" class="btn btn-secondary btn-sm" data-log-copy="line" data-log-key="${OC.escapeHtml(key)}">${logIcon("copy")}Copiar linha</button>
+              <button type="button" class="btn btn-secondary btn-sm" data-log-copy="detail" data-log-key="${OC.escapeHtml(key)}">${logIcon("copy")}Copiar detalhes</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-log-related="${OC.escapeHtml(key)}">${logIcon("related")}Buscar semelhantes</button>
+            </div>
+          </div>`
+        : ""}
+    </article>`;
   }
 
   function renderLogsViewer(logsByEnv) {
-    const blocks = [];
-    Object.entries(logsByEnv).forEach(([env, data]) => {
-      const lines = data.lines || [];
-      if (data.error) {
-        blocks.push(`<p class="monitor-empty monitor-empty-neutral">${OC.escapeHtml(env)}: ${OC.escapeHtml(data.error)}</p>`);
-        return;
-      }
-      if (!lines.length) {
-        const hint = data.pattern
-          ? `nenhuma linha com “${data.pattern}” no período.`
-          : "nenhuma linha no período.";
-        blocks.push(`<p class="monitor-empty monitor-empty-neutral">${OC.escapeHtml(env)}: ${OC.escapeHtml(hint)}</p>`);
-        return;
-      }
-      const rows = lines
-        .map(
-          (l) => `<tr>
-            <td>${OC.escapeHtml(OC.formatDate(l.logged_at))}</td>
-            <td>${OC.escapeHtml(l.service || "")}</td>
-            <td>${OC.escapeHtml(l.stream || "")}</td>
-            <td class="monitor-log-line"><code>${OC.escapeHtml(l.line || "")}</code></td>
-          </tr>`
-        )
-        .join("");
-      blocks.push(`<h4 class="monitor-log-env">${OC.escapeHtml(env)} <span class="monitor-meta-muted">(${lines.length})</span></h4>
-        <div class="monitor-table-wrap"><table class="monitor-table monitor-log-table">
-          <thead><tr><th>Quando</th><th>Serviço</th><th>Stream</th><th>Linha</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table></div>`);
+    const view = collectLogViewData(logsByEnv);
+    const notices = view.errors.length
+      ? `<div class="monitor-log-errors" role="alert">${view.errors
+          .map((error) => `<span><strong>${OC.escapeHtml(error.env)}</strong>: ${OC.escapeHtml(error.message)}</span>`)
+          .join("")}<button type="button" class="btn btn-ghost btn-sm" id="monitor-log-retry">Tentar novamente</button></div>`
+      : "";
+    const older = view.hasMore
+      ? `<button type="button" class="monitor-log-load-older" id="monitor-log-load-older">Carregar registros anteriores</button>`
+      : `<span class="monitor-log-history-start">Início dos registros disponíveis neste período</span>`;
+    const content = view.lines.length
+      ? view.lines.map(renderLogEntry).join("")
+      : `<div class="monitor-log-empty"><span aria-hidden="true">⌁</span><strong>Nenhum log encontrado</strong><p>Ajuste o período ou remova alguns filtros para ampliar a busca.</p><button type="button" class="btn btn-secondary btn-sm" id="monitor-log-empty-clear">Limpar filtros</button></div>`;
+    return `${notices}
+      <div class="monitor-log-console-shell">
+        <div class="monitor-log-console-head"><span>Console</span><span>${OC.escapeHtml(view.lines.length)} linha(s) carregada(s)</span></div>
+        <div class="monitor-log-history-control">${older}</div>
+        <div class="monitor-log-console" id="monitor-log-console" tabindex="0" aria-label="Linhas de log em ordem cronológica">${content}</div>
+        ${OC.monitorState.logNewCount > 0 ? `<button type="button" class="monitor-log-new" id="monitor-log-show-new">${OC.escapeHtml(OC.monitorState.logNewCount)} novo(s) log(s) ↓</button>` : ""}
+      </div>`;
+  }
+
+  function buildLogRequestParams(options = {}) {
+    const filters = OC.monitorState.logFilters || DEFAULT_LOG_FILTERS;
+    const params = new URLSearchParams({
+      limit: String(options.limit || 200),
+      order: filters.order || "asc",
     });
-    return blocks.join("") || `<p class="monitor-empty monitor-empty-neutral">Nenhum log encontrado.</p>`;
+    const since = filters.period === "custom" ? filters.since : periodStartIso(filters.period);
+    if (options.incrementalSince) params.set("since", options.incrementalSince);
+    else if (since) params.set("since", since);
+    if (filters.period === "custom" && filters.until) params.set("until", filters.until);
+    if (filters.q) params.set("q", filters.q);
+    if (filters.levels.length) params.set("levels", filters.levels.join(","));
+    if (filters.services.length) params.set("services", filters.services.join(","));
+    if (filters.streams.length) params.set("streams", filters.streams.join(","));
+    if (options.cursor) params.set("cursor", options.cursor);
+    return params;
+  }
+
+  function logFilterFingerprint() {
+    const filters = OC.monitorState.logFilters || DEFAULT_LOG_FILTERS;
+    return JSON.stringify({
+      ...filters,
+      levels: [...filters.levels].sort(),
+      services: [...filters.services].sort(),
+      streams: [...filters.streams].sort(),
+    });
+  }
+
+  function mergeLogPayload(previous, incoming, options = {}) {
+    if (!previous || previous._filterFingerprint !== incoming._filterFingerprint) return incoming;
+    const seen = new Set();
+    const mergedLines = [];
+    [...(previous.lines || []), ...(incoming.lines || [])].forEach((line) => {
+      const key = line.key || `${line.logged_at}|${line.service}|${line.stream}|${line.line}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      mergedLines.push(line);
+    });
+    mergedLines.sort((a, b) => String(a.logged_at || "").localeCompare(String(b.logged_at || "")));
+    const lines = options.older || options.preserveHistory
+      ? mergedLines.slice(0, 1000)
+      : mergedLines.slice(-1000);
+    const union = (left, right) => [...new Set([...(left || []), ...(right || [])])].sort();
+    return {
+      ...previous,
+      ...incoming,
+      lines,
+      count: lines.length,
+      facets: {
+        levels: LOG_LEVELS,
+        services: union(previous.facets?.services, incoming.facets?.services),
+        streams: union(previous.facets?.streams, incoming.facets?.streams),
+      },
+      sources: [...(previous.sources || []), ...(incoming.sources || [])].filter(
+        (source, index, all) =>
+          all.findIndex(
+            (candidate) =>
+              `${candidate.service}|${candidate.stream}|${candidate.file}` ===
+              `${source.service}|${source.stream}|${source.file}`
+          ) === index
+      ),
+      hasMore: options.older ? incoming.hasMore : previous.hasMore,
+      nextCursor: options.older ? incoming.nextCursor : previous.nextCursor,
+    };
+  }
+
+  function resetLogFilters() {
+    OC.monitorState.logFilters = { ...DEFAULT_LOG_FILTERS };
+    OC.monitorState.logsPattern = "";
+    OC.monitorState.logNewCount = 0;
+    OC.monitorState.logHistoryMode = false;
+    savePrefs();
+    syncLogFiltersToUrl();
+  }
+
+  function refreshLogsWithFilters(message) {
+    OC.monitorState.logNewCount = 0;
+    OC.monitorState.logHistoryMode = false;
+    savePrefs();
+    syncLogFiltersToUrl();
+    return refreshFromMonitoringControl(message || "Aplicando filtros de logs…");
+  }
+
+  function findRenderedLogLine(key) {
+    const view = collectLogViewData(OC.monitorState.payload?.logs || {});
+    return view.lines.find((line) => {
+      const lineKey = `${line.environment}:${line.key || `${line.logged_at}|${line.service}|${line.line}`}`;
+      return lineKey === key;
+    });
+  }
+
+  async function copyLogText(text, button) {
+    try {
+      await navigator.clipboard.writeText(String(text || ""));
+      if (button) {
+        const original = button.innerHTML;
+        button.textContent = "Copiado";
+        window.setTimeout(() => {
+          if (button.isConnected) button.innerHTML = original;
+        }, 1400);
+      }
+    } catch {
+      window.alert("Não foi possível copiar o conteúdo.");
+    }
+  }
+
+  function rerenderLogsPreservingScroll(options = {}) {
+    const consoleEl = document.getElementById("monitor-log-console");
+    const scrollTop = consoleEl?.scrollTop || 0;
+    const scrollHeight = consoleEl?.scrollHeight || 0;
+    OC.renderMonitoringView(OC.monitorState.payload, { partial: true });
+    window.requestAnimationFrame(() => {
+      const next = document.getElementById("monitor-log-console");
+      if (!next) return;
+      if (options.prepended) next.scrollTop = scrollTop + Math.max(0, next.scrollHeight - scrollHeight);
+      else next.scrollTop = scrollTop;
+    });
+  }
+
+  async function loadOlderLogs(root) {
+    const button = root.querySelector("#monitor-log-load-older");
+    if (button) {
+      button.disabled = true;
+      button.innerHTML = '<span class="loading-spinner loading-spinner-sm" aria-hidden="true"></span> Carregando histórico…';
+    }
+    const logs = OC.monitorState.payload?.logs || {};
+    const fingerprint = logFilterFingerprint();
+    try {
+      await Promise.all(
+        OC.monitorState.selectedEnvs.map(async (env) => {
+          const current = logs[env];
+          if (!current?.hasMore || !current?.nextCursor) return;
+          const params = buildLogRequestParams({ cursor: current.nextCursor, limit: 200 });
+          const incoming = await OC.fetchMonitoringJson(
+            `/api/v1/monitoring/${env}/logs?${params}`,
+            { environment: env, lines: [] },
+            { perfLabel: `logs-older:${env}` }
+          );
+          incoming._filterFingerprint = fingerprint;
+          logs[env] = mergeLogPayload(current, incoming, { older: true });
+        })
+      );
+      OC.monitorState.logHistoryMode = true;
+      rerenderLogsPreservingScroll({ prepended: true });
+    } catch (error) {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "Falha ao carregar. Tentar novamente";
+      }
+    }
+  }
+
+  function buildLogExportUrl(env, format) {
+    const params = buildLogRequestParams({ limit: 10000 });
+    params.delete("limit");
+    params.delete("order");
+    params.set("format", format);
+    return `/api/v1/monitoring/${encodeURIComponent(env)}/logs/export?${params}`;
   }
 
   function renderDeploySection(deployByEnv) {
@@ -1680,17 +2547,24 @@
             });
       case "latency":
         return `${OC.renderOpsSection({
-          title: "Status diário",
-          hint: "MAIN e HOM · clique no dia para detalhe horário",
-          body: loading?.uptime
-            ? renderLoadingSection("Status diário")
-            : `${renderUptimeStatusBars(uptimeByEnv, { drillable: true })}${renderDayHourDrill(OC.monitorState.dayDrill)}`,
+          title: "Latência por ambiente",
+          hint: "Leitura atual e indicadores das últimas 24 horas",
+          className: "monitor-section--latency-overview",
+          body: renderLatencyOverview(overviews, uptimeByEnv, slos),
         })}${OC.renderOpsSection({
-          title: `Tendência de latência`,
-          hint: latencyWindowLabel(OC.monitorState.latencyWindow || "24h"),
+          title: "Evolução da latência",
+          hint: `${latencyWindowLabel(OC.monitorState.latencyWindow || "24h")} · limite p95 ${slos.healthP95WarnMs} ms`,
+          className: "monitor-section--latency-trend",
           body: loading?.healthSeries
             ? renderLoadingSection("Tendência de latência")
-            : `${renderLatencyToolbar()}${buildEnvLatencyCharts(healthSeries, slos.healthP95WarnMs)}`,
+            : buildEnvLatencyCharts(healthSeries, slos.healthP95WarnMs),
+        })}${OC.renderOpsSection({
+          title: "Disponibilidade por dia",
+          hint: "Últimos 7 dias · selecione um dia para abrir o detalhe por hora",
+          className: "monitor-section--uptime",
+          body: loading?.uptime
+            ? renderLoadingSection("Disponibilidade por dia")
+            : `${renderUptimeStatusBars(uptimeByEnv, { drillable: true })}${renderDayHourDrill(OC.monitorState.dayDrill)}`,
         })}`;
       case "syncs":
         return loading?.syncs
@@ -1703,18 +2577,18 @@
       case "apis":
         return loading?.apiRoutes || loading?.apiSeries
           ? renderLoadingSection("Monitoramento de APIs")
-          : OC.renderOpsSection({
-              title: "APIs · MAIN e HOM",
-              hint: "Latência média e rotas lentas",
+            : OC.renderOpsSection({
+              title: "APIs e acessos",
+              hint: "Volume real, usuários, status HTTP, latência e rotas",
               body: renderApisSection(apiRoutes, apiSeries, slos),
             });
       case "logs":
         return loading?.logs
           ? renderLoadingSection("Logs de serviço")
           : OC.renderOpsSection({
-              title: "Logs de serviço",
-              hint: since ? `desde ${OC.formatDate(since)}` : "últimas 24h",
-              body: `${renderLogsToolbar(since)}${renderLogsViewer(logs)}`,
+              title: "Logs operacionais",
+              hint: "Investigue eventos entre ambientes, serviços e streams",
+              body: `${renderLogsToolbar(logs)}${renderLogsViewer(logs)}`,
             });
       default:
         return renderTabContent("summary", payload, overviews, slos);
@@ -1787,17 +2661,19 @@
       ? `<div class="monitor-api-drill-routes">
           <p class="monitor-section-hint">APIs impactadas (±5 min)${source === "live" ? "" : " · snapshot do collector"}</p>
           <div class="monitor-table-wrap ops-table-wrap"><table class="monitor-table">
-            <thead><tr><th>Método</th><th>Rota</th><th>Média</th><th>Máx</th><th>Amostras</th><th>5xx</th></tr></thead>
+            <thead><tr><th>Método</th><th>Rota</th><th>Média sucesso</th><th>Média 4xx</th><th>Máx</th><th>Amostras</th><th>4xx</th><th>5xx</th></tr></thead>
             <tbody>${slowRoutes
               .slice(0, 15)
               .map(
                 (r) => `<tr>
                 <td>${OC.escapeHtml(r.method || "")}</td>
                 <td><code>${OC.escapeHtml(r.route || "")}</code></td>
-                <td>${r.avgMs != null ? formatLatencyMs(r.avgMs) : "—"}</td>
+                <td>${r.successAvgMs != null ? formatLatencyMs(r.successAvgMs) : "—"}</td>
+                <td>${r.clientErrorAvgMs != null ? formatLatencyMs(r.clientErrorAvgMs) : "—"}</td>
                 <td>${r.maxMs != null ? formatLatencyMs(r.maxMs) : "—"}</td>
-                <td>${r.count ?? "—"}</td>
-                <td>${r.errors5xx ?? 0}</td>
+                <td>${r.sampleCount ?? r.count ?? "—"}</td>
+                <td>${r.status4xx ?? r.errors4xx ?? 0}</td>
+                <td>${r.status5xx ?? r.errors5xx ?? 0}</td>
               </tr>`
               )
               .join("")}</tbody>
@@ -1899,6 +2775,9 @@
       if (!svg || !tooltip || !wrap) return;
       const sloRaw = wrap.getAttribute("data-slo");
       const sloMs = sloRaw ? Number(sloRaw) : null;
+      const valueFormat = wrap.getAttribute("data-value-format") || "latency";
+      const valueSuffix = wrap.getAttribute("data-value-suffix") ?? " ms";
+      const formatValue = (value) => formatChartMetricValue(value, valueFormat);
 
       const onMove = (e) => {
         const points = OC._chartHoverData?.[chartId] || [];
@@ -1914,11 +2793,19 @@
         const vsSlo =
           sloMs != null
             ? nearest.v >= sloMs
-              ? ` · +${formatLatencyMs(nearest.v - sloMs)} ms acima do SLO`
-              : ` · ${formatLatencyMs(sloMs - nearest.v)} ms abaixo do SLO`
+              ? ` · +${formatValue(nearest.v - sloMs)}${valueSuffix} acima do SLO`
+              : ` · ${formatValue(sloMs - nearest.v)}${valueSuffix} abaixo do SLO`
             : "";
-        const avgNote = nearest.avg != null ? ` · média ${formatLatencyMs(nearest.avg)} ms` : "";
-        tooltip.innerHTML = `<strong>${OC.escapeHtml(OC.formatDate(nearest.iso))}</strong><br>${OC.escapeHtml(nearest.env)}: <strong>${formatLatencyMs(nearest.v)} ms</strong>${OC.escapeHtml(avgNote)}${OC.escapeHtml(vsSlo)}`;
+        const avgNote = nearest.avg != null ? ` · média ${formatValue(nearest.avg)}${valueSuffix}` : "";
+        const accessNote =
+          valueFormat === "rate" && nearest.labels?.requests != null
+            ? `<br>${Number(nearest.labels.requests).toLocaleString("pt-BR")} acesso(s) no intervalo · latência média ${formatLatencyMs(nearest.labels.avgMs || 0)} ms` +
+              `<br>4xx: ${formatAccessNumber(nearest.labels.status4xx)} · 5xx: ${formatAccessNumber(nearest.labels.status5xx)}` +
+              (nearest.labels.leadingRoute
+                ? `<br>Rota líder no período: <code>${OC.escapeHtml(nearest.labels.leadingRoute)}</code>`
+                : "")
+            : "";
+        tooltip.innerHTML = `<strong>${OC.escapeHtml(OC.formatDate(nearest.iso))}</strong><br>${OC.escapeHtml(nearest.env)}: <strong>${formatValue(nearest.v)}${OC.escapeHtml(valueSuffix)}</strong>${OC.escapeHtml(avgNote)}${OC.escapeHtml(vsSlo)}${accessNote}`;
         tooltip.classList.remove("hidden");
         const wrapRect = wrap.getBoundingClientRect();
         tooltip.style.left = `${Math.min(Math.max(8, e.clientX - wrapRect.left + 12), wrapRect.width - 180)}px`;
@@ -1959,15 +2846,24 @@
       else OC.navigate("monitoring", null, { tab: "incidents" });
     };
     OC.bindOpsStatActions?.(root, { alerts: openAlerts });
-    root.querySelector("#monitor-refresh-now")?.addEventListener("click", () => OC.refreshMonitoring({ force: true }));
+    root.querySelector("#monitor-refresh-now")?.addEventListener("click", () =>
+      refreshFromMonitoringControl("Atualizando monitoramento…")
+    );
     root.querySelector("#monitor-clear-filters")?.addEventListener("click", () => {
       OC.monitorState.selectedEnvs = [...OC.ENV_ORDER];
       CATEGORY_KEYS.forEach((k) => {
         OC.monitorState.categories[k] = true;
       });
       OC.monitorState.eventFilters = { severity: "", category: "", hours: 24 };
+      OC.monitorState.latencyWindow = "24h";
+      OC.monitorState.apiWindow = "6h";
+      OC.monitorState.logsPattern = "";
+      OC.monitorState.logFilters = { ...DEFAULT_LOG_FILTERS };
+      OC.monitorState.logNewCount = 0;
+      OC.monitorState.logHistoryMode = false;
       savePrefs();
-      OC.refreshMonitoring();
+      syncLogFiltersToUrl();
+      refreshFromMonitoringControl("Restaurando filtros…");
     });
     root.querySelectorAll("[data-monitor-env]").forEach((el) => {
       el.addEventListener("click", () => {
@@ -1978,21 +2874,31 @@
           OC.monitorState.selectedEnvs.push(env);
         }
         if (!OC.monitorState.selectedEnvs.length) OC.monitorState.selectedEnvs = [env];
+        const active = OC.monitorState.selectedEnvs.includes(env);
+        el.classList.toggle("is-active", active);
+        el.setAttribute("aria-pressed", active ? "true" : "false");
         savePrefs();
-        OC.refreshMonitoring();
+        syncLogFiltersToUrl();
+        if (OC.monitorState.activeTab === "logs") OC.monitorState.logHistoryMode = false;
+        refreshFromMonitoringControl("Aplicando filtro de ambientes…");
       });
     });
     root.querySelectorAll("[data-monitor-cat]").forEach((el) => {
       el.addEventListener("click", () => {
         const key = el.getAttribute("data-monitor-cat");
         OC.monitorState.categories[key] = !OC.monitorState.categories[key];
+        el.classList.toggle("is-active", OC.monitorState.categories[key]);
+        el.setAttribute("aria-pressed", OC.monitorState.categories[key] ? "true" : "false");
         savePrefs();
-        OC.refreshMonitoring();
+        refreshFromMonitoringControl("Aplicando filtro de categorias…");
       });
     });
     root.querySelectorAll("[data-monitor-tab]").forEach((el) => {
       el.addEventListener("click", () => {
         const tab = el.getAttribute("data-monitor-tab");
+        if (!tab || tab === OC.monitorState.activeTab) return;
+        setSelectedMonitoringTab(root, tab);
+        setMonitoringBusy(true, `Carregando ${TAB_LABELS[tab] || tab}…`);
         const query = { ...(OC.currentRoute.query || {}) };
         delete query.env; // visão multi-ambiente; ?env= só via foco explícito
         // since/filtro de horário só permanece se o usuário ficou em Logs e veio de drill-down
@@ -2025,32 +2931,205 @@
       if (id === "severity" || id === "category" || id === "hours") {
         OC.monitorState.eventFilters[id] = id === "hours" ? Number(value) || 24 : value;
         savePrefs();
-        OC.refreshMonitoring({ force: true });
+        refreshFromMonitoringControl("Aplicando filtros de incidentes…");
         return;
       }
       if (id === "api-window") {
         OC.monitorState.apiWindow = value || "6h";
         savePrefs();
         OC.startMonitoringRefresh();
-        OC.refreshMonitoring({ force: true });
+        refreshFromMonitoringControl("Alterando período das APIs…");
         return;
       }
       if (id === "latency-window") {
         OC.monitorState.latencyWindow = value || "24h";
         savePrefs();
-        OC.refreshMonitoring({ force: true });
+        refreshFromMonitoringControl("Alterando período da latência…");
         return;
       }
-      if (id === "logs-pattern") {
-        OC.monitorState.logsPattern = value || "";
+    });
+
+    const searchInput = root.querySelector("#monitor-log-search");
+    const applyLogSearch = () => {
+      if (!searchInput) return;
+      const value = searchInput.value.trim();
+      if (value === OC.monitorState.logFilters.q) return;
+      OC.monitorState.logFilters.q = value;
+      OC.monitorState.logsPattern = value;
+      refreshLogsWithFilters("Buscando nos logs…");
+    };
+    let logSearchTimer = null;
+    searchInput?.addEventListener("input", () => {
+      window.clearTimeout(logSearchTimer);
+      logSearchTimer = window.setTimeout(applyLogSearch, 300);
+    });
+    root.querySelector("#monitor-log-search-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      window.clearTimeout(logSearchTimer);
+      applyLogSearch();
+    });
+    root.querySelectorAll("[data-log-level]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const level = button.getAttribute("data-log-level");
+        const levels = OC.monitorState.logFilters.levels;
+        OC.monitorState.logFilters.levels = levels.includes(level)
+          ? levels.filter((value) => value !== level)
+          : [...levels, level];
+        refreshLogsWithFilters("Filtrando níveis de log…");
+      });
+    });
+    root.querySelector("#monitor-log-service")?.addEventListener("change", (event) => {
+      OC.monitorState.logFilters.services = event.target.value ? [event.target.value] : [];
+      refreshLogsWithFilters("Filtrando serviço…");
+    });
+    root.querySelector("#monitor-log-stream")?.addEventListener("change", (event) => {
+      OC.monitorState.logFilters.streams = event.target.value ? [event.target.value] : [];
+      refreshLogsWithFilters("Filtrando stream…");
+    });
+    root.querySelector("#monitor-log-order")?.addEventListener("change", (event) => {
+      OC.monitorState.logFilters.order = event.target.value === "desc" ? "desc" : "asc";
+      refreshLogsWithFilters("Alterando ordem dos logs…");
+    });
+    root.querySelector("#monitor-log-period")?.addEventListener("change", (event) => {
+      const period = event.target.value;
+      OC.monitorState.logFilters.period = period;
+      if (period !== "custom") {
+        OC.monitorState.logFilters.since = "";
+        OC.monitorState.logFilters.until = "";
+        refreshLogsWithFilters("Alterando período dos logs…");
+      } else {
+        OC.monitorState.logFilters.since = periodStartIso("1h");
+        OC.monitorState.logFilters.until = "";
         savePrefs();
-        OC.refreshMonitoring({ force: true });
+        syncLogFiltersToUrl();
+        rerenderLogsPreservingScroll();
       }
     });
-    root.querySelector("#monitor-logs-clear-since")?.addEventListener("click", () => {
-      const query = { ...(OC.currentRoute.query || {}) };
-      delete query.since;
-      OC.navigate("monitoring", null, { tab: "logs", query });
+    root.querySelector("#monitor-log-apply-period")?.addEventListener("click", () => {
+      const sinceValue = root.querySelector("#monitor-log-since")?.value || "";
+      const untilValue = root.querySelector("#monitor-log-until")?.value || "";
+      const since = sinceValue ? new Date(sinceValue).toISOString() : "";
+      const until = untilValue ? new Date(untilValue).toISOString() : "";
+      if (since && until && since > until) {
+        window.alert("O início do período precisa ser anterior ao fim.");
+        return;
+      }
+      OC.monitorState.logFilters.since = since;
+      OC.monitorState.logFilters.until = until;
+      refreshLogsWithFilters("Aplicando período personalizado…");
+    });
+    root.querySelectorAll("[data-log-remove-filter]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const key = button.getAttribute("data-log-remove-filter");
+        if (key?.startsWith("level:")) {
+          const level = key.split(":")[1];
+          OC.monitorState.logFilters.levels = OC.monitorState.logFilters.levels.filter(
+            (value) => value !== level
+          );
+        } else if (key === "period") {
+          OC.monitorState.logFilters.period = "24h";
+          OC.monitorState.logFilters.since = "";
+          OC.monitorState.logFilters.until = "";
+        } else if (key === "q") {
+          OC.monitorState.logFilters.q = "";
+        } else if (key === "services" || key === "streams") {
+          OC.monitorState.logFilters[key] = [];
+        }
+        refreshLogsWithFilters("Removendo filtro…");
+      });
+    });
+    root.querySelector("#monitor-log-clear-filters")?.addEventListener("click", () => {
+      resetLogFilters();
+      refreshFromMonitoringControl("Limpando filtros de logs…");
+    });
+    root.querySelector("#monitor-log-empty-clear")?.addEventListener("click", () => {
+      resetLogFilters();
+      refreshFromMonitoringControl("Ampliando busca de logs…");
+    });
+    root.querySelector("#monitor-log-toggle-pause")?.addEventListener("click", () => {
+      OC.monitorState.logsPaused = !OC.monitorState.logsPaused;
+      OC.startMonitoringRefresh();
+      rerenderLogsPreservingScroll();
+    });
+    root.querySelector("#monitor-log-toggle-follow")?.addEventListener("click", () => {
+      OC.monitorState.logsFollowing = !OC.monitorState.logsFollowing;
+      savePrefs();
+      const returnToLatest = OC.monitorState.logsFollowing && OC.monitorState.logHistoryMode;
+      if (OC.monitorState.logsFollowing) {
+        OC.monitorState.logHistoryMode = false;
+        OC.monitorState.logNewCount = 0;
+      }
+      if (returnToLatest) refreshFromMonitoringControl("Voltando aos logs mais recentes…");
+      else rerenderLogsPreservingScroll();
+    });
+    root.querySelectorAll("[data-log-export]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const env = root.querySelector("#monitor-log-export-env")?.value || OC.monitorState.selectedEnvs[0];
+        const format = button.getAttribute("data-log-export") || "csv";
+        const link = document.createElement("a");
+        link.href = buildLogExportUrl(env, format);
+        link.hidden = true;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      });
+    });
+    root.querySelectorAll("[data-log-toggle]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const key = button.getAttribute("data-log-toggle");
+        if (OC.monitorState.logExpanded.has(key)) OC.monitorState.logExpanded.delete(key);
+        else OC.monitorState.logExpanded.add(key);
+        rerenderLogsPreservingScroll();
+      });
+    });
+    root.querySelectorAll("[data-log-copy]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const line = findRenderedLogLine(button.getAttribute("data-log-key"));
+        if (!line) return;
+        const text = button.getAttribute("data-log-copy") === "detail"
+          ? `${line.logged_at} | ${line.environment} | ${line.level} | ${line.service}/${line.stream}\n${line.line}`
+          : line.line;
+        copyLogText(text, button);
+      });
+    });
+    root.querySelectorAll("[data-log-related]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const line = findRenderedLogLine(button.getAttribute("data-log-related"));
+        if (!line) return;
+        const identifier = String(line.line || "").match(/[a-f0-9]{8}-[a-f0-9-]{20,}|\b[A-Z][A-Z0-9_]{5,}\b/i)?.[0];
+        OC.monitorState.logFilters.q = identifier || String(line.line || "").trim().slice(0, 80);
+        refreshLogsWithFilters("Buscando ocorrências semelhantes…");
+      });
+    });
+    root.querySelector("#monitor-log-load-older")?.addEventListener("click", () => loadOlderLogs(root));
+    root.querySelector("#monitor-log-retry")?.addEventListener("click", () =>
+      refreshFromMonitoringControl("Tentando carregar os logs novamente…")
+    );
+    root.querySelector("#monitor-log-show-new")?.addEventListener("click", () => {
+      const refreshLatest = OC.monitorState.logHistoryMode;
+      OC.monitorState.logHistoryMode = false;
+      OC.monitorState.logNewCount = 0;
+      if (refreshLatest) {
+        refreshFromMonitoringControl("Carregando logs mais recentes…");
+        return;
+      }
+      OC.renderMonitoringView(OC.monitorState.payload, { partial: true });
+      window.requestAnimationFrame(() => {
+        const consoleEl = document.getElementById("monitor-log-console");
+        if (consoleEl) {
+          consoleEl.scrollTop = (OC.monitorState.logFilters?.order || "asc") === "desc"
+            ? 0
+            : consoleEl.scrollHeight;
+        }
+      });
+    });
+    root.querySelector("#monitor-log-console")?.addEventListener("scroll", (event) => {
+      const consoleEl = event.currentTarget;
+      const atBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 32;
+      if (atBottom && OC.monitorState.logNewCount) {
+        OC.monitorState.logNewCount = 0;
+        root.querySelector("#monitor-log-show-new")?.remove();
+      }
     });
     root.querySelector("#monitor-clear-events")?.addEventListener("click", async () => {
       if (
@@ -2195,10 +3274,13 @@
     root.innerHTML = `${renderMonitorHero(emptyKpis, {
       compact: activeTab !== "summary",
       tabLabel: TAB_LABELS[activeTab] || activeTab,
+      tab: activeTab,
     })}
-    ${OC.renderMonitoringFilters()}
-    ${renderTabBar(activeTab)}
-    <div class="monitor-tab-panel"><div class="loading-inline"><div class="loading-spinner loading-spinner-sm"></div> Carregando monitoramento…</div></div>`;
+    <div class="monitor-control-surface">
+      ${renderTabBar(activeTab)}
+      ${OC.renderMonitoringFilters()}
+    </div>
+    <div class="monitor-tab-panel" id="monitor-tab-panel" role="tabpanel"><div class="loading-inline"><div class="loading-spinner loading-spinner-sm"></div> Carregando monitoramento…</div></div>`;
     bindMonitoringInteractions(root);
   };
 
@@ -2230,16 +3312,20 @@
 
     if (canPartial) {
       OC.updateAlertCountInPlace?.(kpis.alertCount);
-      root.querySelectorAll(".ops-hero-stat-value, .ops-kpi-value").forEach((el) => {
-        const card = el.closest("[data-ops-stat-action], [data-ops-kpi-action], .ops-hero-stat, .ops-kpi");
-        const label = card?.querySelector(".ops-hero-stat-label, .ops-kpi-label")?.textContent || "";
-        if (/alertas ativos/i.test(label)) el.textContent = String(kpis.alertCount ?? 0);
-        else if (/problemas/i.test(label)) el.textContent = String(kpis.occurredCount ?? 0);
-        else if (/saudáveis|healthy|ambientes ok/i.test(label)) el.textContent = `${kpis.healthy}/${kpis.total}`;
-        else if (/disponibilidade/i.test(label) && kpis.avgUptime != null) el.textContent = `${kpis.avgUptime}%`;
-      });
-      const meta = root.querySelector(".monitor-meta-bar");
+      const hero = root.querySelector(".ops-hero");
+      if (hero) {
+        hero.outerHTML = renderMonitorHero(kpis, {
+          compact: activeTab !== "summary",
+          tabLabel: TAB_LABELS[activeTab] || activeTab,
+          tab: activeTab,
+        });
+      }
+      const tabs = root.querySelector(".monitor-tabs");
+      if (tabs) tabs.outerHTML = renderTabBar(activeTab);
+      const meta = root.querySelector(".monitor-meta-wrap");
       if (meta) meta.outerHTML = renderMetaBar(payload?.config, warnings);
+      const filters = root.querySelector(".monitor-filter-panel");
+      if (filters) filters.outerHTML = OC.renderMonitoringFilters();
       panel.innerHTML = renderTabContent(activeTab, payload, overviews, slos);
       bindMonitoringInteractions(root);
       const ms = (typeof performance !== "undefined" ? performance.now() : Date.now()) - tRender0;
@@ -2251,11 +3337,14 @@
     root.innerHTML = `${renderMonitorHero(kpis, {
       compact: activeTab !== "summary",
       tabLabel: TAB_LABELS[activeTab] || activeTab,
+      tab: activeTab,
     })}
-    ${OC.renderMonitoringFilters()}
-    ${renderTabBar(activeTab)}
-    ${renderMetaBar(payload?.config, warnings)}
-    <div class="monitor-tab-panel">${renderTabContent(activeTab, payload, overviews, slos)}</div>`;
+    <div class="monitor-control-surface">
+      ${renderTabBar(activeTab)}
+      ${OC.renderMonitoringFilters()}
+      ${renderMetaBar(payload?.config, warnings)}
+    </div>
+    <div class="monitor-tab-panel" id="monitor-tab-panel" role="tabpanel">${renderTabContent(activeTab, payload, overviews, slos)}</div>`;
 
     bindMonitoringInteractions(root);
     const ms = (typeof performance !== "undefined" ? performance.now() : Date.now()) - tRender0;
@@ -2302,6 +3391,22 @@
     const plan = monitoringFetchPlan(tab, OC.monitorState.categories);
     const prev = OC.monitorState.payload || {};
     const hadShell = !!document.querySelector("#view-monitoring .monitor-tab-panel");
+    const currentLogConsole = document.getElementById("monitor-log-console");
+    const logScrollState = currentLogConsole
+      ? {
+          exists: true,
+          top: currentLogConsole.scrollTop,
+          height: currentLogConsole.scrollHeight,
+          atNewest:
+            (OC.monitorState.logFilters?.order || "asc") === "desc"
+              ? currentLogConsole.scrollTop < 32
+              : currentLogConsole.scrollHeight - currentLogConsole.scrollTop - currentLogConsole.clientHeight < 32,
+        }
+      : { exists: false, top: 0, height: 0, atNewest: true };
+
+    if (options.showFeedback) {
+      setMonitoringBusy(true, options.feedbackMessage || "");
+    }
 
     if (options.showLoading || !prev.envSummaries?.length) {
       OC.showMonitoringLoading();
@@ -2367,6 +3472,22 @@
 
       const usePartial = hadShell && !options.showLoading;
       OC.renderMonitoringView(payload, { partial: usePartial });
+      if (tab === "logs") {
+        window.requestAnimationFrame(() => {
+          const consoleEl = document.getElementById("monitor-log-console");
+          if (!consoleEl) return;
+          const newestAtTop = (OC.monitorState.logFilters?.order || "asc") === "desc";
+          if (
+            !logScrollState.exists ||
+            options.showFeedback ||
+            (OC.monitorState.logsFollowing && logScrollState.atNewest)
+          ) {
+            consoleEl.scrollTop = newestAtTop ? 0 : consoleEl.scrollHeight;
+          } else {
+            consoleEl.scrollTop = logScrollState.top;
+          }
+        });
+      }
 
       const openEventId = OC.currentRoute?.query?.event;
       const openEnv = OC.currentRoute?.query?.env;
@@ -2385,7 +3506,7 @@
 
     const fetchUptimeDays = async () => {
       await Promise.all(
-        STATUS_FOCUS_ENVS.map(async (env) => {
+        envs.map(async (env) => {
           uptimeByEnv[env] = await OC.fetchMonitoringJson(
             `/api/v1/monitoring/${env}/uptime-days?days=7`,
             { environment: env, dayBars: [] },
@@ -2436,7 +3557,13 @@
         deploys = { ...deploys, ...(dash.deploys || {}) };
         groupedEvents =
           Array.isArray(dash.groupedEvents) && (plan.grouped || dash.groupedEvents.length)
-            ? dash.groupedEvents
+            ? dash.groupedEvents.filter((group) => {
+                const envVisible = envs.includes(group.environment) || group.environment === "HOST";
+                const categoryVisible = OC.monitorState.categories[group.category] !== false;
+                const severityVisible = !ef.severity || group.severity === ef.severity;
+                const selectedCategory = !ef.category || group.category === ef.category;
+                return envVisible && categoryVisible && severityVisible && selectedCategory;
+              })
             : groupedEvents;
         events = Array.isArray(dash.events) ? dash.events : events;
 
@@ -2535,7 +3662,9 @@
             const all = groupedResp.groups || [];
             OC.lastAlertGroups = all;
             OC._alertGroupsFetchedAt = Date.now();
-            groupedEvents = all.filter((g) => envs.includes(g.environment));
+            groupedEvents = all.filter(
+              (g) => envs.includes(g.environment) || (g.environment === "HOST" && OC.monitorState.categories.host)
+            );
             delete loading.grouped;
           })
         );
@@ -2545,7 +3674,7 @@
         const win = OC.monitorState.apiWindow || "6h";
         phase2.push(
           Promise.all(
-            STATUS_FOCUS_ENVS.map(async (env) => {
+            envs.map(async (env) => {
               apiRoutes[env] = await OC.fetchMonitoringJson(
                 `/api/v1/monitoring/${env}/api-routes?window=${encodeURIComponent(win)}`,
                 { environment: env, slowRoutes: [] },
@@ -2562,7 +3691,7 @@
         const hours = apiWindowHours(OC.monitorState.apiWindow || "6h");
         phase2.push(
           Promise.all(
-            STATUS_FOCUS_ENVS.map(async (env) => {
+            envs.map(async (env) => {
               apiSeries[env] = await OC.fetchMonitoringJson(
                 `/api/v1/monitoring/${env}/series?metric=api_avg_ms&hours=${hours}`,
                 { environment: env, points: [] },
@@ -2608,21 +3737,45 @@
       }
 
       if (plan.logs) {
-        const since = OC.currentRoute?.query?.since || "";
-        const pattern = OC.monitorState.logsPattern ?? "";
+        const fingerprint = logFilterFingerprint();
+        let newLineCount = 0;
         phase2.push(
           Promise.all(
             envs.map(async (env) => {
-              const params = new URLSearchParams({ limit: "200" });
-              if (since) params.set("since", since);
-              if (pattern) params.set("pattern", pattern);
-              logs[env] = await OC.fetchMonitoringJson(
+              const previous = logs[env];
+              const canIncrement =
+                options.incremental === true &&
+                previous?._filterFingerprint === fingerprint &&
+                previous?.lines?.length;
+              const latest = canIncrement
+                ? previous.lines.reduce(
+                    (value, line) => String(line.logged_at || "") > value ? String(line.logged_at) : value,
+                    ""
+                  )
+                : "";
+              const params = buildLogRequestParams({ incrementalSince: latest, limit: 200 });
+              const incoming = await OC.fetchMonitoringJson(
                 `/api/v1/monitoring/${env}/logs?${params}`,
-                { environment: env, lines: [], pattern },
+                { environment: env, lines: [] },
                 fetchOpts(`logs:${env}`)
               );
+              incoming._filterFingerprint = fingerprint;
+              if (canIncrement && !incoming.error) {
+                const known = new Set((previous.lines || []).map((line) => line.key));
+                newLineCount += (incoming.lines || []).filter((line) => !known.has(line.key)).length;
+                logs[env] = mergeLogPayload(previous, incoming, {
+                  preserveHistory: OC.monitorState.logHistoryMode,
+                });
+              } else {
+                logs[env] = incoming;
+              }
             })
           ).then(() => {
+            if (newLineCount && !(OC.monitorState.logsFollowing && logScrollState.atNewest)) {
+              OC.monitorState.logNewCount += newLineCount;
+            } else if (OC.monitorState.logsFollowing && logScrollState.atNewest) {
+              OC.monitorState.logNewCount = 0;
+            }
             delete loading.logs;
           })
         );
@@ -2634,6 +3787,9 @@
         ...payloadFields(),
         loading: {},
       });
+      // Monitoring has an independent polling loop. A successful poll is
+      // activity and must prevent the idle lock while the dashboard is live.
+      OC.resetIdleTimer?.();
     } catch (err) {
       if (err.name === "AbortError") return;
       const root = document.getElementById("view-monitoring");
@@ -2643,6 +3799,8 @@
         OC.bindBackNavigation(root);
       }
     } finally {
+      if (generation !== OC._monitorRefreshGeneration) return;
+      setMonitoringBusy(false);
       OC._monitorRefreshInFlight = false;
       if (OC._monitorRefreshPending) {
         OC._monitorRefreshPending = false;
@@ -2654,11 +3812,12 @@
   OC.startMonitoringRefresh = function startMonitoringRefresh() {
     OC.stopMonitoringRefresh();
     const tab = OC.monitorState.activeTab || "summary";
+    if (tab === "logs" && OC.monitorState.logsPaused) return;
     let ms = MONITOR_REFRESH_MS;
     if (tab === "apis") ms = MONITOR_APIS_REFRESH_MS;
     else if (tab === "logs") ms = MONITOR_LOGS_REFRESH_MS;
     OC.monitorTimer = setInterval(() => {
-      if (!OC._monitorRefreshInFlight) OC.refreshMonitoring();
+      if (!OC._monitorRefreshInFlight) OC.refreshMonitoring({ incremental: tab === "logs" });
     }, ms);
   };
 

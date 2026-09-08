@@ -16,16 +16,20 @@ $opsRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot "lib\git_invoke.ps1")
 . (Join-Path $opsRoot "lib\version_drift.ps1")
 
+if (-not (Test-PplidEnvironmentEnabled -Environment $Environment -ScriptRoot $opsRoot)) {
+    Write-Host "Ambiente $Environment desativado (enabled=false); watch ignorado."
+    exit 0
+}
+
 Initialize-PplidGitSafeDirectories
 $spec = Get-PplidEnvSpec -Environment $Environment
 $paths = Get-PplidDeployEnvPaths -Environment $Environment
-$logFile = Join-Path (Get-PplidLogDir) "PPLID_$Environment.log"
+. (Join-Path $opsRoot "lib\ops_store.ps1")
 $runId = New-DeployRunId
 
 function Write-WatchLog {
     param([string]$Message)
-    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $logFile -Value "[$ts] $Message" -Encoding UTF8
+    Write-OpsEnvLog -Environment $Environment -Service "watcher" -Message $Message
 }
 
 function Ensure-Mirror {
@@ -137,16 +141,16 @@ if (($state.blockedSha -and (Test-PplidShaMatch -Left $remote.Short -Right ([str
     exit 0
 }
 
-if (-not (Enter-DeployLock -Environment $Environment)) {
+Write-WatchLog "Deploy necessario: $($state.activeSha) -> $($remote.Short)"
+& (Join-Path $PSScriptRoot "run_pipeline_locked.ps1") `
+    -Environment $Environment `
+    -TargetSha $remote.Short `
+    -TargetShaFull $remote.Full `
+    -RunId $runId `
+    -Trigger watcher
+$code = $LASTEXITCODE
+if ($code -eq 2) {
     Write-WatchLog "Lock busy, skip."
     exit 0
 }
-
-try {
-    Initialize-DeployRun -Environment $Environment -RunId $runId -Trigger "watcher" -TargetSha $remote.Short
-    Write-RunLog -Environment $Environment -RunId $runId -Message "Deploy necessario: $($state.activeSha) -> $($remote.Short)"
-    & (Join-Path $PSScriptRoot "deploy_pipeline.ps1") -Environment $Environment -TargetSha $remote.Short -TargetShaFull $remote.Full -RunId $runId -Trigger watcher
-    exit $LASTEXITCODE
-} finally {
-    Exit-DeployLock -Environment $Environment
-}
+exit $code

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      try {
+        document.documentElement.dataset.theme = localStorage.getItem("ops-monitoring-tv-theme") === "dark" ? "dark" : "light";
+      } catch (_) { /* armazenamento pode estar bloqueado */ }
+    </script>
+    <title>PPLID — Monitoramento em tempo real</title>
+    <link rel="stylesheet" href="/monitoring-tv.css" />
+  </head>
+  <body>
+    <main class="tv-shell" aria-live="polite">
+      <header class="tv-header">
+        <div class="tv-brand">
+          <span class="tv-logo" aria-hidden="true">
+            <svg viewBox="0 0 32 32"><path d="M7 17h4l2.8-7 4.4 13L21 16h4" /></svg>
+          </span>
+          <div>
+            <p>PPLID · OPS CONSOLE</p>
+            <h1>Monitoramento em tempo real</h1>
+          </div>
+        </div>
+        <div class="tv-header-actions">
+          <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Ativar modo escuro" aria-pressed="false">
+            <span class="theme-toggle-icon" id="theme-toggle-icon" aria-hidden="true">☾</span>
+            <span id="theme-toggle-label">Escuro</span>
+          </button>
+          <div class="tv-live">
+            <div class="tv-live-state"><span class="live-dot"></span><strong id="collector-label">Conectando</strong></div>
+            <time id="clock">--:--:--</time>
+            <small id="last-update">Aguardando primeira leitura</small>
+          </div>
+        </div>
+      </header>
+
+      <section class="kpi-grid" aria-label="Indicadores principais">
+        <article class="kpi-card tone-green health-kpi" id="kpi-health-card">
+          <div class="kpi-head"><span>Saúde do MAIN</span><span class="kpi-icon">●</span></div>
+          <strong class="kpi-value" id="kpi-health">—</strong>
+          <div class="health-components" id="health-components"></div>
+        </article>
+        <article class="kpi-card tone-purple" id="kpi-active-users-card">
+          <div class="kpi-head"><span>Usuários ativos agora</span><span class="kpi-icon">●</span></div>
+          <strong class="kpi-value" id="kpi-active-users">—</strong>
+          <p id="kpi-active-users-note">atividade autenticada · últimos 5 min</p>
+          <p class="kpi-peak-note" id="kpi-active-users-peak">Maior pico registrado: — agentes</p>
+        </article>
+        <article class="kpi-card tone-cyan" id="kpi-uptime-card">
+          <div class="kpi-head"><span>Disponibilidade real</span><span class="kpi-icon">⌁</span></div>
+          <strong class="kpi-value" id="kpi-uptime">—</strong>
+          <p>health alcançável · últimas 24 horas</p>
+        </article>
+        <article class="kpi-card tone-amber" id="kpi-latency-card">
+          <div class="kpi-head"><span>Latência p95</span><span class="kpi-icon">◴</span></div>
+          <strong class="kpi-value" id="kpi-latency">—</strong>
+          <p id="kpi-latency-note">MAIN · últimas 6 horas</p>
+        </article>
+        <article class="kpi-card tone-green" id="kpi-sync-card">
+          <div class="kpi-head"><span>Sincronizações</span><span class="kpi-icon">↻</span></div>
+          <strong class="kpi-value" id="kpi-sync">—</strong>
+          <p id="kpi-sync-note">validando execuções recentes</p>
+        </article>
+      </section>
+
+      <section class="charts-grid">
+        <article class="panel chart-panel">
+          <header class="panel-head">
+            <div><p>TRÁFEGO · MAIN · 1H</p><h2>Tráfego do site</h2></div>
+            <div class="chart-legend" id="traffic-legend"></div>
+          </header>
+          <div class="chart-wrap" id="traffic-chart" role="img" aria-label="Requisições, acessos únicos e memória na última hora">
+            <div class="empty-state">Carregando tráfego…</div>
+          </div>
+        </article>
+        <article class="panel chart-panel">
+          <header class="panel-head">
+            <div><p>HEALTH · MAIN · 6H</p><h2>Latência p95 a cada 30 min</h2></div>
+            <div class="chart-legend" id="latency-legend"></div>
+          </header>
+          <div class="chart-wrap" id="health-latency-chart" role="img" aria-label="Latência p95 do health do MAIN nas últimas seis horas">
+            <div class="empty-state">Carregando latência…</div>
+          </div>
+        </article>
+      </section>
+
+      <section class="bottom-grid">
+        <article class="panel productivity-panel">
+          <header class="panel-head">
+            <div><p>PRODUTIVIDADE H/H</p><h2>Etapas do último ciclo</h2></div>
+            <span class="panel-caption" id="productivity-cycle">ciclo atual</span>
+          </header>
+          <div class="productivity-table-wrap">
+            <table class="productivity-table">
+              <thead><tr><th>Sistema</th><th>Etapa</th><th>Estado</th><th>Atualização</th></tr></thead>
+              <tbody id="productivity-table-body"><tr><td colspan="4"><div class="empty-state">Carregando produtividade…</div></td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <div class="alerts-stack">
+          <aside class="panel compact-panel">
+            <header class="panel-head"><div><p>ATENÇÃO</p><h2>Ocorrências recentes</h2></div><span class="panel-badge" id="incident-badge">24h</span></header>
+            <div class="incident-list" id="incident-list"><div class="empty-state">Carregando ocorrências…</div></div>
+          </aside>
+          <aside class="panel compact-panel">
+            <header class="panel-head"><div><p>APIS · MAIN</p><h2>Endpoints críticos</h2></div><span class="panel-badge" id="endpoint-badge">1h</span></header>
+            <div class="endpoint-list" id="endpoint-list"><div class="empty-state">Carregando endpoints…</div></div>
+          </aside>
+        </div>
+
+        <article class="panel host-panel">
+          <header class="panel-head">
+            <div><p>CAPACIDADE</p><h2>Recursos do host</h2></div>
+            <span class="panel-caption" id="host-name">servidor</span>
+          </header>
+          <div class="resource-grid" id="resource-grid"></div>
+        </article>
+      </section>
+    </main>
+
+    <div class="connection-banner" id="connection-banner" role="alert" hidden></div>
+    <script src="/js/monitoring-tv.js"></script>
+  </body>
+</html>

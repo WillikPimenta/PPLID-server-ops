@@ -230,6 +230,41 @@ def append_deploy_log(
         return int(cur.lastrowid)
 
 
+def append_deploy_log_batch(
+    environment: str,
+    run_id: str,
+    log_name: str,
+    entries: list[dict[str, str]],
+    *,
+    db_path: Path | None = None,
+) -> int:
+    """Insert many deploy log lines in one transaction. entries: {level, message, logged_at?}."""
+    if not entries:
+        return 0
+    name = _normalize_log_name(log_name)
+    env = environment.upper()
+    rows = []
+    for item in entries:
+        level = str(item.get("level") or "INFO")
+        message = str(item.get("message") or "")
+        if not message:
+            continue
+        ts = str(item.get("logged_at") or "") or _utc_now_iso()
+        rows.append((env, run_id, name, level, message, ts))
+    if not rows:
+        return 0
+    with get_connection(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO deploy_log_lines(environment, run_id, log_name, level, message, logged_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
 def tail_deploy_logs(
     environment: str,
     run_id: str,
@@ -654,6 +689,42 @@ def insert_monitor_sample(
         return int(cur.lastrowid)
 
 
+def insert_monitor_samples_batch(
+    samples: list[dict[str, Any]],
+    *,
+    db_path: Path | None = None,
+) -> int:
+    """Insert a collector cycle in one transaction.
+
+    Each sample accepts environment, metric_key, value and optional labels /
+    recorded_at. Invalid/incomplete rows are rejected before opening SQLite so a
+    partially written collector tick cannot be mistaken for a complete sample.
+    """
+    if not samples:
+        return 0
+    default_ts = _utc_now_iso()
+    rows: list[tuple[str, str, float, str | None, str]] = []
+    for sample in samples:
+        environment = str(sample.get("environment") or "").strip().upper()
+        metric_key = str(sample.get("metric_key") or "").strip()
+        if not environment or not metric_key or sample.get("value") is None:
+            raise ValueError("monitor sample requires environment, metric_key and value")
+        labels = sample.get("labels")
+        labels_json = json.dumps(labels, ensure_ascii=False) if labels else None
+        recorded_at = str(sample.get("recorded_at") or default_ts)
+        rows.append((environment, metric_key, float(sample["value"]), labels_json, recorded_at))
+    with get_connection(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO monitor_samples(environment, metric_key, value, labels_json, recorded_at)
+            VALUES(?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
 def insert_monitor_event(
     environment: str,
     severity: str,
@@ -720,6 +791,48 @@ def query_monitor_series(
             item["labels"] = {}
         out.append(item)
     return out
+
+
+def query_monitor_series_bucketed(
+    environment: str,
+    metric_key: str,
+    *,
+    since: str,
+    until: str | None = None,
+    bucket_seconds: int = 60,
+    limit: int = 360,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate a long metric window in SQLite instead of loading raw samples."""
+    clauses = ["environment=?", "metric_key=?", "recorded_at>=?"]
+    params: list[Any] = [environment.upper(), metric_key, since]
+    if until:
+        clauses.append("recorded_at<=?")
+        params.append(until)
+    bucket_seconds = max(1, int(bucket_seconds))
+    limit = max(1, min(int(limit), 2000))
+    params.extend([bucket_seconds, limit])
+    sql = f"""
+        SELECT AVG(value) AS value,
+               MIN(recorded_at) AS recorded_at,
+               COUNT(*) AS sample_count
+        FROM monitor_samples
+        WHERE {' AND '.join(clauses)}
+        GROUP BY CAST(strftime('%s', recorded_at) AS INTEGER) / ?
+        ORDER BY recorded_at DESC
+        LIMIT ?
+    """
+    with get_connection(db_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [
+        {
+            "value": round(float(row["value"] or 0), 3),
+            "recorded_at": row["recorded_at"],
+            "sampleCount": int(row["sample_count"] or 0),
+            "labels": {},
+        }
+        for row in reversed(rows)
+    ]
 
 
 def clear_monitor_events(*, db_path: Path | None = None) -> int:
@@ -791,11 +904,13 @@ def query_service_log_lines(
     since: str | None = None,
     until: str | None = None,
     pattern: str | None = None,
+    services: list[str] | tuple[str, ...] | None = None,
+    streams: list[str] | tuple[str, ...] | None = None,
     limit: int = 200,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     env = environment.upper()
-    limit = max(1, min(limit, 500))
+    limit = max(1, min(limit, 10_000))
     clauses = ["environment=?"]
     params: list[Any] = [env]
     if since:
@@ -807,6 +922,16 @@ def query_service_log_lines(
     if pattern:
         clauses.append("UPPER(line) LIKE ?")
         params.append(f"%{pattern.upper()}%")
+    normalized_services = sorted({str(value).strip().lower() for value in services or [] if str(value).strip()})
+    if normalized_services:
+        placeholders = ",".join("?" for _ in normalized_services)
+        clauses.append(f"LOWER(service) IN ({placeholders})")
+        params.extend(normalized_services)
+    normalized_streams = sorted({str(value).strip().lower() for value in streams or [] if str(value).strip()})
+    if normalized_streams:
+        placeholders = ",".join("?" for _ in normalized_streams)
+        clauses.append(f"LOWER(stream) IN ({placeholders})")
+        params.extend(normalized_streams)
     params.append(limit)
     sql = f"""
         SELECT id, service, stream, line, logged_at
@@ -942,6 +1067,22 @@ def _cli_append_deploy_log(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cli_append_deploy_log_batch(args: argparse.Namespace) -> int:
+    if args.entries_file:
+        entries = json.loads(Path(args.entries_file).read_text(encoding="utf-8"))
+    elif args.entries_json:
+        entries = json.loads(args.entries_json)
+    else:
+        raise SystemExit("append-deploy-log-batch requires --entries-json or --entries-file")
+    if not isinstance(entries, list):
+        raise SystemExit("entries must be a JSON array")
+    count = append_deploy_log_batch(
+        args.env, args.run_id, args.log_name, entries, db_path=resolve_db_path(args.db)
+    )
+    print(count)
+    return 0
+
+
 def _cli_save_steps(args: argparse.Namespace) -> int:
     if args.steps_file:
         steps = json.loads(Path(args.steps_file).read_text(encoding="utf-8"))
@@ -1026,6 +1167,14 @@ def main(argv: list[str] | None = None) -> int:
     p_log.add_argument("--level", required=True)
     p_log.add_argument("--message", required=True)
     p_log.set_defaults(func=_cli_append_deploy_log)
+
+    p_log_batch = sub.add_parser("append-deploy-log-batch")
+    p_log_batch.add_argument("--env", required=True)
+    p_log_batch.add_argument("--run-id", required=True)
+    p_log_batch.add_argument("--log-name", required=True)
+    p_log_batch.add_argument("--entries-json", default="")
+    p_log_batch.add_argument("--entries-file", default="")
+    p_log_batch.set_defaults(func=_cli_append_deploy_log_batch)
 
     p_steps = sub.add_parser("save-steps")
     p_steps.add_argument("--env", required=True)

@@ -105,6 +105,34 @@
     setTimeout(() => el.remove(), 6000);
   };
 
+  OC.runDisableEnv = async function runDisableEnv(env, onDone) {
+    const strong =
+      env === "MAIN"
+        ? `\n\nAtenção: MAIN é o ambiente de produção. Processos serão parados e watch/deploy/probes ficam pausados.`
+        : `\n\nProcessos serão parados e watch/deploy/probes deste ambiente ficam pausados.`;
+    if (!OC.confirmAction(`Desativar o ambiente ${env}?${strong}`)) return;
+    try {
+      const result = await OC.postAction(`/api/v1/actions/disable/${env}`, {});
+      if (onDone) onDone(null, result);
+      return result;
+    } catch (err) {
+      if (onDone) onDone(err);
+      throw err;
+    }
+  };
+
+  OC.runEnableEnv = async function runEnableEnv(env, onDone) {
+    if (!OC.confirmAction(`Ativar o ambiente ${env} e iniciar os serviços?`)) return;
+    try {
+      const result = await OC.postAction(`/api/v1/actions/enable/${env}`, {});
+      if (onDone) onDone(null, result);
+      return result;
+    } catch (err) {
+      if (onDone) onDone(err);
+      throw err;
+    }
+  };
+
   OC.runPromote = async function runPromote(source, target, onDone) {
     const overview = OC.lastOverview;
     const sourceData = overview?.environments?.[source] || {};
@@ -150,6 +178,12 @@
       OC.focusEnvCard?.(result.environment);
     } else if (result?.ok && result.action === "cancel") {
       OC.showToast(result.message || `Deploy ${result.environment || ""} cancelado.`, "success");
+      if (result.environment) OC.focusEnvCard?.(result.environment);
+    } else if (result?.ok && result.action === "disable") {
+      OC.showToast(result.message || `Ambiente ${result.environment || ""} desativado.`, "success");
+      if (result.environment) OC.focusEnvCard?.(result.environment);
+    } else if (result?.ok && result.action === "enable") {
+      OC.showToast(result.message || `Ambiente ${result.environment || ""} ativado.`, "success");
       if (result.environment) OC.focusEnvCard?.(result.environment);
     } else if (result?.ok) {
       const svc = context?.service || result.service;

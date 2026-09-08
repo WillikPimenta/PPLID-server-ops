@@ -17,7 +17,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: F401 — kept for callers/tests
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,7 +26,9 @@ from urllib.parse import parse_qs, urlparse
 
 import server_ops
 import server_db
+import server_host
 import server_monitoring
+from health_probe import get_coordinator
 
 OPS_ROOT = Path(__file__).resolve().parent
 OPS_REPO_ROOT = OPS_ROOT.parent
@@ -42,8 +44,11 @@ PROTECTED_API_PREFIXES = (
     "/api/v1/logs/",
     "/api/v1/database/",
     "/api/v1/env/",
+    "/api/v1/infra/",
     "/api/v1/runs/",
     "/api/v1/actions/",
+    "/api/v1/host/",
+    "/api/v1/diagnostics/",
     "/api/v1/monitoring",
 )
 AUTH_PUBLIC_PATHS = {"/api/v1/auth/status"}
@@ -354,6 +359,7 @@ def normalize_overview_text(status: dict[str, Any], environments: dict[str, Any]
 
 
 def fetch_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
+    """Legacy direct probe — prefer get_coordinator().get_snapshot()."""
     try:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -495,7 +501,31 @@ def resolve_display_phase(
         return "deploying"
     if deploy_pending:
         return "deploy_pending"
+
+    avail = str(runtime.get("availabilityClass") or "")
+    # Do not treat health timeout / saturation as offline.
+    if avail == "saturated":
+        return "saturated"
+    if avail == "stale":
+        return "stale"
+    if avail == "offline":
+        return "offline"
+    if avail == "degraded":
+        return "degraded"
+    if avail == "healthy":
+        if stored_phase == "failed" or last_result == "failed":
+            return "failed"
+        if last_result == "warning":
+            return "degraded"
+        return "online"
+
     if not runtime.get("reachable"):
+        # Port up + timeout already classified above; remaining unreachable → offline only
+        # after consecutive failures (coordinator sets availabilityClass=offline).
+        if runtime.get("backendPortUp") or runtime.get("timedOut"):
+            return "saturated"
+        if int(runtime.get("consecutiveFailures") or 0) < 3:
+            return "degraded"
         return "offline"
     if runtime.get("database") != "ok" or runtime.get("status") not in ("healthy", "degraded"):
         return "unhealthy"
@@ -738,25 +768,22 @@ def cached_git_commit_details(
     return details
 
 
-def _fetch_runtime_by_env(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    health_jobs: dict[str, str] = {}
-    for env_name in ENV_ORDER:
-        env_cfg = config.get(env_name, {})
-        backend_port = env_cfg.get("backendPort")
-        if backend_port is None:
-            continue
-        health_jobs[env_name] = f"http://127.0.0.1:{backend_port}/api/v1/health/"
+def _fetch_runtime_by_env(
+    config: dict[str, Any],
+    *,
+    wait: bool = True,
+    force: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Snapshots via HealthProbeCoordinator (single-flight + cache). Never double-probes."""
+    from health_probe import disabled_env_snapshot
 
-    runtime_by_env: dict[str, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {
-            executor.submit(fetch_health, url): env_name
-            for env_name, url in health_jobs.items()
-        }
-        for future in as_completed(futures):
-            env_name = futures[future]
-            runtime_by_env[env_name] = future.result()
-    return runtime_by_env
+    coord = get_coordinator()
+    enabled = server_ops.get_enabled_envs(config)
+    snapshots = coord.get_all_snapshots(config, wait=wait, force=force, envs=enabled)
+    for env_name in ENV_ORDER:
+        if env_name not in snapshots and config.get(env_name):
+            snapshots[env_name] = disabled_env_snapshot(env_name)
+    return snapshots
 
 
 def build_commit_payload(
@@ -812,30 +839,41 @@ def build_commit_payload(
 
 
 def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, Any]:
+    t0 = time.perf_counter()
     status_path = Path(config.get("statusFile") or Path(config["logDir"]) / "deploy-status.json")
     status = load_status(status_path)
     lan_ip = config.get("lanIp") or "127.0.0.1"
 
     environments: dict[str, Any] = {}
-    runtime_by_env = _fetch_runtime_by_env(config)
-    health_jobs: dict[str, str] = {}
-    for env_name in ENV_ORDER:
-        env_cfg = config.get(env_name, {})
-        backend_port = env_cfg.get("backendPort")
-        if backend_port is not None:
-            health_jobs[env_name] = f"http://127.0.0.1:{backend_port}/api/v1/health/"
+    # lite: never block on probes — memory snapshots only (SWR kicked in background).
+    # full: may wait briefly via coordinator single-flight (still no dict.get default I/O).
+    runtime_by_env = _fetch_runtime_by_env(config, wait=not lite, force=False)
 
     stored_envs = status.get("environments") or {}
     repo_url = config.get("repoUrl")
     base_dir = Path(config.get("logDir", str(DEFAULT_BASE_DIR / "logs"))).parent
+    overview_cache_hit = True
 
     for env_name in ENV_ORDER:
         env_cfg = config.get(env_name, {})
         if not env_cfg:
             continue
 
+        env_enabled = server_ops.is_env_enabled(config, env_name)
         stored = stored_envs.get(env_name, {})
-        runtime = runtime_by_env.get(env_name, fetch_health(health_jobs.get(env_name, "")))
+        # CRITICAL: never use dict.get(key, fetch_health(...)) — default is always evaluated.
+        runtime = runtime_by_env.get(env_name) or {
+            "reachable": False,
+            "httpStatus": None,
+            "status": "unknown",
+            "database": None,
+            "version": None,
+            "components": {},
+            "error": "no snapshot",
+            "checkedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        if not runtime.get("fromCache"):
+            overview_cache_hit = False
         stored_phase = stored.get("phase") or "idle"
 
         repo_dir = Path(env_cfg.get("repoDir", ""))
@@ -844,26 +882,32 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
         pipeline_status = str(deploy_state.get("status") or "idle")
 
         if lite:
-            display_phase = resolve_display_phase(
-                stored,
-                runtime,
-                deploy_pending=resolve_deploy_pending(
+            if env_enabled:
+                display_phase = resolve_display_phase(
                     stored,
-                    deploy_state,
+                    runtime,
+                    deploy_pending=resolve_deploy_pending(
+                        stored,
+                        deploy_state,
+                        pipeline_status=pipeline_status,
+                        deployed_sha=deploy_state.get("activeSha") or load_deployed_sha(log_dir, env_name, stored),
+                        release_sha=deploy_state.get("activeSha"),
+                    ),
                     pipeline_status=pipeline_status,
-                    deployed_sha=deploy_state.get("activeSha") or load_deployed_sha(log_dir, env_name, stored),
-                    release_sha=deploy_state.get("activeSha"),
-                ),
-                pipeline_status=pipeline_status,
-            )
+                )
+            else:
+                display_phase = "disabled"
             frontend_port = env_cfg.get("frontendPort")
             links = stored.get("links") or {
                 "frontend": f"http://{lan_ip}:{frontend_port}",
                 "api": f"http://{lan_ip}:{env_cfg['backendPort']}/api/v1/",
                 "health": f"http://{lan_ip}:{env_cfg['backendPort']}/api/v1/health/",
             }
-            avail_extended = server_ops.build_availability_extended(runtime, env_cfg, None)
+            avail_extended = server_ops.build_availability_extended(
+                runtime, env_cfg, None, probe_io=False
+            )
             environments[env_name] = {
+                "enabled": env_enabled,
                 "phase": stored_phase,
                 "displayPhase": display_phase,
                 "pipelineStatus": pipeline_status,
@@ -886,6 +930,14 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
                     "status": runtime.get("status"),
                     "database": runtime.get("database"),
                     "version": runtime.get("version"),
+                    "availabilityClass": runtime.get("availabilityClass"),
+                    "ageMs": runtime.get("ageMs"),
+                    "stale": runtime.get("stale"),
+                    "checkedAt": runtime.get("checkedAt"),
+                    "consecutiveFailures": runtime.get("consecutiveFailures"),
+                    "backendPortUp": runtime.get("backendPortUp"),
+                    "frontendPortUp": runtime.get("frontendPortUp"),
+                    "probeInFlight": runtime.get("probeInFlight"),
                 },
                 "availabilityAggregate": avail_extended.get("aggregate"),
                 "services": server_ops.build_services_from_availability(
@@ -927,12 +979,15 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
             release_sha=release_sha,
         )
 
-        display_phase = resolve_display_phase(
-            stored,
-            runtime,
-            deploy_pending=deploy_pending,
-            pipeline_status=pipeline_status,
-        )
+        if env_enabled:
+            display_phase = resolve_display_phase(
+                stored,
+                runtime,
+                deploy_pending=deploy_pending,
+                pipeline_status=pipeline_status,
+            )
+        else:
+            display_phase = "disabled"
 
         frontend_port = env_cfg.get("frontendPort")
         links = stored.get("links") or {
@@ -985,17 +1040,22 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
                 if target_url:
                     deploy_extra["githubCommitUrl"] = target_url
 
+        # Full overview: PG metrics only — never showmigrations on this path.
         db_metrics = None
-        try:
-            db_metrics = server_ops.fetch_database_metrics(
-                config,
-                env_name,
-                backend_reachable=bool(runtime.get("reachable")),
-            )
-        except Exception:  # noqa: BLE001
-            db_metrics = None
+        if env_enabled:
+            try:
+                db_metrics = server_ops.fetch_database_metrics(
+                    config,
+                    env_name,
+                    backend_reachable=bool(runtime.get("reachable")),
+                    include_migrations=False,
+                )
+            except Exception:  # noqa: BLE001
+                db_metrics = None
 
-        avail_extended = server_ops.build_availability_extended(runtime, env_cfg, db_metrics)
+        avail_extended = server_ops.build_availability_extended(
+            runtime, env_cfg, db_metrics, probe_io=bool(env_enabled)
+        )
         availability = avail_extended.get("components") or {}
         services = server_ops.build_services_from_availability(
             env_name, env_cfg, avail_extended, db_metrics
@@ -1003,6 +1063,7 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
 
         environments[env_name] = {
             **stored,
+            "enabled": env_enabled,
             "phase": stored_phase,
             "displayPhase": display_phase,
             "pipelineStatus": pipeline_status,
@@ -1024,6 +1085,9 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
 
     normalize_overview_text(status, environments)
 
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+    probe_metrics = get_coordinator().metrics()
+
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "lite": lite,
@@ -1034,6 +1098,19 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
         "statusFile": str(status_path),
         "environments": environments,
         "events": status.get("events") or [],
+        "diagnostics": {
+            "overview_duration_ms": duration_ms,
+            "overview_cache_hit": overview_cache_hit,
+            "health_probe": {
+                "cache_hit_total": probe_metrics.get("health_probe_cache_hit_total"),
+                "executed_total": probe_metrics.get("health_probe_executed_total"),
+                "coalesced_total": probe_metrics.get("health_probe_coalesced_total"),
+                "timeout_total": probe_metrics.get("health_probe_timeout_total"),
+                "inflight": probe_metrics.get("health_probe_inflight"),
+                "snapshot_age_ms": probe_metrics.get("health_snapshot_age_ms"),
+                "consecutive_failures": probe_metrics.get("health_consecutive_failures"),
+            },
+        },
     }
 
 
@@ -1113,6 +1190,23 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_json_attachment(self, payload: Any, filename: str) -> None:
+        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_attachment_bytes(self, body: bytes, content_type: str, filename: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_auth_status(self) -> None:
         session = self._current_session()
@@ -1235,6 +1329,17 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         status = 200 if result.get("ok") else 500
         self._send_json(result, status=status)
 
+    def _handle_action_cleanup_orphan_bots(self) -> None:
+        result = server_ops.action_cleanup_orphan_bots(self.config)
+        server_ops.audit_log(
+            self.config,
+            self._session_username(),
+            "cleanup-orphan-bots",
+            f"detected={result.get('detectedBefore', 0)} stopped={result.get('stopped', 0)} failed={result.get('failed', 0)}",
+        )
+        # A partial failure still returns the remaining live list to the UI.
+        self._send_json(result)
+
     def _handle_action_promote(self, body: dict[str, Any]) -> None:
         source = str(body.get("source") or "DEV").upper()
         target = str(body.get("target") or "HOM").upper()
@@ -1247,6 +1352,36 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             self._session_username(),
             "promote",
             f"source={source} target={target} ok={result.get('ok')}",
+        )
+        status = 200 if result.get("ok") else 500
+        self._send_json(result, status=status)
+
+    def _handle_action_disable(self, env_name: str, body: dict[str, Any]) -> None:
+        result = server_ops.action_disable_environment(
+            self.config,
+            env_name,
+            config_path=self.config_path,
+        )
+        server_ops.audit_log(
+            self.config,
+            self._session_username(),
+            "env_disable",
+            f"env={env_name} ok={result.get('ok')}",
+        )
+        status = 200 if result.get("ok") else (400 if result.get("error") else 500)
+        self._send_json(result, status=status)
+
+    def _handle_action_enable(self, env_name: str, body: dict[str, Any]) -> None:
+        result = server_ops.action_enable_environment(
+            self.config,
+            env_name,
+            config_path=self.config_path,
+        )
+        server_ops.audit_log(
+            self.config,
+            self._session_username(),
+            "env_enable",
+            f"env={env_name} ok={result.get('ok')}",
         )
         status = 200 if result.get("ok") else 500
         self._send_json(result, status=status)
@@ -1349,6 +1484,60 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             self._send_json(result)
             return
 
+        if path.startswith("/api/v1/infra/"):
+            remainder = path.removeprefix("/api/v1/infra/").strip("/")
+            parts = [p for p in remainder.split("/") if p]
+            if not parts:
+                self._send_json({"error": "Ambiente invalido"}, status=404)
+                return
+            env_name = parts[0].upper()
+            if env_name not in ENV_ORDER:
+                self._send_json({"error": "Ambiente invalido"}, status=404)
+                return
+            body = self._read_json_body()
+            if len(parts) >= 2 and parts[1].lower() == "apply":
+                previous = body.get("previous") if isinstance(body, dict) else None
+                restart = (body.get("restart") if isinstance(body, dict) else None) or "changed"
+                result = server_ops.apply_infra_ports(
+                    self.config,
+                    env_name,
+                    previous=previous,
+                    restart=str(restart),
+                )
+                server_ops.audit_log(
+                    self.config,
+                    self._session_username(),
+                    "infra_apply",
+                    f"env={env_name} restart={restart}",
+                )
+                self._send_json(result)
+                return
+            try:
+                result = server_ops.update_infra_ports(
+                    self.config,
+                    env_name,
+                    body,
+                    config_path=getattr(self, "config_path", None),
+                )
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            # Recarrega config em memoria para proximos kills/restarts.
+            cfg_path = getattr(self, "config_path", None) or server_ops.get_env_config_path(self.config)
+            try:
+                OpsConsoleHandler.config = load_config(Path(cfg_path))
+                self.config = OpsConsoleHandler.config
+            except OSError:
+                pass
+            server_ops.audit_log(
+                self.config,
+                self._session_username(),
+                "infra_update",
+                f"env={env_name} backend={result.get('backendPort')} frontend={result.get('frontendPort')}",
+            )
+            self._send_json(result)
+            return
+
         if path == "/api/v1/monitoring/config":
             body = self._read_json_body()
             base_dir = server_ops.get_base_dir(self.config)
@@ -1401,12 +1590,17 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/actions/promote":
                 self._handle_action_promote(body)
                 return
+            if path == "/api/v1/actions/orphan-bots/cleanup":
+                self._handle_action_cleanup_orphan_bots()
+                return
             for prefix, handler in (
                 ("/api/v1/actions/rollback/", self._handle_action_rollback),
                 ("/api/v1/actions/redeploy/", self._handle_action_redeploy),
                 ("/api/v1/actions/cancel/", self._handle_action_cancel),
                 ("/api/v1/actions/clear-block/", self._handle_action_clear_block),
                 ("/api/v1/actions/restart/", self._handle_action_restart),
+                ("/api/v1/actions/disable/", self._handle_action_disable),
+                ("/api/v1/actions/enable/", self._handle_action_enable),
             ):
                 if path.startswith(prefix):
                     env_name = path.removeprefix(prefix).strip("/").upper()
@@ -1456,6 +1650,50 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/overview-lite":
             overview = build_overview(self.config, lite=True)
             self._send_json(overview)
+            return
+
+        if path == "/api/v1/host/orphan-bots":
+            try:
+                self._send_json(server_ops.run_orphan_bot_scan(self.config))
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"ok": False, "error": str(exc), "items": []}, status=500)
+            return
+
+        if path == "/api/v1/host/summary":
+            try:
+                self._send_json(server_host.build_host_summary(self.config))
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, status=500)
+            return
+
+        if path == "/api/v1/host/series":
+            query = parse_qs(parsed.query)
+            metric = (query.get("metric") or [""])[0]
+            if not metric:
+                self._send_json({"error": "metric obrigatória"}, status=400)
+                return
+            try:
+                hours = int((query.get("hours") or ["24"])[0])
+                self._send_json(server_host.build_host_series(self.config, metric, hours=hours))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, status=500)
+            return
+
+        if path == "/api/v1/diagnostics/snapshot":
+            try:
+                overview = build_overview(self.config, lite=True)
+                incidents = server_monitoring.build_monitoring_grouped_events_lite(
+                    self.config, hours=24, limit=50
+                )
+                payload = server_host.build_diagnostic_snapshot(
+                    self.config, overview=overview, incidents=incidents
+                )
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                self._send_json_attachment(payload, f"pplid-diagnostico-{stamp}.json")
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, status=500)
             return
 
         if path.startswith("/api/v1/commits/"):
@@ -1526,6 +1764,14 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             self._send_json(server_ops.build_env_payload(self.config, env_name))
             return
 
+        if path.startswith("/api/v1/infra/"):
+            env_name = path.removeprefix("/api/v1/infra/").strip("/").upper()
+            if env_name not in ENV_ORDER:
+                self._send_json({"error": "Ambiente invalido"}, status=404)
+                return
+            self._send_json(server_ops.build_infra_payload(self.config, env_name))
+            return
+
         if path == "/api/v1/monitoring/config":
             try:
                 self._send_json(server_monitoring.build_monitoring_config(self.config))
@@ -1578,6 +1824,12 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             log_offsets = server_ops.parse_log_offsets(query.get("logOffset", [""])[0])
             self._send_json(server_ops.load_run_logs(base_dir, env_name, run_id, log_offsets=log_offsets or None))
             return
+
+        if path.rstrip("/") == "/monitoring/tv":
+            tv_page = PUBLIC_DIR / "monitoring-tv.html"
+            if tv_page.is_file():
+                self._send_bytes(tv_page.read_bytes(), "text/html; charset=utf-8")
+                return
 
         static_path = self._resolve_static(path)
         if static_path and static_path.is_file():
@@ -1670,11 +1922,15 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             if not parts:
                 self._send_json({"error": "Rota invalida"}, status=400)
                 return
+
+            if parts and parts[0] == "productivity-hourly":
+                self._send_json(server_monitoring.build_hourly_productivity_status(self.config))
+                return
             env_name = parts[0].upper()
-            if env_name not in ENV_ORDER:
+            sub = parts[1].lower() if len(parts) > 1 else "summary"
+            if env_name not in ENV_ORDER and not (env_name == "HOST" and sub == "events"):
                 self._send_json({"error": "Ambiente invalido"}, status=404)
                 return
-            sub = parts[1].lower() if len(parts) > 1 else "summary"
             if sub == "summary":
                 hours = int(query.get("hours", ["24"])[0])
                 lite = (query.get("lite") or ["0"])[0].lower() in ("1", "true", "yes")
@@ -1759,17 +2015,60 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 return
             if sub == "logs":
                 since = (query.get("since") or [None])[0]
+                until = (query.get("until") or [None])[0]
+                query_text = (query.get("q") or [None])[0]
                 pattern_raw = (query.get("pattern") or [""])[0]
                 # Empty / ALL → sem filtro de texto (mostra linhas recentes).
                 pattern = None if not pattern_raw or pattern_raw.upper() in ("ALL", "*", "ANY") else pattern_raw
-                limit = int(query.get("limit", ["200"])[0])
+                if query_text is None:
+                    query_text = pattern
+
+                def list_param(name: str) -> list[str]:
+                    values: list[str] = []
+                    for raw in query.get(name) or []:
+                        values.extend(part.strip() for part in raw.split(",") if part.strip())
+                    return values
+
+                levels = list_param("levels")
+                services = list_param("services")
+                streams = list_param("streams")
+                if len(parts) > 2 and parts[2].lower() == "export":
+                    export_format = (query.get("format") or ["csv"])[0].lower()
+                    if export_format not in ("csv", "json"):
+                        self._send_json({"error": "Formato de exportacao invalido"}, status=400)
+                        return
+                    body, content_type, filename = server_monitoring.build_monitoring_service_logs_export(
+                        self.config,
+                        env_name,
+                        export_format=export_format,
+                        since=since,
+                        until=until,
+                        q=query_text,
+                        levels=levels,
+                        services=services,
+                        streams=streams,
+                    )
+                    self._send_attachment_bytes(body, content_type, filename)
+                    return
+                try:
+                    limit = max(1, min(int(query.get("limit", ["200"])[0]), 500))
+                except ValueError:
+                    self._send_json({"error": "Limite invalido"}, status=400)
+                    return
                 self._send_json(
                     server_monitoring.build_monitoring_service_logs(
                         self.config,
                         env_name,
                         since=since,
+                        until=until,
+                        q=query_text,
                         pattern=pattern,
+                        levels=levels,
+                        services=services,
+                        streams=streams,
+                        cursor=(query.get("cursor") or [None])[0],
                         limit=limit,
+                        order=(query.get("order") or ["desc"])[0],
                     )
                 )
                 return
@@ -1829,6 +2128,7 @@ def run_server(host: str, port: int, config_path: Path) -> None:
         raise FileNotFoundError(f"Config nao encontrada: {config_path}")
 
     config = load_config(config_path)
+    config["_configPath"] = str(config_path)
     OpsConsoleHandler.config = config
     OpsConsoleHandler.config_path = config_path
 
@@ -1837,11 +2137,15 @@ def run_server(host: str, port: int, config_path: Path) -> None:
     print(f"Ops Console em http://{host}:{port}")
     print(f"Acesso LAN: http://{lan_ip}:{port}")
     server_monitoring.start_monitoring_collector(config)
+    server_host.start_host_collector(config)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nEncerrando...")
         server.shutdown()
+    finally:
+        server_host.stop_host_collector()
+        server_monitoring.stop_monitoring_collector()
 
 
 def main() -> None:

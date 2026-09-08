@@ -73,6 +73,15 @@ powershell -ExecutionPolicy Bypass -File C:\PPLID\ops\deploy\test_frontend_start
 powershell -ExecutionPolicy Bypass -File C:\PPLID\ops\validate_deploy.ps1
 ```
 
+## Ambientes habilitados (`enabled`)
+
+Em `ops/config/env.config.json`, cada bloco `MAIN` / `DEV` / `HOM` pode ter `"enabled": true|false` (padrão: ligado se o campo não existir).
+
+- Toggle pela UI do ops-console (`POST /api/v1/actions/disable|enable/{ENV}`).
+- `watch_all.ps1` / `watch_github.ps1` e `bootstrap_all.ps1` / `bootstrap_env.ps1` **ignoram** ambientes com `enabled: false` (sem fetch, pipeline, migrate ou start).
+- Helpers: `Get-PplidEnabledEnvironments` e `Test-PplidEnvironmentEnabled` em `ops/lib/paths.ps1`.
+- `stop_all.ps1` continua parando os três ambientes (cleanup).
+
 ## Tasks
 
 - `PPLID-GitHub-Sync` → `wscript` → `run_update_hidden.vbs` → `watch_all.ps1`
@@ -131,8 +140,19 @@ Sintoma: drawer mostra Backend OK mas Frontend com ✗ na porta do ambiente (ex.
 
 1. Confirme o **ambiente e a porta**: DEV usa `:8001`, MAIN usa `:8000` (branch `main` ainda nao inclui o modulo).
 2. Teste direto: `http://127.0.0.1:8001/falhas/health/` (DEV).
-3. O frontend usa `frontend/.env` (gerado por `sync_env_files.ps1`) e `frontend/.env.[mode]` para proxy/portas no `npm run dev` (`--mode main|dev|hom`).
-4. Se o deploy concluiu mas a rota falha, verifique `promote.log` (`migrate --check`) e `health_check` (`falhas` smoke).
+3. O frontend **deployado** sobe com `vite preview --port <frontendPort>` a partir de
+   `ops/config/env.config.json` (lido por `Get-DeployConfig` / `Get-EnvironmentConfig`).
+   Alterar só `VITE_DEV_SERVER_PORT` em `shared/frontend.env` **não** muda a porta.
+   Use o card **Portas (infraestrutura)** em `/env/{ENV}` no ops-console (ou edite
+   `frontendPort` / `backendPort` no JSON). As chaves `VITE_DEV_SERVER_PORT`,
+   `VITE_BACKEND_PORT` e `VITE_BACKEND_PROXY_TARGET` são **derivadas** automaticamente.
+   `VITE_API_BASE_URL` exige **rebuild** (`build:deploy`) para surtir efeito no `dist/`.
+   Para `npm run dev` local, use `frontend/.env.[mode]` (`--mode main|dev|hom`).
+4. Validar fonte da porta:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File C:\PPLID\ops\deploy\validate_frontend_port_source.ps1 -Environment DEV
+   ```
+5. Se o deploy concluiu mas a rota falha, verifique `promote.log` (`migrate --check`) e `health_check` (`falhas` smoke).
 
 Validacao manual completa do modulo:
 

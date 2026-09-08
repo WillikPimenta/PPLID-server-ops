@@ -1,0 +1,47 @@
+{
+  "scenario": "slow",
+  "clients": 10,
+  "seconds": 12.0,
+  "backend_delay_sec": 10.0,
+  "interval_sec": 0.5,
+  "overview_lite": {
+    "label": "overview-lite",
+    "n": 150,
+    "p50_ms": 3.14,
+    "p95_ms": 82.77,
+    "p99_ms": 84.49,
+    "max_ms": 84.69,
+    "avg_ms": 8.74,
+    "min_ms": 1.51
+  },
+  "backend_health_hits_during_load": 3,
+  "backend_max_inflight": 6,
+  "theoretical_unbounded_probes": 720,
+  "amplification_ratio": 0.0042,
+  "client_overlap_attempts": 0,
+  "threads_before": 4,
+  "threads_after": 9,
+  "coordinator_metrics": {
+    "health_probe_timeout_total": 6,
+    "health_probe_cache_hit_total": 450,
+    "health_probe_inflight": 0,
+    "health_probe_executed_total": 6,
+    "health_probe_coalesced_total": 0,
+    "overview_cache_hit": 88,
+    "health_snapshot_age_ms": {
+      "MAIN": 4125,
+      "DEV": 2608,
+      "HOM": 1093
+    },
+    "health_consecutive_failures": {
+      "MAIN": 2,
+      "DEV": 2,
+      "HOM": 2
+    }
+  },
+  "before_estimate": {
+    "note": "Pre-fix estimate: overview did 3 parallel + 3 serial probes per refresh",
+    "formula": "clients * ticks * 6",
+    "example_20s_10clients_0.5s": 2400
+  }
+}

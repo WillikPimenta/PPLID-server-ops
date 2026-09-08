@@ -8,10 +8,18 @@
     saved: true,
     data: null,
     mode: "form",
+    infra: null,
+    infraPrevious: null,
+    infraDirty: false,
     removed: { backend: new Set(), frontend: new Set() },
   };
   OC.ENV_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
   OC.ENV_MASK_PLACEHOLDER = "••••••••";
+  OC.DERIVED_FRONTEND_KEYS = [
+    "VITE_DEV_SERVER_PORT",
+    "VITE_BACKEND_PORT",
+    "VITE_BACKEND_PROXY_TARGET",
+  ];
 
   function envTabsHtml(active) {
     return OC.ENV_ORDER.map(
@@ -31,22 +39,59 @@
 
   function renderVarItem(scope, key, item) {
     const masked = item.masked;
+    const derived =
+      scope === "frontend" &&
+      (OC.envConfigState.data?.derivedFrontendKeys || OC.DERIVED_FRONTEND_KEYS).includes(key);
     const type = masked ? "password" : "text";
     const secretBadge = masked ? '<span class="badge-secret">Segredo</span>' : "";
-    const revealBtn = masked
-      ? `<button type="button" class="env-icon-btn env-reveal-btn" data-reveal-scope="${scope}" data-reveal-key="${OC.escapeHtml(key)}" title="Mostrar valor" aria-label="Mostrar valor">👁</button>`
+    const derivedBadge = derived
+      ? '<span class="badge-derived" title="Derivado das portas de infraestrutura">Derivado</span>'
       : "";
-    return `<div class="env-var-item" data-var-row="${OC.escapeHtml(key)}">
+    const revealBtn =
+      masked && !derived
+        ? `<button type="button" class="env-icon-btn env-reveal-btn" data-reveal-scope="${scope}" data-reveal-key="${OC.escapeHtml(key)}" title="Mostrar valor" aria-label="Mostrar valor">👁</button>`
+        : "";
+    const removeBtn = derived
+      ? ""
+      : `<button type="button" class="env-icon-btn env-remove-btn" data-remove-scope="${scope}" data-remove-key="${OC.escapeHtml(key)}" title="Remover variável" aria-label="Remover ${OC.escapeHtml(key)}">×</button>`;
+    const readonlyAttr = derived ? "readonly" : "";
+    return `<div class="env-var-item ${derived ? "env-var-item--derived" : ""}" data-var-row="${OC.escapeHtml(key)}">
       <div class="env-var-item-top">
         <code class="env-var-key">${OC.escapeHtml(key)}</code>
         ${secretBadge}
-        <button type="button" class="env-icon-btn env-remove-btn" data-remove-scope="${scope}" data-remove-key="${OC.escapeHtml(key)}" title="Remover variável" aria-label="Remover ${OC.escapeHtml(key)}">×</button>
+        ${derivedBadge}
+        ${removeBtn}
       </div>
       <div class="env-var-item-value">
-        <input class="env-input" data-scope="${scope}" data-key="${OC.escapeHtml(key)}" data-masked="${masked ? "1" : "0"}" type="${type}" value="${OC.escapeHtml(item.value)}" aria-label="Valor de ${OC.escapeHtml(key)}" />
+        <input class="env-input" data-scope="${scope}" data-key="${OC.escapeHtml(key)}" data-masked="${masked ? "1" : "0"}" data-derived="${derived ? "1" : "0"}" type="${type}" value="${OC.escapeHtml(item.value)}" ${readonlyAttr} aria-label="Valor de ${OC.escapeHtml(key)}" />
         ${revealBtn}
       </div>
     </div>`;
+  }
+
+  function renderInfraPortsCard(infra) {
+    const be = infra?.backendPort ?? "";
+    const fe = infra?.frontendPort ?? "";
+    return `<section class="env-panel-card env-infra-card" id="env-infra-card">
+      <header class="env-panel-head">
+        <h3 class="env-panel-title">Portas (infraestrutura)</h3>
+      </header>
+      <p class="drawer-hint">Estas portas controlam o start real (<code>vite preview --port</code> / Django). Alterar só <code>VITE_DEV_SERVER_PORT</code> no .env <strong>não</strong> muda a porta do frontend deployado.</p>
+      <div class="env-infra-grid">
+        <label class="env-infra-field">
+          <span>Backend</span>
+          <input type="number" min="1" max="65535" class="env-input" id="env-infra-backend" value="${OC.escapeHtml(String(be))}" />
+        </label>
+        <label class="env-infra-field">
+          <span>Frontend</span>
+          <input type="number" min="1" max="65535" class="env-input" id="env-infra-frontend" value="${OC.escapeHtml(String(fe))}" />
+        </label>
+      </div>
+      <div class="env-infra-actions">
+        <button type="button" class="btn btn-primary btn-sm" id="env-infra-save-btn">Salvar portas</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="env-infra-apply-btn" ${OC.envConfigState.infraPrevious ? "" : "disabled"}>Aplicar portas (reiniciar)</button>
+      </div>
+    </section>`;
   }
 
   function renderVarsPanel(scope, title, vars) {
@@ -174,6 +219,7 @@
       const scope = input.getAttribute("data-scope");
       const key = input.getAttribute("data-key");
       if (!scope || !key) return;
+      if (input.dataset.derived === "1") return;
       if (OC.envConfigState.removed[scope]?.has(key)) return;
       if (input.dataset.revealed !== "1" && input.dataset.masked === "1" && input.value === OC.ENV_MASK_PLACEHOLDER) {
         return;
@@ -224,12 +270,18 @@
 
       const original = data[scope] || {};
       const seen = new Set();
+      const derivedKeys = new Set(
+        scope === "frontend"
+          ? OC.envConfigState.data?.derivedFrontendKeys || OC.DERIVED_FRONTEND_KEYS
+          : []
+      );
       for (const [rawKey, value] of Object.entries(parsed)) {
         const key = String(rawKey).trim();
         const err = OC.validateEnvKey(key);
         if (err) throw new Error(`${scope}: ${err} (${rawKey})`);
         if (seen.has(key)) throw new Error(`Variável duplicada em ${scope}: ${key}`);
         seen.add(key);
+        if (derivedKeys.has(key)) continue;
         const strVal = value == null ? "" : String(value);
         const wasMasked =
           original[key]?.masked &&
@@ -239,7 +291,7 @@
       }
 
       for (const key of Object.keys(original)) {
-        if (!seen.has(key)) remove[scope].push(key);
+        if (!seen.has(key) && !derivedKeys.has(key)) remove[scope].push(key);
       }
     }
 
@@ -343,6 +395,7 @@
     if (!root) return;
     OC.envConfigState.env = envName;
     OC.envConfigState.removed = { backend: new Set(), frontend: new Set() };
+    // Mantem infraPrevious se veio de um save recente nesta sessao.
     const mode = OC.envConfigState.mode || "form";
     root.innerHTML = `
       <section class="section-block">
@@ -387,14 +440,16 @@
 
       const mountEditor = () => {
         const currentMode = OC.envConfigState.mode || "form";
+        const infra = OC.envConfigState.infra || data.infra || {};
         body.innerHTML = `
+          ${renderInfraPortsCard(infra)}
           ${renderModeToggle(currentMode)}
           <p class="drawer-hint env-paths-hint">Fonte persistente: <code>${OC.escapeHtml(data.paths?.backend || "")}</code></p>
           <div id="env-editor-root">${renderEditorBody(OC.envConfigState.data, currentMode)}</div>
           <div class="env-footer-actions">
             <button type="button" class="btn btn-primary btn-sm" id="env-save-btn">Salvar alterações</button>
             <button type="button" class="btn btn-secondary btn-sm" id="env-apply-btn" ${OC.envConfigState.saved ? "disabled" : ""}>Aplicar (reiniciar backend)</button>
-            <p class="drawer-hint env-save-hint">Segredos mascarados por padrão. Após salvar, use Aplicar para reiniciar o backend. Deploys não alteram estas variáveis.</p>
+            <p class="drawer-hint env-save-hint">Segredos mascarados por padrão. Após salvar, use Aplicar para reiniciar o backend. Deploys não alteram estas variáveis. Portas VITE_* são derivadas — edite o card Portas acima.</p>
           </div>
           ${
             diffRows
@@ -417,6 +472,58 @@
           const applyBtn = document.getElementById("env-apply-btn");
           if (applyBtn) applyBtn.disabled = true;
         };
+
+        const markInfraDirty = () => {
+          OC.envConfigState.infraDirty = true;
+          const applyBtn = document.getElementById("env-infra-apply-btn");
+          if (applyBtn) applyBtn.disabled = true;
+        };
+        document.getElementById("env-infra-backend")?.addEventListener("input", markInfraDirty);
+        document.getElementById("env-infra-frontend")?.addEventListener("input", markInfraDirty);
+
+        document.getElementById("env-infra-save-btn")?.addEventListener("click", async () => {
+          const backendPort = Number(document.getElementById("env-infra-backend")?.value);
+          const frontendPort = Number(document.getElementById("env-infra-frontend")?.value);
+          if (!backendPort || !frontendPort) {
+            window.alert("Informe portas válidas.");
+            return;
+          }
+          if (envName === "MAIN" && !window.confirm("Confirmar alteração de portas em MAIN?")) return;
+          try {
+            const result = await OC.putJson(`/api/v1/infra/${envName}`, { backendPort, frontendPort });
+            OC.envConfigState.infra = {
+              backendPort: result.backendPort,
+              frontendPort: result.frontendPort,
+            };
+            OC.envConfigState.infraPrevious = result.previous || null;
+            OC.envConfigState.infraDirty = false;
+            window.alert(
+              "Portas salvas em env.config.json. VITE_* derivadas atualizadas. Use Aplicar portas para reiniciar."
+            );
+            await OC.renderEnvConfig(envName);
+            const btn = document.getElementById("env-infra-apply-btn");
+            if (btn) btn.disabled = false;
+          } catch (err) {
+            window.alert(err.message || "Falha ao salvar portas");
+          }
+        });
+
+        document.getElementById("env-infra-apply-btn")?.addEventListener("click", async () => {
+          if (!window.confirm(`Reiniciar serviços de ${envName} nas novas portas?`)) return;
+          try {
+            const result = await OC.putJson(`/api/v1/infra/${envName}/apply`, {
+              previous: OC.envConfigState.infraPrevious || undefined,
+              restart: "changed",
+            });
+            window.alert(
+              result.ok
+                ? "Serviços reiniciados com as novas portas."
+                : result.error || "Falha ao aplicar portas"
+            );
+          } catch (err) {
+            window.alert(err.message || "Falha ao aplicar portas");
+          }
+        });
 
         if (currentMode === "form") {
           OC.bindEnvVarInputs(editorRoot || body, markDirty);
@@ -481,6 +588,7 @@
         });
       };
 
+      OC.envConfigState.infra = data.infra || null;
       mountEditor();
     } catch (err) {
       body.innerHTML = `<div class="empty-state"><p class="error-msg">${OC.escapeHtml(err.message)}</p></div>`;

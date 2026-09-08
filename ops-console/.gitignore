@@ -1,3 +1,6 @@
 .env.local
 *.pyc
 __pycache__/
+.venv/
+tmp-load-logs/
+tmp-test-logs/

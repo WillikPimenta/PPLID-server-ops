@@ -3,8 +3,13 @@ Coleta e APIs de monitoramento do ops-console.
 """
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
+import io
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -42,6 +47,7 @@ _DEFAULT_MONITORING = {
         "syncs": True,
         "deploy": True,
         "logs": True,
+        "host": True,
     },
 }
 
@@ -136,6 +142,7 @@ def get_monitoring_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def probe_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
+    """Direct HTTP probe (tests / fallback). Prefer health_probe.coordinator."""
     start = time.perf_counter()
     try:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -486,23 +493,22 @@ def _compute_offline_window(
 
 
 def _collect_availability(config: dict[str, Any], env_name: str, ops_store, db_path: Path) -> None:
-    env_cfg = config.get(env_name, {})
-    backend_port = int(env_cfg.get("backendPort") or 0)
-    frontend_port = int(env_cfg.get("frontendPort") or 0)
-    health_url = f"http://127.0.0.1:{backend_port}/api/v1/health/" if backend_port else ""
-    health = (
-        probe_health(health_url)
-        if health_url
-        else {"reachable": False, "durationMs": 0, "error": "Porta backend nao configurada"}
-    )
-    backend_up = bool(server_ops.probe_port_listening(backend_port)) if backend_port else False
-    frontend_up = bool(server_ops.probe_port_listening(frontend_port)) if frontend_port else False
+    from health_probe import get_coordinator
+
+    # Shared snapshot with overview — single-flight, no duplicate HTTP probes.
+    health = get_coordinator().get_snapshot(config, env_name, wait=True, force=False)
+    backend_up = bool(health.get("backendPortUp"))
+    frontend_up = bool(health.get("frontendPortUp"))
 
     ops_store.insert_monitor_sample(
         env_name,
         "health_latency_ms",
         float(health.get("durationMs") or 0),
-        labels={"reachable": health.get("reachable")},
+        labels={
+            "reachable": health.get("reachable"),
+            "availabilityClass": health.get("availabilityClass"),
+            "fromCache": health.get("fromCache"),
+        },
         db_path=db_path,
     )
     ops_store.insert_monitor_sample(
@@ -547,6 +553,11 @@ def _collect_api_metrics(config: dict[str, Any], env_name: str, ops_store, db_pa
     if errors_5xx is None:
         errors_5xx = totals.get("errors_5xx") or totals.get("status5xx") or 0
     requests = totals.get("requests") or totals.get("count") or 0
+    traffic = data.get("traffic") or {}
+    active_users = traffic.get("activeUsers") or {}
+    active_users_now = active_users.get("count")
+    if active_users_now is None:
+        active_users_now = (traffic.get("totals") or {}).get("activeUsersNow")
     top_routes = []
     for row in (data.get("slowRoutes") or [])[:5]:
         top_routes.append(
@@ -574,6 +585,49 @@ def _collect_api_metrics(config: dict[str, Any], env_name: str, ops_store, db_pa
         labels={"window": "1h"},
         db_path=db_path,
     )
+    if active_users_now is not None:
+        ops_store.insert_monitor_sample(
+            env_name,
+            "api_active_users_5m",
+            float(active_users_now or 0),
+            labels={"windowMinutes": int(active_users.get("windowMinutes") or 5)},
+            db_path=db_path,
+        )
+
+
+def _enrich_active_users_peak(config: dict[str, Any], env_name: str, data: dict[str, Any]) -> None:
+    traffic = data.get("traffic") or {}
+    active_users = traffic.get("activeUsers") or {}
+    current = active_users.get("count")
+    if current is None:
+        current = (traffic.get("totals") or {}).get("activeUsersNow")
+    if current is None:
+        return
+    try:
+        ops_store = _import_ops_store()
+        db_path = resolve_ops_store_path(config)
+        ops_store.init_store(db_path)
+        window_minutes = int(active_users.get("windowMinutes") or 5)
+        ops_store.insert_monitor_sample(
+            env_name,
+            "api_active_users_5m",
+            float(current or 0),
+            labels={"windowMinutes": window_minutes},
+            db_path=db_path,
+        )
+        retention_days = int(get_monitoring_settings(config).get("retentionDays") or 7)
+        aggregate = ops_store.aggregate_monitor_samples(
+            env_name,
+            "api_active_users_5m",
+            since=_iso_days_ago(retention_days),
+            db_path=db_path,
+        )
+        active_users["peakCount"] = int(max(float(current or 0), float(aggregate.get("max") or 0)))
+        active_users["peakRetentionDays"] = retention_days
+        traffic["activeUsers"] = active_users
+        data["traffic"] = traffic
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("active users peak unavailable for %s: %s", env_name, exc)
 
 
 def _collect_postgres(config: dict[str, Any], env_name: str, ops_store, db_path: Path) -> None:
@@ -662,6 +716,172 @@ def _parse_bracket_log_ts(line: str) -> datetime | None:
     return naive.replace(tzinfo=_local_tzinfo()).astimezone(timezone.utc)
 
 
+def _productivity_log_path(config: dict[str, Any]) -> Path:
+    configured = str((config.get("productivityMonitoring") or {}).get("productionLog") or "").strip()
+    if configured:
+        return Path(configured)
+    appdata = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+    return appdata / "PLAN_IDF_SERASA_BOTS" / "logs" / "production.log"
+
+
+def build_hourly_productivity_status(config: dict[str, Any]) -> dict[str, Any]:
+    """Resume o ciclo mais recente do robô H/H por sistema e tipo de extração."""
+    log_path = _productivity_log_path(config)
+    systems = {
+        "brflow": {
+            "system": "BRFlow",
+            "steps": {
+                "production": {"key": "production", "label": "Produção"},
+                "monitor": {"key": "monitor", "label": "Monitor de eventos"},
+            },
+        },
+        "confer": {
+            "system": "Confer",
+            "steps": {
+                "production": {"key": "production", "label": "Produção"},
+                "monitor": {"key": "monitor", "label": "Log de eventos"},
+            },
+        },
+        "case_manager": {
+            "system": "Case Manager",
+            "steps": {
+                "production": {"key": "production", "label": "Produtividade por hora"},
+                "monitor": {"key": "monitor", "label": "Fila em aberto"},
+            },
+        },
+    }
+    for item in systems.values():
+        for step in item["steps"].values():
+            step.update({"status": "pending", "updatedAt": None})
+
+    def payload(*, source_available: bool, cycle_started_at: str | None = None) -> dict[str, Any]:
+        generated_at = _utc_now_iso()
+        flattened_steps = [
+            {"system": item["system"], **step}
+            for item in systems.values()
+            for step in item["steps"].values()
+        ]
+        timestamps = [
+            value
+            for value in [cycle_started_at, *(step.get("updatedAt") for step in flattened_steps)]
+            if value
+        ]
+        last_activity_at = max(timestamps, default=None)
+        last_activity_dt = _parse_iso_dt(last_activity_at)
+        stale = bool(
+            source_available
+            and last_activity_dt
+            and (datetime.now(timezone.utc) - last_activity_dt).total_seconds() > 3600
+        )
+        statuses = {step["status"] for step in flattened_steps}
+        if "error" in statuses:
+            cycle_status = "failed"
+        elif stale:
+            cycle_status = "stale"
+        elif statuses == {"ok"}:
+            cycle_status = "completed"
+        elif "running" in statuses or any(status == "ok" for status in statuses):
+            cycle_status = "running"
+        else:
+            cycle_status = "pending"
+
+        canonical_status = {
+            "pending": "stale" if stale else "pending",
+            "running": "stale" if stale else "running",
+            "ok": "completed",
+            "error": "failed",
+        }
+        canonical_systems: list[dict[str, Any]] = []
+        for item in systems.values():
+            steps = [
+                {**step, "status": canonical_status.get(step["status"], step["status"])}
+                for step in item["steps"].values()
+            ]
+            # Campos production/monitor são mantidos para consumidores antigos.
+            canonical_systems.append(
+                {
+                    "system": item["system"],
+                    "steps": steps,
+                    "production": {
+                        "status": item["steps"]["production"]["status"],
+                        "updatedAt": item["steps"]["production"]["updatedAt"],
+                    },
+                    "monitor": {
+                        "status": item["steps"]["monitor"]["status"],
+                        "updatedAt": item["steps"]["monitor"]["updatedAt"],
+                    },
+                }
+            )
+        return {
+            "systems": canonical_systems,
+            "cycleStartedAt": cycle_started_at,
+            "lastActivityAt": last_activity_at,
+            "cycleStatus": cycle_status,
+            "stale": stale,
+            "staleAfterMinutes": 60,
+            "sourceAvailable": source_available,
+            "generatedAt": generated_at,
+        }
+
+    if not log_path.is_file():
+        return payload(source_available=False)
+
+    lines = _tail_text_file_lines(log_path, max_bytes=2_500_000, max_lines=12_000)
+    cycle_start = 0
+    for index, line in enumerate(lines):
+        if "STATUS|Producao: iniciando ciclo" in line or "STATUS|Produção: iniciando ciclo" in line:
+            cycle_start = index
+    cycle_lines = lines[cycle_start:]
+    cycle_started_at: str | None = None
+
+    def timestamp(line: str) -> str | None:
+        parsed = _parse_bracket_log_ts(line)
+        return parsed.strftime("%Y-%m-%dT%H:%M:%SZ") if parsed else None
+
+    def set_state(system: str, kind: str, status: str, line: str) -> None:
+        systems[system]["steps"][kind].update({"status": status, "updatedAt": timestamp(line)})
+
+    for line in cycle_lines:
+        lowered = line.casefold()
+        line_at = timestamp(line)
+        if cycle_started_at is None and ("iniciando ciclo" in lowered):
+            cycle_started_at = line_at
+
+        if "[brflow]" in lowered and any(token in lowered for token in ("login", "configur", "extraindo")):
+            set_state("brflow", "production", "running", line)
+        if "[confer]" in lowered and any(token in lowered for token in ("login", "baixando relat", "download do relat")):
+            set_state("confer", "production", "running", line)
+        if "extraindo case manager" in lowered or "gerando produtividade por hora" in lowered:
+            set_state("case_manager", "production", "running", line)
+
+        if "brflow: download conclu" in lowered:
+            set_state("brflow", "production", "ok", line)
+        if "confer: download conclu" in lowered:
+            set_state("confer", "production", "ok", line)
+        if "monitor de eventos tratado salvo" in lowered:
+            set_state("brflow", "monitor", "ok", line)
+        if "log eventos baixado" in lowered:
+            set_state("confer", "monitor", "ok", line)
+        if "produtividade_case_saved|prod_hora|" in lowered or "[ok] produtividade por hora" in lowered:
+            set_state("case_manager", "production", "ok", line)
+        if "case_fila_saved|" in lowered or "[ok] fila em aberto" in lowered:
+            set_state("case_manager", "monitor", "ok", line)
+
+        if "brflow" in lowered and any(token in lowered for token in (" falhou", " erro", "erro ao extrair")):
+            set_state("brflow", "production", "error", line)
+        if "confer" in lowered and any(token in lowered for token in (" falhou", " erro", "erro ao extrair")):
+            set_state("confer", "production", "error", line)
+        if "monitor" in lowered and any(token in lowered for token in (" falhou", "falha no download", "não produziu arquivo")):
+            set_state("brflow", "monitor", "error", line)
+        if "log eventos" in lowered and any(token in lowered for token in (" falhou", "falha", "sem arquivo")):
+            set_state("confer", "monitor", "error", line)
+        if "case manager falhou" in lowered:
+            set_state("case_manager", "production", "error", line)
+            set_state("case_manager", "monitor", "error", line)
+
+    return payload(source_available=True, cycle_started_at=cycle_started_at)
+
+
 def _service_log_sources(config: dict[str, Any], env_name: str) -> list[tuple[str, str, Path]]:
     log_dir = Path(config.get("logDir") or "C:/PPLID/logs")
     env_cfg = config.get(env_name, {}) or {}
@@ -702,16 +922,87 @@ def _line_matches_pattern(line: str, pattern: str | None) -> bool:
     return pattern.upper() in str(line or "").upper()
 
 
+_LOG_LEVEL_PATTERNS = (
+    ("ERROR", re.compile(r"\b(ERROR|CRITICAL|FATAL|TRACEBACK|EXCEPTION)\b", re.IGNORECASE)),
+    ("WARN", re.compile(r"\b(WARN|WARNING)\b", re.IGNORECASE)),
+    ("DEBUG", re.compile(r"\b(DEBUG|TRACE)\b", re.IGNORECASE)),
+    ("INFO", re.compile(r"\b(INFO|NOTICE|SUCCESS)\b", re.IGNORECASE)),
+)
+_LOG_LEVELS = ("ERROR", "WARN", "INFO", "DEBUG", "OTHER")
+
+
+def _infer_service_log_level(line: str) -> str:
+    value = str(line or "")
+    for level, pattern in _LOG_LEVEL_PATTERNS:
+        if pattern.search(value):
+            return level
+    return "OTHER"
+
+
+def _service_log_key(env_name: str, row: dict[str, Any]) -> str:
+    raw = "|".join(
+        (
+            env_name.upper(),
+            str(row.get("logged_at") or ""),
+            str(row.get("service") or ""),
+            str(row.get("stream") or ""),
+            str(row.get("line") or ""),
+        )
+    )
+    return hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()[:20]
+
+
+def _normalize_service_log_line(env_name: str, row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["service"] = str(item.get("service") or "unknown").lower()
+    item["stream"] = str(item.get("stream") or "unknown").lower()
+    item["line"] = str(item.get("line") or "")
+    item["level"] = _infer_service_log_level(item["line"])
+    item["key"] = _service_log_key(env_name, item)
+    return item
+
+
+def _encode_service_log_cursor(row: dict[str, Any]) -> str:
+    raw = json.dumps(
+        {"at": row.get("logged_at") or "", "key": row.get("key") or ""},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_service_log_cursor(cursor: str | None) -> tuple[str, str] | None:
+    if not cursor:
+        return None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        at = str(value.get("at") or "")
+        key = str(value.get("key") or "")
+        return (at, key) if at else None
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
 def _query_service_logs_from_files(
     config: dict[str, Any],
     env_name: str,
     *,
     since: str | None = None,
+    until: str | None = None,
     pattern: str | None = None,
+    services: list[str] | tuple[str, ...] | None = None,
+    streams: list[str] | tuple[str, ...] | None = None,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     since_dt = _parse_iso_dt(since) if since else None
+    until_dt = _parse_iso_dt(until) if until else None
     sources = [s for s in _service_log_sources(config, env_name) if s[2].is_file()]
+    service_filter = {str(value).strip().lower() for value in services or [] if str(value).strip()}
+    stream_filter = {str(value).strip().lower() for value in streams or [] if str(value).strip()}
+    if service_filter:
+        sources = [source for source in sources if source[0].lower() in service_filter]
+    if stream_filter:
+        sources = [source for source in sources if source[1].lower() in stream_filter]
     if not sources:
         return []
     # reserva por arquivo para o stderr ruidoso (waitress) não expulsar o .log principal
@@ -736,6 +1027,8 @@ def _query_service_logs_from_files(
                     continue
                 ts = mtime
             elif since_dt and ts < since_dt:
+                continue
+            if until_dt and ts > until_dt:
                 continue
             # Dedup ruidoso (mesma WARNING repetida)
             dedupe_key = f"{raw.strip()}"
@@ -966,6 +1259,7 @@ def _query_sync_logs(
         ),
     ]
 
+    query_errors: list[str] = []
     try:
         with server_db.get_pg_connection(config, env_name) as conn:
             from psycopg.rows import dict_row
@@ -993,13 +1287,57 @@ def _query_sync_logs(
                                     else str(finished)
                                 )
                             results.append(item)
-                    except Exception:
+                    except Exception as exc:  # noqa: BLE001
+                        query_errors.append(f"{source}: {exc}")
+                        try:
+                            conn.rollback()
+                        except Exception:  # noqa: BLE001
+                            pass
                         continue
     except Exception as exc:  # noqa: BLE001
         return [], str(exc)
 
-    results.sort(key=lambda r: r.get("startedAt") or "", reverse=True)
-    return results[:200], None
+    results.sort(
+        key=lambda row: _parse_iso_dt(row.get("startedAt")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    error = "; ".join(query_errors) if query_errors else None
+    return results[:200], error
+
+
+def _summarize_sync_status(
+    syncs: list[dict[str, Any]], *, since: datetime | None = None
+) -> dict[str, Any]:
+    """Resume o estado terminal mais recente por fonte/tipo, separando recuperação de falha."""
+    latest_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for sync in syncs:
+        started = _parse_iso_dt(sync.get("startedAt"))
+        if started is None or (since is not None and started < since):
+            continue
+        # Uma execução sem finishedAt ainda está em andamento e não é falha terminal.
+        if not sync.get("finishedAt"):
+            continue
+        key = (str(sync.get("source") or "sync"), str(sync.get("kind") or ""))
+        current = latest_by_key.get(key)
+        current_at = _parse_iso_dt(current.get("startedAt")) if current else None
+        if current is None or current_at is None or started > current_at:
+            latest_by_key[key] = sync
+
+    latest = sorted(
+        latest_by_key.values(),
+        key=lambda row: _parse_iso_dt(row.get("startedAt")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    active_failures = [row for row in latest if row.get("success") is False]
+    successes = [row for row in latest if row.get("success") is True]
+    return {
+        "activeFailures": active_failures,
+        "activeFailureCount": len(active_failures),
+        "latestExecutions": latest,
+        "lastExecutionAt": latest[0].get("startedAt") if latest else None,
+        "lastSuccessAt": successes[0].get("finishedAt") if successes else None,
+        "status": "warning" if active_failures else ("ok" if latest else "unknown"),
+    }
 
 
 def _check_sync_anomalies(
@@ -1007,7 +1345,8 @@ def _check_sync_anomalies(
 ) -> None:
     syncs, _error = _query_sync_logs(config, env_name, days=1)
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=3)
-    for sync in syncs:
+    status = _summarize_sync_status(syncs, since=cutoff)
+    for sync in status["activeFailures"]:
         started_raw = sync.get("startedAt")
         if not started_raw:
             continue
@@ -1017,16 +1356,15 @@ def _check_sync_anomalies(
             continue
         if started_dt < cutoff:
             continue
-        if not sync.get("success"):
-            _record_event(
-                ops_store,
-                db_path,
-                env_name,
-                "warn",
-                "sync",
-                f"Sync falhou ({sync.get('source')}/{sync.get('kind')})",
-                str(sync.get("message") or "")[:200],
-            )
+        _record_event(
+            ops_store,
+            db_path,
+            env_name,
+            "warn",
+            "sync",
+            f"Sync falhou ({sync.get('source')}/{sync.get('kind')})",
+            str(sync.get("message") or "")[:200],
+        )
 
 
 def _collector_tick(config: dict[str, Any]) -> None:
@@ -1053,7 +1391,16 @@ def _collector_tick(config: dict[str, Any]) -> None:
     pg_interval = float(settings.get("pgSnapshotIntervalSec") or 300)
     api_interval = float(settings.get("apiSampleIntervalSec") or _API_SAMPLE_INTERVAL_SEC)
 
+    def _env_enabled(name: str) -> bool:
+        env_cfg = config.get(name)
+        if not isinstance(env_cfg, dict):
+            return False
+        flag = env_cfg.get("enabled")
+        return True if flag is None else bool(flag)
+
     for env_name in ENV_ORDER:
+        if not _env_enabled(env_name):
+            continue
         try:
             if categories.get("availability", True):
                 _collect_availability(config, env_name, ops_store, db_path)
@@ -1259,6 +1606,8 @@ def _event_investigation_link(event: dict[str, Any]) -> tuple[str, str]:
     since_param = f"&since={urllib.parse.quote(since_for_logs)}" if since_for_logs else ""
 
     # History API paths (não usar #/ — o router ignora hash fora de /)
+    if category == "host" or env == "HOST":
+        return "Ver recursos do computador", "/host"
     if category in ("logs", "log"):
         return "Verificar logs do serviço", f"/monitoring/logs?env={env}{since_param}"
     if category == "sync":
@@ -1365,21 +1714,27 @@ def _correlate_event(
     end = recorded_dt + window
 
     try:
-        deploy_stats = build_monitoring_deploy_stats(config, env)
-        for run in deploy_stats.get("runs") or []:
-            started = _parse_iso_dt(run.get("started_at"))
-            if started and start <= started <= end:
-                hints.append(
-                    {
-                        "type": "deploy",
-                        "label": f"Possível causa: deploy às {started.strftime('%H:%M')}",
-                    }
-                )
+        deploy_envs = ENV_ORDER if env == "HOST" else (env,)
+        for deploy_env in deploy_envs:
+            deploy_stats = build_monitoring_deploy_stats(config, deploy_env)
+            matched = False
+            for run in deploy_stats.get("runs") or []:
+                started = _parse_iso_dt(run.get("started_at"))
+                if started and start <= started <= end:
+                    hints.append(
+                        {
+                            "type": "deploy",
+                            "label": f"Possível causa: deploy {deploy_env} às {started.strftime('%H:%M')}",
+                        }
+                    )
+                    matched = True
+                    break
+            if matched:
                 break
     except Exception:
         pass
 
-    syncs, _err = _query_sync_logs(config, env, days=1)
+    syncs, _err = _query_sync_logs(config, env, days=1) if env in ENV_ORDER else ([], None)
     for sync in syncs:
         if sync.get("success"):
             continue
@@ -1501,6 +1856,19 @@ def build_monitoring_config(config: dict[str, Any]) -> dict[str, Any]:
             "service_log_errors",
             "api_avg_ms",
             "api_5xx",
+            "host_cpu_pct",
+            "host_memory_used_pct",
+            "host_memory_used_bytes",
+            "host_swap_used_pct",
+            "host_disk_used_pct",
+            "host_disk_free_bytes",
+            "host_disk_read_bps",
+            "host_disk_write_bps",
+            "host_net_rx_bps",
+            "host_net_tx_bps",
+            "host_gpu_util_pct",
+            "host_gpu_memory_used_pct",
+            "host_gpu_temperature_c",
         ],
     }
 
@@ -1552,12 +1920,8 @@ def build_monitoring_summary(
     api_metrics = fetch_backend_api_metrics(config, env_name, window="24h")
 
     syncs, sync_error = _query_sync_logs(config, env_name, days=7)
-    sync_failures_24h = sum(
-        1
-        for s in syncs
-        if not s.get("success")
-        and s.get("startedAt", "") >= since
-    )
+    sync_status = _summarize_sync_status(syncs, since=_parse_iso_dt(since))
+    sync_failures_24h = sync_status["activeFailureCount"]
 
     uptime_samples = ops_store.query_monitor_series(
         env_name, "health_reachable", since=since, limit=1000, db_path=db_path
@@ -1586,6 +1950,7 @@ def build_monitoring_summary(
         "api": api_metrics,
         "syncFailures24h": sync_failures_24h,
         "syncQueryError": sync_error,
+        "sync": sync_status,
     }
 
 
@@ -1692,6 +2057,18 @@ def build_monitoring_event_detail(
     metric_key = "health_latency_ms"
     if category in ("logs", "log"):
         metric_key = "service_log_errors"
+    elif category == "host":
+        lowered = title.lower()
+        if "memória" in lowered or "ram" in lowered:
+            metric_key = "host_memory_used_pct"
+        elif "disco" in lowered or "espaço" in lowered:
+            metric_key = "host_disk_used_pct"
+        elif "vram" in lowered:
+            metric_key = "host_gpu_memory_used_pct"
+        elif "temperatura" in lowered or "gpu" in lowered:
+            metric_key = "host_gpu_temperature_c"
+        else:
+            metric_key = "host_cpu_pct"
     series = build_monitoring_series(
         config, env_name, metric_key, hours=1, center=recorded
     )
@@ -2133,9 +2510,15 @@ def clear_monitoring_events(config: dict[str, Any]) -> dict[str, Any]:
 def build_monitoring_syncs(config: dict[str, Any], env_name: str) -> dict[str, Any]:
     days = int(get_monitoring_settings(config).get("retentionDays") or 7)
     syncs, error = _query_sync_logs(config, env_name, days=days)
+    status = _summarize_sync_status(
+        syncs, since=datetime.now(timezone.utc) - timedelta(hours=24)
+    )
     payload: dict[str, Any] = {
         "environment": env_name.upper(),
         "syncs": syncs,
+        "status": status,
+        "activeFailures": status["activeFailures"],
+        "activeFailureCount": status["activeFailureCount"],
         "retentionDays": days,
     }
     if error:
@@ -2148,20 +2531,54 @@ def build_monitoring_service_logs(
     env_name: str,
     *,
     since: str | None = None,
+    until: str | None = None,
+    q: str | None = None,
     pattern: str | None = None,
+    levels: list[str] | tuple[str, ...] | None = None,
+    services: list[str] | tuple[str, ...] | None = None,
+    streams: list[str] | tuple[str, ...] | None = None,
+    cursor: str | None = None,
     limit: int = 200,
+    order: str = "desc",
 ) -> dict[str, Any]:
     t0 = time.perf_counter()
     if not since:
         since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime(
             "%Y-%m-%dT%H:%M:%S.%f"
         )[:-3] + "Z"
-    # Treat blank pattern as "no text filter".
-    if pattern is not None and not str(pattern).strip():
-        pattern = None
+    query_text = str(q if q is not None else pattern or "").strip() or None
+    normalized_levels = sorted(
+        {str(value).strip().upper() for value in levels or [] if str(value).strip()}
+        & set(_LOG_LEVELS)
+    )
+    normalized_services = sorted(
+        {str(value).strip().lower() for value in services or [] if str(value).strip()}
+    )
+    normalized_streams = sorted(
+        {str(value).strip().lower() for value in streams or [] if str(value).strip()}
+    )
+    limit = max(1, min(int(limit), 10_000))
+    order = "asc" if str(order).lower() == "asc" else "desc"
+    decoded_cursor = _decode_service_log_cursor(cursor)
+    query_until = until
+    if decoded_cursor and (not query_until or decoded_cursor[0] < query_until):
+        query_until = decoded_cursor[0]
+    db_path = resolve_ops_store_path(config)
 
     cache_key = json.dumps(
-        {"env": env_name.upper(), "since": since, "pattern": pattern or "", "limit": limit},
+        {
+            "env": env_name.upper(),
+            "store": str(db_path),
+            "since": since,
+            "until": until or "",
+            "q": query_text or "",
+            "levels": normalized_levels,
+            "services": normalized_services,
+            "streams": normalized_streams,
+            "cursor": cursor or "",
+            "limit": limit,
+            "order": order,
+        },
         sort_keys=True,
     )
     now = time.time()
@@ -2172,55 +2589,175 @@ def build_monitoring_service_logs(
         hit["timingMs"] = round((time.perf_counter() - t0) * 1000, 1)
         return hit
 
-    # Fonte principal: arquivos em logDir (PPLID_{ENV}.log / backend.err / …)
-    file_lines = _query_service_logs_from_files(
-        config, env_name, since=since, pattern=pattern, limit=limit
-    )
+    # Fonte principal: SQLite (ops summary + ingest); arquivos para backend/frontend vivos
+    ops_store = _import_ops_store()
     db_lines: list[dict[str, Any]] = []
-    # Só consulta SQLite se disco não trouxe linhas suficientes
-    if len(file_lines) < min(20, limit):
-        ops_store = _import_ops_store()
-        db_path = resolve_ops_store_path(config)
-        try:
-            db_lines = ops_store.query_service_log_lines(
-                env_name.upper(),
-                since=since,
-                pattern=pattern,
-                limit=limit,
-                db_path=db_path,
-            )
-        except Exception:
-            db_lines = []
+    scan_limit = min(10_000, max(1_000, limit * 4))
+    try:
+        db_lines = ops_store.query_service_log_lines(
+            env_name.upper(),
+            since=since,
+            until=query_until,
+            pattern=query_text,
+            services=normalized_services,
+            streams=normalized_streams,
+            limit=scan_limit,
+            db_path=db_path,
+        )
+    except Exception:
+        db_lines = []
+
+    file_lines = _query_service_logs_from_files(
+        config,
+        env_name,
+        since=since,
+        until=query_until,
+        pattern=query_text,
+        services=normalized_services,
+        streams=normalized_streams,
+        limit=scan_limit,
+    )
 
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for ln in list(file_lines) + list(db_lines):
-        key = f"{ln.get('logged_at')}|{ln.get('service')}|{ln.get('line')}"
+    # Prefer SQLite first so watcher/pipeline summary (no longer on disk) surfaces
+    for raw_line in list(db_lines) + list(file_lines):
+        ln = _normalize_service_log_line(env_name, raw_line)
+        key = ln["key"]
         if key in seen:
             continue
         seen.add(key)
+        if normalized_levels and ln["level"] not in normalized_levels:
+            continue
         merged.append(ln)
-    merged.sort(key=lambda r: r.get("logged_at") or "", reverse=True)
-    lines = merged[:limit]
+    merged.sort(key=lambda row: (row.get("logged_at") or "", row.get("key") or ""), reverse=True)
+    if decoded_cursor:
+        merged = [
+            row
+            for row in merged
+            if (row.get("logged_at") or "", row.get("key") or "") < decoded_cursor
+        ]
+
+    summary = {level: 0 for level in _LOG_LEVELS}
+    for row in merged:
+        summary[row["level"]] += 1
+    page_desc = merged[:limit]
+    has_more = len(merged) > limit or len(db_lines) >= scan_limit
+    next_cursor = _encode_service_log_cursor(page_desc[-1]) if has_more and page_desc else None
+    lines = list(reversed(page_desc)) if order == "asc" else page_desc
 
     sources = [
         {"service": s, "stream": st, "file": p.name, "exists": p.is_file()}
         for s, st, p in _service_log_sources(config, env_name)
     ]
+    sources.append(
+        {
+            "service": "ops",
+            "stream": "sqlite",
+            "file": str(db_path.name) if hasattr(db_path, "name") else "ops-store.db",
+            "exists": True,
+        }
+    )
     result = {
         "environment": env_name.upper(),
         "since": since,
-        "pattern": pattern or "",
+        "until": until,
+        "q": query_text or "",
+        "pattern": query_text or "",
+        "filters": {
+            "levels": normalized_levels,
+            "services": normalized_services,
+            "streams": normalized_streams,
+        },
         "lines": lines,
         "count": len(lines),
+        "total": len(merged),
+        "totalIsEstimate": len(db_lines) >= scan_limit,
+        "summary": {"total": len(merged), "byLevel": summary},
+        "facets": {
+            "levels": list(_LOG_LEVELS),
+            "services": sorted(
+                {str(row.get("service") or "").lower() for row in merged}
+                | {str(source.get("service") or "").lower() for source in sources}
+            ),
+            "streams": sorted(
+                {str(row.get("stream") or "").lower() for row in merged}
+                | {str(source.get("stream") or "").lower() for source in sources}
+            ),
+        },
+        "hasMore": has_more,
+        "nextCursor": next_cursor,
         "sources": sources,
         "fromFiles": len(file_lines),
         "fromDb": len(db_lines),
+        "refreshedAt": _utc_now_iso(),
         "cacheHit": False,
         "timingMs": round((time.perf_counter() - t0) * 1000, 1),
     }
     _LOGS_CACHE[cache_key] = (now, result)
     return result
+
+
+def build_monitoring_service_logs_export(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    export_format: str = "csv",
+    since: str | None = None,
+    until: str | None = None,
+    q: str | None = None,
+    levels: list[str] | tuple[str, ...] | None = None,
+    services: list[str] | tuple[str, ...] | None = None,
+    streams: list[str] | tuple[str, ...] | None = None,
+) -> tuple[bytes, str, str]:
+    payload = build_monitoring_service_logs(
+        config,
+        env_name,
+        since=since,
+        until=until,
+        q=q,
+        levels=levels,
+        services=services,
+        streams=streams,
+        limit=10_000,
+        order="asc",
+    )
+    lines = payload.get("lines") or []
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base_name = f"pplid-{env_name.lower()}-logs-{stamp}"
+    if str(export_format).lower() == "json":
+        body = json.dumps(
+            {
+                "environment": env_name.upper(),
+                "exportedAt": _utc_now_iso(),
+                "filters": payload.get("filters") or {},
+                "since": payload.get("since"),
+                "until": payload.get("until"),
+                "count": len(lines),
+                "lines": lines,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+        return body, "application/json; charset=utf-8", f"{base_name}.json"
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, delimiter=";")
+    writer.writerow(("horario", "ambiente", "nivel", "servico", "stream", "origem", "arquivo", "linha"))
+    for row in lines:
+        writer.writerow(
+            (
+                row.get("logged_at") or "",
+                env_name.upper(),
+                row.get("level") or "OTHER",
+                row.get("service") or "",
+                row.get("stream") or "",
+                row.get("source") or "",
+                row.get("file") or "",
+                row.get("line") or "",
+            )
+        )
+    return output.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", f"{base_name}.csv"
 
 
 def build_monitoring_api_routes(config: dict[str, Any], env_name: str, window: str = "24h") -> dict[str, Any]:
@@ -2234,10 +2771,15 @@ def build_monitoring_api_routes(config: dict[str, Any], env_name: str, window: s
         hit["timingMs"] = round((time.perf_counter() - t0) * 1000, 1)
         return hit
     data = fetch_backend_api_metrics(config, env_name, window=window)
+    _enrich_active_users_peak(config, env_name, data)
     instrumentation = "unavailable"
+    traffic = data.get("traffic") or {}
+    traffic_requests = (traffic.get("totals") or {}).get("requests", 0)
     if data.get("error"):
         instrumentation = "unavailable"
-    elif data.get("totals", {}).get("requests", 0) > 0:
+    elif traffic.get("available") is False:
+        instrumentation = "unavailable"
+    elif traffic_requests > 0 or data.get("totals", {}).get("requests", 0) > 0:
         instrumentation = "active"
     else:
         instrumentation = "no_traffic"
@@ -2321,6 +2863,8 @@ def build_monitoring_api_samples(
         result.update(
             {
                 "slowRoutes": live.get("slowRoutes") or [],
+                "routeStats": live.get("routeStats") or live.get("slowRoutes") or [],
+                "sampling": live.get("sampling") or {},
                 "samples": live.get("samples") or [],
                 "totals": live.get("totals") or {},
                 "since": live.get("since"),

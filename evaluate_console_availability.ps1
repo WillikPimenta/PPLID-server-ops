@@ -30,8 +30,14 @@ function Test-Url {
 Write-Host "=== Fase 2: localhost vs LAN ($lanIp) ==="
 Write-Host ""
 
+$enabledEnvs = @(Get-PplidEnabledEnvironments -ScriptRoot $PSScriptRoot)
+if ($enabledEnvs.Count -eq 0) {
+    Write-Host "Nenhum ambiente habilitado; avaliacao ignorada."
+    exit 0
+}
+
 $rows = @()
-foreach ($env in @("MAIN", "DEV", "HOM")) {
+foreach ($env in $enabledEnvs) {
     $p = $envPorts[$env]
     foreach ($kind in @("BackendHealth", "Frontend")) {
         $path = if ($kind -eq "BackendHealth") { "/api/v1/health/" } else { "/" }

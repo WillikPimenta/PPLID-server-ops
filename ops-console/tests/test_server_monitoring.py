@@ -166,6 +166,43 @@ class BuildMonitoringTests(unittest.TestCase):
         self.assertIn("collectorStatus", cfg)
         self.assertIn("generatedAt", cfg)
 
+    @patch.object(sm, "fetch_backend_api_metrics")
+    def test_build_monitoring_api_routes_exposes_exact_traffic(self, mock_fetch) -> None:
+        mock_fetch.return_value = {
+            "sampling": {"mode": "priority_sample", "normalRatePct": 10},
+            "totals": {"requests": 3, "sampleCount": 3, "status4xx": 2},
+            "slowRoutes": [{"method": "GET", "route": "/api/v1/dashboard/", "count": 3}],
+            "routeStats": [
+                {
+                    "method": "GET",
+                    "route": "/api/v1/dashboard/",
+                    "sampleCount": 3,
+                    "successSamples": 1,
+                    "status4xx": 2,
+                    "successAvgMs": 25.0,
+                    "clientErrorAvgMs": 4.0,
+                }
+            ],
+            "traffic": {
+                "available": True,
+                "source": "exact_aggregate",
+                "activeUsers": {"count": 81, "windowMinutes": 5},
+                "totals": {"requests": 42, "peakRpm": 7, "activeUsersNow": 81},
+                "points": [{"at": "2026-08-10T12:00:00Z", "requests": 7, "rpm": 7}],
+                "topRoutes": [{"method": "GET", "route": "/api/v1/dashboard/", "requests": 42}],
+            },
+        }
+
+        result = sm.build_monitoring_api_routes(self.config, "DEV", window="1h")
+
+        self.assertEqual(result["instrumentation"], "active")
+        self.assertEqual(result["traffic"]["totals"]["requests"], 42)
+        self.assertEqual(result["traffic"]["source"], "exact_aggregate")
+        self.assertEqual(result["traffic"]["activeUsers"]["peakCount"], 81)
+        self.assertEqual(result["traffic"]["activeUsers"]["peakRetentionDays"], 7)
+        self.assertEqual(result["sampling"]["normalRatePct"], 10)
+        self.assertEqual(result["routeStats"][0]["status4xx"], 2)
+
     def test_enrich_monitor_event_availability_link(self) -> None:
         event = sm._enrich_monitor_event(
             {
@@ -363,6 +400,88 @@ class BuildMonitoringTests(unittest.TestCase):
         self.assertGreaterEqual(len(ok["lines"]), 1)
         self.assertEqual(ok["lines"][0].get("logged_at"), old)
 
+    def test_service_logs_structured_filters_and_facets(self) -> None:
+        self.ops_store.append_service_log(
+            "DEV", "backend", "stderr", "ERROR request 123 failed", db_path=self.db
+        )
+        self.ops_store.append_service_log(
+            "DEV", "frontend", "out", "WARNING bundle is large", db_path=self.db
+        )
+        self.ops_store.append_service_log(
+            "DEV", "backend", "out", "INFO request 123 completed", db_path=self.db
+        )
+
+        payload = sm.build_monitoring_service_logs(
+            self.config,
+            "DEV",
+            q="request 123",
+            levels=["ERROR"],
+            services=["backend"],
+            streams=["stderr"],
+        )
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["lines"][0]["level"], "ERROR")
+        self.assertEqual(payload["lines"][0]["service"], "backend")
+        self.assertTrue(payload["lines"][0]["key"])
+        self.assertIn("backend", payload["facets"]["services"])
+        self.assertEqual(payload["summary"]["byLevel"]["ERROR"], 1)
+
+    def test_service_logs_cursor_pages_without_duplicates(self) -> None:
+        for index in range(5):
+            self.ops_store.append_service_log(
+                "MAIN",
+                "deploy",
+                "out",
+                f"INFO page line {index}",
+                logged_at=f"2026-08-11T12:00:0{index}.000Z",
+                db_path=self.db,
+            )
+
+        first = sm.build_monitoring_service_logs(
+            self.config,
+            "MAIN",
+            since="2026-08-11T11:59:00.000Z",
+            limit=2,
+            order="asc",
+        )
+        second = sm.build_monitoring_service_logs(
+            self.config,
+            "MAIN",
+            since="2026-08-11T11:59:00.000Z",
+            cursor=first["nextCursor"],
+            limit=2,
+            order="asc",
+        )
+
+        self.assertTrue(first["hasMore"])
+        self.assertTrue(first["nextCursor"])
+        self.assertTrue(set(line["key"] for line in first["lines"]).isdisjoint(
+            line["key"] for line in second["lines"]
+        ))
+        self.assertLess(first["lines"][0]["logged_at"], first["lines"][1]["logged_at"])
+
+    def test_service_logs_export_csv_and_json(self) -> None:
+        self.ops_store.append_service_log(
+            "HOM", "backend", "stderr", 'ERROR value;with separator', db_path=self.db
+        )
+
+        csv_body, csv_type, csv_name = sm.build_monitoring_service_logs_export(
+            self.config, "HOM", export_format="csv", levels=["ERROR"]
+        )
+        json_body, json_type, json_name = sm.build_monitoring_service_logs_export(
+            self.config, "HOM", export_format="json", levels=["ERROR"]
+        )
+
+        self.assertIn("text/csv", csv_type)
+        self.assertTrue(csv_name.endswith(".csv"))
+        self.assertIn('"ERROR value;with separator"', csv_body.decode("utf-8-sig"))
+        parsed = json.loads(json_body.decode("utf-8"))
+        self.assertIn("application/json", json_type)
+        self.assertTrue(json_name.endswith(".json"))
+        self.assertEqual(parsed["count"], 1)
+        self.assertEqual(parsed["lines"][0]["level"], "ERROR")
+
     def test_collector_status_detail(self) -> None:
         detail = sm.build_monitoring_collector_status_detail(self.config)
         self.assertIn("threadAlive", detail)
@@ -379,6 +498,105 @@ class BuildMonitoringTests(unittest.TestCase):
         self.assertEqual(agg["total24h"], 2)
         self.assertEqual(agg["failed24h"], 1)
         self.assertEqual(agg["failuresByStep"]["git_fetch"], 1)
+
+
+class HourlyProductivityStatusTests(unittest.TestCase):
+    def test_builds_status_table_from_latest_cycle(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            log_path = Path(tmp) / "production.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "[2026-08-11 12:00:00] STATUS|Producao: iniciando ciclo 4",
+                        "[2026-08-11 12:01:00] STATUS|✓ Confer: download concluído com sucesso",
+                        "[2026-08-11 12:01:10] STATUS|[CONFER] Log Eventos baixado",
+                        "[2026-08-11 12:02:00] STATUS|✓ BRFlow: download concluído com sucesso",
+                        "[2026-08-11 12:02:10] STATUS|[BRFLOW] Monitor de eventos tratado salvo",
+                        "[2026-08-11 12:03:00] PRODUTIVIDADE_CASE_SAVED|prod_hora|C:/relatorio.xlsx",
+                        "[2026-08-11 12:03:20] CASE_FILA_SAVED|C:/fila.json",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result = sm.build_hourly_productivity_status(
+                {"productivityMonitoring": {"productionLog": str(log_path)}}
+            )
+
+        by_system = {row["system"]: row for row in result["systems"]}
+        self.assertTrue(result["sourceAvailable"])
+        self.assertEqual(by_system["BRFlow"]["production"]["status"], "ok")
+        self.assertEqual(by_system["BRFlow"]["monitor"]["status"], "ok")
+        self.assertEqual(by_system["Confer"]["production"]["status"], "ok")
+        self.assertEqual(by_system["Confer"]["monitor"]["status"], "ok")
+        self.assertEqual(by_system["Case Manager"]["production"]["status"], "ok")
+        self.assertEqual(by_system["Case Manager"]["monitor"]["status"], "ok")
+        self.assertEqual(result["cycleStatus"], "stale")
+        case_steps = {step["label"]: step for step in by_system["Case Manager"]["steps"]}
+        self.assertEqual(case_steps["Produtividade por hora"]["status"], "completed")
+        self.assertEqual(case_steps["Fila em aberto"]["status"], "completed")
+
+    def test_missing_log_returns_pending_rows(self) -> None:
+        result = sm.build_hourly_productivity_status(
+            {"productivityMonitoring": {"productionLog": "C:/missing/production.log"}}
+        )
+        self.assertFalse(result["sourceAvailable"])
+        self.assertEqual(len(result["systems"]), 3)
+        self.assertTrue(all(row["production"]["status"] == "pending" for row in result["systems"]))
+
+
+class SyncStatusTests(unittest.TestCase):
+    def test_success_after_failure_recovers_same_source_and_kind(self) -> None:
+        rows = [
+            {
+                "source": "monitor_eventos",
+                "kind": "monitor",
+                "startedAt": "2026-08-13T10:00:00-03:00",
+                "finishedAt": "2026-08-13T10:00:05-03:00",
+                "success": False,
+            },
+            {
+                "source": "monitor_eventos",
+                "kind": "monitor",
+                "startedAt": "2026-08-13T10:05:00-03:00",
+                "finishedAt": "2026-08-13T10:05:05-03:00",
+                "success": True,
+            },
+        ]
+
+        status = sm._summarize_sync_status(rows)
+
+        self.assertEqual(status["activeFailureCount"], 0)
+        self.assertEqual(status["status"], "ok")
+
+    def test_only_latest_terminal_execution_per_source_kind_is_active(self) -> None:
+        rows = [
+            {
+                "source": "produtividade",
+                "kind": "prod",
+                "startedAt": "2026-08-13T13:00:00Z",
+                "finishedAt": "2026-08-13T13:00:05Z",
+                "success": False,
+            },
+            {
+                "source": "produtividade",
+                "kind": "prod",
+                "startedAt": "2026-08-13T13:05:00Z",
+                "finishedAt": None,
+                "success": False,
+            },
+            {
+                "source": "monitor_eventos",
+                "kind": "monitor",
+                "startedAt": "2026-08-13T13:01:00Z",
+                "finishedAt": "2026-08-13T13:01:05Z",
+                "success": True,
+            },
+        ]
+
+        status = sm._summarize_sync_status(rows)
+
+        self.assertEqual(status["activeFailureCount"], 1)
+        self.assertEqual(status["activeFailures"][0]["source"], "produtividade")
 
 
 class SpikeDetectionTests(unittest.TestCase):

@@ -73,14 +73,16 @@ OC.renderDrawerContent = function renderDrawerContent(row) {
   const deployedSha = OC.resolveCommitSha ? OC.resolveCommitSha(data) : data.deployedSha || data.deployCommit?.sha || data.activeSha || "—";
   const repoSha = data.repoSha || data.currentCommit?.sha || data.gitSha || "—";
   const links = data.links || {};
-  const linksDisabled = phase === "deploying" || phase === "offline";
+  const envEnabled = data.enabled !== false;
+  const linksDisabled = !envEnabled || phase === "deploying" || phase === "offline" || phase === "disabled";
   const lastGood = data.lastGoodSha || data.deployState?.lastGoodSha || "—";
   const previousSha = data.previousSha || data.deployState?.previousSha || "";
-  const canRollback = phase !== "deploying" && (previousSha || lastGood !== "—");
+  const canRollback = envEnabled && phase !== "deploying" && (previousSha || lastGood !== "—");
   const busy = phase === "deploying";
   const homOverview = OC.lastOverview?.environments?.HOM || {};
   const homBusy = (homOverview.displayPhase || homOverview.phase) === "deploying";
-  const promoteDisabled = busy || homBusy;
+  const homEnabled = homOverview.enabled !== false;
+  const promoteDisabled = !envEnabled || !homEnabled || busy || homBusy;
   const isCurrentDeploy = row.isRunning || (busy && row.runId && data.deployState?.runId === row.runId);
   const isActiveRun = OC.isHistoryRowActive ? OC.isHistoryRowActive(row, data) : false;
   const runKindLabel = isCurrentDeploy
@@ -90,6 +92,9 @@ OC.renderDrawerContent = function renderDrawerContent(row) {
       : "Deploy historico";
 
   let alerts = "";
+  if (!envEnabled) {
+    alerts += `<div class="alert alert-warn">Ambiente desativado — watch, deploy e probes pausados. Use Ativar para voltar a operar.</div>`;
+  }
   const lastDeploy = data.lastDeploy || {};
   const alertMsg = lastDeploy.message || data.lastDeployMessage;
   if (data.deployPending || (data.shaInSync === false && repoSha !== "—" && deployedSha !== "—")) {
@@ -150,15 +155,16 @@ OC.renderDrawerContent = function renderDrawerContent(row) {
         ${linkBtn("api", "API")}
         ${linkBtn("health", "Health")}
         <button type="button" class="btn btn-danger btn-sm" id="drawer-btn-rollback" ${!canRollback || busy ? "disabled" : ""}>Rollback</button>
-        <button type="button" class="btn btn-primary btn-sm" id="drawer-btn-redeploy" ${busy ? "disabled" : ""}>Re-deploy</button>
+        <button type="button" class="btn btn-primary btn-sm" id="drawer-btn-redeploy" ${!envEnabled || busy ? "disabled" : ""}>Re-deploy</button>
+        <button type="button" class="${envEnabled ? "btn btn-outline-danger btn-sm" : "btn btn-primary btn-sm"}" id="drawer-btn-toggle-env" ${busy ? "disabled" : ""}>${envEnabled ? "Desativar" : "Ativar"}</button>
         <button type="button" class="btn btn-secondary btn-sm" data-copy-sha="${OC.escapeHtml(row.sha)}">Copiar SHA</button>
       </div>
       <div class="drawer-service-actions">
         <span class="drawer-actions-label">Reiniciar serviço:</span>
-        <button type="button" class="btn btn-secondary btn-sm drawer-restart" data-service="backend" ${busy ? "disabled" : ""}>Backend</button>
-        <button type="button" class="btn btn-secondary btn-sm drawer-restart" data-service="frontend" ${busy ? "disabled" : ""}>Frontend</button>
-        <button type="button" class="btn btn-secondary btn-sm drawer-restart" data-service="all" ${busy ? "disabled" : ""}>Todos</button>
-        ${row.environment === "DEV" ? '<button type="button" class="btn btn-secondary btn-sm" id="drawer-btn-promote-hom" ' + (promoteDisabled ? "disabled" : "") + ' title="' + (homBusy ? "HOM em deploy" : "Promover SHA ativo de DEV para HOM") + '">Promover → HOM</button>' : ""}
+        <button type="button" class="btn btn-secondary btn-sm drawer-restart" data-service="backend" ${!envEnabled || busy ? "disabled" : ""}>Backend</button>
+        <button type="button" class="btn btn-secondary btn-sm drawer-restart" data-service="frontend" ${!envEnabled || busy ? "disabled" : ""}>Frontend</button>
+        <button type="button" class="btn btn-secondary btn-sm drawer-restart" data-service="all" ${!envEnabled || busy ? "disabled" : ""}>Todos</button>
+        ${row.environment === "DEV" ? '<button type="button" class="btn btn-secondary btn-sm" id="drawer-btn-promote-hom" ' + (promoteDisabled ? "disabled" : "") + ' title="' + (!homEnabled ? "HOM desativado" : homBusy ? "HOM em deploy" : "Promover SHA ativo de DEV para HOM") + '">Promover → HOM</button>' : ""}
       </div>
     </div>
     <div class="drawer-tab-panel ${OC.drawerActiveTab === "database" ? "is-active" : ""}" data-drawer-panel="database" ${OC.drawerActiveTab === "database" ? "" : "hidden"}>
@@ -220,6 +226,19 @@ OC.renderDrawerContent = function renderDrawerContent(row) {
     await OC.runPromote("DEV", "HOM", (err, result) => {
       OC.afterActionRefresh(err, result, btn);
     });
+  });
+
+  document.getElementById("drawer-btn-toggle-env")?.addEventListener("click", async () => {
+    const btn = document.getElementById("drawer-btn-toggle-env");
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    const env = row.environment;
+    const enabled = (OC.lastOverview?.environments?.[env]?.enabled) !== false;
+    if (enabled) {
+      await OC.runDisableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+    } else {
+      await OC.runEnableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+    }
   });
 
   body.querySelectorAll(".drawer-restart").forEach((btn) => {
