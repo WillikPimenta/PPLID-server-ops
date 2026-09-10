@@ -159,3 +159,49 @@ def test_apply_console_update_spawns_worker(tmp_path: Path):
     assert result["ok"] is True
     assert result["restarting"] is True
     spawn.assert_called_once()
+    saved = so._read_console_update_result(config)
+    assert saved is not None
+    assert saved.get("phase") == "started"
+    assert saved.get("targetSha") == "def5678"
+
+
+def test_console_update_result_roundtrip(tmp_path: Path):
+    base = tmp_path / "pplid"
+    logs = base / "logs"
+    logs.mkdir(parents=True)
+    config = {"logDir": str(logs)}
+    so._write_console_update_result(
+        config,
+        {
+            "ok": False,
+            "phase": "failed",
+            "error": "git pull --ff-only falhou: divergent branches",
+            "previousSha": "abc1234",
+            "targetSha": "def5678",
+        },
+    )
+    saved = so._read_console_update_result(config)
+    assert saved["ok"] is False
+    assert "divergent" in saved["error"]
+    assert saved.get("finishedAt")
+
+
+def test_check_console_update_includes_last_result_when_locked(tmp_path: Path):
+    base = tmp_path / "pplid"
+    logs = base / "logs"
+    logs.mkdir(parents=True)
+    config = {"logDir": str(logs)}
+    so._write_console_update_lock(config, detail="abc->def")
+    so._write_console_update_result(
+        config,
+        {"ok": True, "phase": "started", "targetSha": "def5678"},
+    )
+    with patch.object(
+        so,
+        "read_local_console_git_info",
+        return_value={"ok": True, "supported": True, "currentSha": "abc1234", "branch": "main"},
+    ):
+        result = so.check_console_update(config)
+    assert result["inProgress"] is True
+    assert result["lastResult"]["phase"] == "started"
+    assert result["lockDetail"] == "abc->def"

@@ -2525,6 +2525,10 @@ def _console_update_lock_path(config: dict[str, Any]) -> Path:
     return get_base_dir(config) / "logs" / "console-update.lock"
 
 
+def _console_update_result_path(config: dict[str, Any]) -> Path:
+    return get_base_dir(config) / "logs" / "console-update.result.json"
+
+
 def _read_console_update_lock(config: dict[str, Any]) -> dict[str, Any] | None:
     path = _console_update_lock_path(config)
     if not path.is_file():
@@ -2558,6 +2562,30 @@ def _clear_console_update_lock(config: dict[str, Any]) -> None:
         _console_update_lock_path(config).unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _read_console_update_result(config: dict[str, Any]) -> dict[str, Any] | None:
+    path = _console_update_result_path(config)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"ok": False, "error": "Resultado de atualizacao corrompido."}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "Resultado de atualizacao invalido."}
+    return payload
+
+
+def _write_console_update_result(config: dict[str, Any], payload: dict[str, Any]) -> None:
+    path = _console_update_result_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = {
+        **payload,
+        "finishedAt": payload.get("finishedAt")
+        or datetime.now(timezone.utc).isoformat(),
+    }
+    path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
 
 
 def _git_in_repo(repo_dir: Path, args: list[str], *, timeout: int = 15) -> str | None:
@@ -2694,6 +2722,7 @@ def _merge_console_update_payload(
     local: dict[str, Any],
     *,
     in_progress: bool = False,
+    last_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     merged = {**local, **payload}
     for key in ("branch", "currentSha", "currentShaFull", "dirty", "supported", "repoDir"):
@@ -2701,6 +2730,12 @@ def _merge_console_update_payload(
             merged[key] = local.get(key)
     if in_progress:
         merged["inProgress"] = True
+    if last_result is not None:
+        merged["lastResult"] = last_result
+        if not in_progress and last_result.get("ok") is False:
+            err = last_result.get("error") or last_result.get("reason")
+            if err and not merged.get("lastError"):
+                merged["lastError"] = err
     merged["checkedAt"] = datetime.now(timezone.utc).isoformat()
     return merged
 
@@ -2730,6 +2765,7 @@ def _parse_powershell_json(stdout: str) -> dict[str, Any]:
 
 def check_console_update(config: dict[str, Any]) -> dict[str, Any]:
     local = read_local_console_git_info(config)
+    last_result = _read_console_update_result(config)
     lock = _read_console_update_lock(config)
     if lock:
         return _merge_console_update_payload(
@@ -2741,6 +2777,7 @@ def check_console_update(config: dict[str, Any]) -> dict[str, Any]:
             },
             local,
             in_progress=True,
+            last_result=last_result,
         )
 
     script = _console_update_script(config)
@@ -2752,6 +2789,7 @@ def check_console_update(config: dict[str, Any]) -> dict[str, Any]:
                 "reason": f"Script de atualizacao nao encontrado: {script}",
             },
             local,
+            last_result=last_result,
         )
 
     repo_dir = resolve_ops_repo_dir(config)
@@ -2773,7 +2811,7 @@ def check_console_update(config: dict[str, Any]) -> dict[str, Any]:
     if not payload.get("ok") and result.get("error"):
         payload.setdefault("error", result.get("error"))
     payload.setdefault("supported", bool(payload.get("supported", True)))
-    return _merge_console_update_payload(payload, local)
+    return _merge_console_update_payload(payload, local, last_result=last_result)
 
 
 def _spawn_detached_powershell(script: Path, args: list[str]) -> None:
@@ -2803,11 +2841,13 @@ def _spawn_detached_powershell(script: Path, args: list[str]) -> None:
 def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
     script = _console_update_script(config)
     if not script.is_file():
-        return {
+        result = {
             "ok": False,
             "supported": False,
             "error": f"Script de atualizacao nao encontrado: {script}",
         }
+        _write_console_update_result(config, result)
+        return result
 
     lock = _read_console_update_lock(config)
     if lock:
@@ -2815,6 +2855,8 @@ def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
             "ok": False,
             "inProgress": True,
             "error": "Atualizacao do console ja em andamento.",
+            "lockDetail": lock.get("detail") or "",
+            "lastResult": _read_console_update_result(config),
         }
 
     status = check_console_update(config)
@@ -2836,9 +2878,25 @@ def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
 
     previous_sha = str(status.get("currentSha") or "")
     target_sha = str(status.get("remoteSha") or "")
+    started_at = datetime.now(timezone.utc).isoformat()
 
     try:
         _write_console_update_lock(config, detail=f"{previous_sha}->{target_sha}")
+        _write_console_update_result(
+            config,
+            {
+                "ok": True,
+                "phase": "started",
+                "accepted": True,
+                "applied": False,
+                "restarting": False,
+                "previousSha": previous_sha,
+                "targetSha": target_sha,
+                "branch": status.get("branch"),
+                "startedAt": started_at,
+                "finishedAt": started_at,
+            },
+        )
         repo_dir = resolve_ops_repo_dir(config)
         args = ["-Apply", "-OpsRepoDir", str(repo_dir)]
         config_path = config.get("_configPath") or config.get("configPath")
@@ -2847,7 +2905,9 @@ def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
         _spawn_detached_powershell(script, args)
     except OSError as exc:
         _clear_console_update_lock(config)
-        return {"ok": False, "error": str(exc)}
+        result = {"ok": False, "error": str(exc), "previousSha": previous_sha, "targetSha": target_sha}
+        _write_console_update_result(config, result)
+        return result
 
     return {
         "ok": True,
@@ -2857,4 +2917,5 @@ def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
         "previousSha": previous_sha,
         "targetSha": target_sha,
         "branch": status.get("branch"),
+        "startedAt": started_at,
     }

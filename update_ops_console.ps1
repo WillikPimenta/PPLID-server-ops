@@ -15,6 +15,25 @@ function Write-UpdateJson {
     Write-Output ($Payload | ConvertTo-Json -Compress -Depth 5)
 }
 
+function Write-ConsoleUpdateResult {
+    param(
+        [hashtable]$Payload,
+        [string]$ResultPath
+    )
+    if (-not $Payload.ContainsKey("finishedAt") -or -not $Payload["finishedAt"]) {
+        $Payload["finishedAt"] = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    $json = $Payload | ConvertTo-Json -Compress -Depth 5
+    if ($ResultPath) {
+        $dir = Split-Path -Parent $ResultPath
+        if ($dir -and -not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Set-Content -Path $ResultPath -Value $json -Encoding UTF8
+    }
+    Write-Output $json
+}
+
 function Invoke-GitInRepo {
     param(
         [string]$RepoDir,
@@ -142,11 +161,17 @@ if (-not $ConfigPath) {
 
 $opsConsoleDir = Get-PplidOpsConsoleDir -ScriptRoot $PSScriptRoot
 $lockPath = Join-Path (Get-PplidLogDir) "console-update.lock"
+$resultPath = Join-Path (Get-PplidLogDir) "console-update.result.json"
 
 function Clear-ConsoleUpdateLock {
     if (Test-Path $lockPath) {
         Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Write-ApplyResult {
+    param([hashtable]$Payload)
+    Write-ConsoleUpdateResult -Payload $Payload -ResultPath $resultPath
 }
 
 if ($CheckOnly) {
@@ -180,15 +205,16 @@ if ($Apply) {
     $status = Get-ConsoleUpdateStatus -RepoDir $OpsRepoDir
     if (-not $status.ok) {
         Clear-ConsoleUpdateLock
-        Write-UpdateJson -Payload $status
+        Write-ApplyResult -Payload $status
         exit 1
     }
     if (-not $status.updateAvailable) {
         Clear-ConsoleUpdateLock
-        Write-UpdateJson -Payload (@{
+        Write-ApplyResult -Payload (@{
             ok = $true
             applied = $false
             restarting = $false
+            phase = "done"
             message = "Console ja esta atualizado."
         } + $status)
         exit 0
@@ -214,10 +240,11 @@ if ($Apply) {
         Invoke-GitInRepo -RepoDir $OpsRepoDir -GitArgs @("pull", "--ff-only", "origin", $status.branch) | Out-Null
     } catch {
         Clear-ConsoleUpdateLock
-        Write-UpdateJson -Payload @{
+        Write-ApplyResult -Payload @{
             ok = $false
             applied = $false
             restarting = $false
+            phase = "failed"
             error = $_.Exception.Message
             previousSha = $previousSha
             targetSha = $targetSha
@@ -245,10 +272,11 @@ if ($Apply) {
             & $venvPython -m pip install --disable-pip-version-check -r $requirements
             if ($LASTEXITCODE -ne 0) {
                 Clear-ConsoleUpdateLock
-                Write-UpdateJson -Payload @{
+                Write-ApplyResult -Payload @{
                     ok = $false
                     applied = $true
                     restarting = $false
+                    phase = "failed"
                     error = "git pull ok, mas pip install falhou."
                     previousSha = $previousSha
                     targetSha = $newStatus.currentSha
@@ -270,10 +298,11 @@ if ($Apply) {
             }
             if ($LASTEXITCODE -ne 0) {
                 Clear-ConsoleUpdateLock
-                Write-UpdateJson -Payload @{
+                Write-ApplyResult -Payload @{
                     ok = $false
                     applied = $true
                     restarting = $false
+                    phase = "failed"
                     error = "git pull ok, mas bootstrap do runtime de automacoes falhou."
                     previousSha = $previousSha
                     targetSha = $newStatus.currentSha
@@ -284,10 +313,11 @@ if ($Apply) {
     }
 
     Clear-ConsoleUpdateLock
-    Write-UpdateJson -Payload @{
+    Write-ApplyResult -Payload @{
         ok = $true
         applied = $true
         restarting = $true
+        phase = "restarting"
         previousSha = $previousSha
         targetSha = $newStatus.currentSha
         branch = $newStatus.branch
@@ -311,10 +341,11 @@ if ($Apply) {
     exit 0
     } catch {
         Clear-ConsoleUpdateLock
-        Write-UpdateJson -Payload @{
+        Write-ApplyResult -Payload @{
             ok = $false
             applied = $false
             restarting = $false
+            phase = "failed"
             error = $_.Exception.Message
         }
         exit 1

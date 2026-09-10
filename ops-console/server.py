@@ -1403,8 +1403,8 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 f"from={result.get('previousSha', '')} to={result.get('targetSha', '')}"
             ),
         )
-        status = 200 if result.get("ok") else 500
-        self._send_json(result, status=status)
+        # Sempre 200 com payload estruturado; o campo ok indica sucesso da aplicacao.
+        self._send_json(result, status=200)
 
     def _handle_action_cleanup_orphan_bots(self) -> None:
         result = server_ops.action_cleanup_orphan_bots(self.config)

@@ -5005,6 +5005,15 @@ body.is-locked .auth-mode-banner {
   border-color: color-mix(in srgb, #3b82f6 30%, var(--color-border-subtle));
 }
 
+.ops-console-update-bar.is-update-error .ops-console-update-inner {
+  border-color: color-mix(in srgb, var(--color-error) 40%, var(--color-border-subtle));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-error) 6%, var(--color-surface-elevated)) 0%,
+    var(--color-surface-elevated) 100%
+  );
+}
+
 .ops-console-update-icon {
   display: flex;
   align-items: center;
@@ -5106,6 +5115,58 @@ body.is-locked .auth-mode-banner {
   font-size: 0.72rem;
   color: var(--color-text-secondary);
   line-height: 1.35;
+}
+
+.ops-console-update-error {
+  margin-top: 0.45rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--color-error) 35%, var(--color-border-subtle));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-error) 8%, var(--color-surface-elevated));
+}
+
+.ops-console-update-error-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.ops-console-update-error-head strong {
+  font-size: 0.75rem;
+  color: var(--color-error);
+}
+
+.ops-console-update-error-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.ops-console-update-error-body {
+  margin: 0;
+  max-height: 8rem;
+  overflow: auto;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-surface-elevated) 70%, #000);
+  color: var(--color-text-primary);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  user-select: text;
+}
+
+.ops-console-update-error-raw {
+  margin-top: 0.35rem;
+  width: 100%;
+  min-height: 4.5rem;
+  font-size: 0.7rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .ops-console-update-btn {
