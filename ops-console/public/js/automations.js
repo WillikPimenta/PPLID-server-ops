@@ -61,6 +61,10 @@
     return ({ running: "Em execução", starting: "Iniciando", stopping: "Parando", error: "Com falha", interrupted: "Interrompido", idle: "Parado", scheduled: "Agendado" })[status] || "Parado";
   }
 
+  function opsRunning(bot) {
+    return bot?.controller === "ops" && Boolean(bot?.running);
+  }
+
   function botPresentation(mode, bot, botConfig) {
     const status = bot?.status || "idle";
     const running = Boolean(bot?.running);
@@ -317,15 +321,25 @@
     bindConfigModal();
   }
 
+  function resetConfigModalState() {
+    configModalMode = "";
+    document.body.classList.remove("auto-config-modal-open");
+  }
+
   function openConfigModal(mode) {
     configModalMode = mode;
     document.body.classList.add("auto-config-modal-open");
-    renderConfigModal();
+    try {
+      renderConfigModal();
+    } catch (err) {
+      resetConfigModalState();
+      try { renderConfigModal(); } catch (_) { /* ignore */ }
+      OC.showToast?.(err.message || "Falha ao abrir configuração", "error");
+    }
   }
 
   function closeConfigModal() {
-    configModalMode = "";
-    document.body.classList.remove("auto-config-modal-open");
+    resetConfigModalState();
     renderConfigModal();
   }
 
@@ -387,9 +401,14 @@
       return;
     }
     pendingAction = key;
-    render();
-    try { await action(); }
-    finally { pendingAction = ""; await refresh(); }
+    try {
+      render();
+      await action();
+    } finally {
+      pendingAction = "";
+      try { await refresh(); }
+      catch (err) { OC.showToast?.(err.message || "Falha ao atualizar estado", "error"); }
+    }
   }
 
   function bindConfigModal() {
@@ -547,7 +566,14 @@
     if (!root || !data) return;
     root.innerHTML = markup();
     bind(root);
-    renderConfigModal();
+    try {
+      renderConfigModal();
+    } catch (err) {
+      // Modal half-open (ex.: falha anterior) não pode travar start/stop.
+      resetConfigModalState();
+      try { renderConfigModal(); } catch (_) { /* ignore */ }
+      OC.showToast?.(err.message || "Falha ao atualizar configuração", "error");
+    }
   }
 
   async function refresh() {
