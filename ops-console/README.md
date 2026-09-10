@@ -52,17 +52,22 @@ powershell -ExecutionPolicy Bypass -File .\start_ops_console.ps1 -Local `
   -PplidDir C:\Users\c93123a\PPLID -Restart
 ```
 
-Depois publique o runtime em **Automações**. Somente então o botão **Validar
-Okta** ficará disponível. O checkout também precisa ter as dependências do
-backend e um PostgreSQL acessível pelo `config/machine.config.local.json` e
-pelos arquivos `deploy\<AMBIENTE>\shared\backend.env` locais.
+O launcher prepara automaticamente o **runtime nativo de automações**
+(`automation-runtime/native-bundle` + `.venv` com Django/Selenium). Depois disso,
+**Validar Okta** fica disponível em **Automações**. Publicar um bundle a partir de
+MAIN/DEV/HOM continua opcional para congelar a versão de uma release específica.
+
+O checkout local também precisa de um PostgreSQL acessível pelo
+`config/machine.config.local.json` e pelos arquivos
+`deploy\<AMBIENTE>\shared\backend.env` locais.
 
 Na primeira execução, o launcher cria automaticamente:
 
 - `config/env.config.local.json`, a partir do exemplo;
 - `config/machine.config.local.json`;
 - `.local/`, contendo logs, repositórios e runtime dos testes;
-- `ops-console/.venv`, com as dependências Python.
+- `ops-console/.venv`, com as dependências Python do console;
+- runtime nativo dos bots (código + `.venv` com requirements de `automation-native`).
 
 O console local escuta somente em `127.0.0.1:5191`, portanto não conflita com a
 instância do servidor (`5190`) e não expõe a máquina na rede. Acesse
@@ -160,7 +165,9 @@ Configuração em `machine.config.json`:
 }
 ```
 
-`start_ops_console.ps1` cria `ops-console/.venv` e instala `requirements.txt` na primeira execução. O console não depende mais do ambiente Python de DEV ou MAIN.
+`start_ops_console.ps1` cria `ops-console/.venv`, instala `requirements.txt` do
+console e prepara o runtime nativo de automações (código + `.venv` dos bots)
+quando necessário. O console não depende mais do ambiente Python de DEV ou MAIN.
 
 Os módulos de Host, monitoramento, banco, configuração e drawers são carregados sob demanda. A Visão Geral inicia somente com o núcleo da interface (aproximadamente 110 KB de JavaScript não comprimido); acompanhamento detalhado de deploy é pré-carregado automaticamente quando há pipeline ativo.
 
@@ -203,9 +210,20 @@ python -m pytest tests/
 ## Automações resilientes (piloto)
 
 A rota `/automations` opera os bots **Produção (H/H)** e **Rotina diária** fora da
-árvore de releases. Antes do primeiro uso, publique manualmente uma release
-MAIN, DEV ou HOM, escolha separadamente o banco de destino, valide as credenciais
-Okta e inicie o bot.
+árvore de releases. O ops-console é autossuficiente: no start/restart ele
+sincroniza `ops-console/automation-native` para o runtime nativo e instala as
+dependências dos bots quando o `.venv` falta ou os `requirements.txt` mudam.
+
+Fluxo típico:
+
+1. Abrir **Automações** e confirmar o badge **Runtime pronto**
+2. Escolher até 2 bancos de destino
+3. Validar credenciais Okta (headless por padrão no servidor)
+4. Iniciar o bot
+
+Publicar um runtime a partir de MAIN/DEV/HOM continua disponível via API
+(`POST /api/v1/automations/runtime/publish`) para congelar a versão de uma
+release específica. Sem publicação, o console usa o bundle nativo `ops-native`.
 
 Cada publicação cria um bundle imutável em
 `C:\PPLID\ops\data\automation-runtime\bundles`. O supervisor recebe a marca
@@ -216,7 +234,9 @@ piloto estiver ativo.
 
 Credenciais são transmitidas apenas pelo ambiente do processo e não são gravadas
 em configurações, estado, logs ou auditoria. O diretório pode ser sobrescrito em
-`machine.config.json` por `automationRuntime.root`.
+`machine.config.json` por `automationRuntime.root`. Use
+`automationRuntime.oktaHeadless` (padrão `true`) para controlar o Chrome da
+validação Okta no servidor.
 
 Arquivos `.env` nunca são copiados para os bundles. O supervisor carrega o arquivo
 autoritativo `deploy\<ENV>\shared\backend.env` do banco congelado no início do run.

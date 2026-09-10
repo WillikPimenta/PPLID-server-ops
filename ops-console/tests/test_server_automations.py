@@ -144,11 +144,11 @@ def test_start_persists_no_credentials(tmp_path: Path) -> None:
         automations._credential_digest("user1", "very-secret"),
         time.time() + 60,
     )
-    with patch.object(automations, "_find_global_runner", return_value=None), patch.object(
-        automations, "_validate_target_database"
-    ), patch.object(automations, "_pid_alive", return_value=True), patch.object(
-        automations.subprocess, "Popen", return_value=fake_proc
-    ):
+    with patch.object(automations, "ensure_automation_runtime", return_value={"ready": True}), patch.object(
+        automations, "_find_global_runner", return_value=None
+    ), patch.object(automations, "_validate_target_database"), patch.object(
+        automations, "_pid_alive", return_value=True
+    ), patch.object(automations.subprocess, "Popen", return_value=fake_proc):
         result = automations.start_bot(
             config,
             "production",
@@ -181,9 +181,11 @@ def test_start_with_two_targets_spawns_two_instances(tmp_path: Path) -> None:
         time.time() + 60,
     )
     fake_proc = MagicMock(pid=7777)
-    with patch.object(automations, "_find_global_runner", return_value=None), patch.object(
-        automations, "_validate_target_database"
-    ), patch.object(automations.subprocess, "Popen", return_value=fake_proc) as popen:
+    with patch.object(automations, "ensure_automation_runtime", return_value={"ready": True}), patch.object(
+        automations, "_find_global_runner", return_value=None
+    ), patch.object(automations, "_validate_target_database"), patch.object(
+        automations.subprocess, "Popen", return_value=fake_proc
+    ) as popen:
         result = automations.start_bot(
             config, "production", {"matricula": "user1", "senha": "secret"}, "operator"
         )
@@ -205,7 +207,9 @@ def test_credential_validation_is_kept_only_in_memory(tmp_path: Path) -> None:
         captured_env.update(kwargs["env"])
         return completed
 
-    with patch.object(automations.subprocess, "run", side_effect=fake_run):
+    with patch.object(automations, "ensure_automation_runtime", return_value={"ready": True}), patch.object(
+        automations.subprocess, "run", side_effect=fake_run
+    ):
         result = automations.validate_credentials(
             config, {"matricula": "user1", "senha": "very-secret"}, "operator"
         )
@@ -280,7 +284,15 @@ def test_publish_copies_release_and_activates_atomically(tmp_path: Path) -> None
     (current / "automacoes" / ".env").write_text("SECRET=do-not-copy", encoding="utf-8")
     (current / "backend" / "requirements.txt").write_text("", encoding="utf-8")
     (current / "meta.json").write_text(json.dumps({"sha": "abc123", "shaFull": "abc123full"}), encoding="utf-8")
-    with patch.object(automations, "_find_global_runner", return_value=None), patch.object(automations, "_run_checked"):
+    def fake_install(bundle_dir: Path):
+        python = automations._venv_python(bundle_dir)
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text("", encoding="utf-8")
+        return python
+
+    with patch.object(automations, "_find_global_runner", return_value=None), patch.object(
+        automations, "_install_bundle_venv", side_effect=fake_install
+    ):
         result = automations.publish_runtime(config, "DEV", "operator")
     assert result["bundle"]["id"] == "dev-abc123"
     assert (automations.runtime_root(config) / "bundles" / "dev-abc123" / "bundle.json").is_file()
@@ -319,9 +331,11 @@ def test_start_freezes_target_environment_in_command(tmp_path: Path) -> None:
         time.time() + 60,
     )
     fake_proc = MagicMock(pid=5555)
-    with patch.object(automations, "_find_global_runner", return_value=None), patch.object(
-        automations, "_validate_target_database"
-    ), patch.object(automations.subprocess, "Popen", return_value=fake_proc) as popen:
+    with patch.object(automations, "ensure_automation_runtime", return_value={"ready": True}), patch.object(
+        automations, "_find_global_runner", return_value=None
+    ), patch.object(automations, "_validate_target_database"), patch.object(
+        automations.subprocess, "Popen", return_value=fake_proc
+    ) as popen:
         automations.start_bot(config, "production", {"matricula": "user1", "senha": "secret"}, "operator")
         write_backend_env(tmp_path, "DEV", "pplid_dev")
         with patch.object(automations, "_validate_target_database"):

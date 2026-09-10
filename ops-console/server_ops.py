@@ -519,6 +519,20 @@ def action_redeploy(
         return {"ok": False, "error": "Deploy em andamento neste ambiente."}
 
     env_cfg = config.get(env_name, {})
+    worktree = read_env_git_worktree_status(
+        base_dir,
+        env_name,
+        repo_dir=Path(env_cfg.get("repoDir", "")),
+        use_cache=False,
+    )
+    if worktree.get("dirty"):
+        return {
+            "ok": False,
+            "error": worktree.get("reason")
+            or "Working tree com alteracoes locais. Resolva manualmente antes de atualizar.",
+            "gitWorktree": worktree,
+        }
+
     sha = target_sha.strip()
     sha_full = target_sha_full.strip() or sha
     if not sha:
@@ -2561,6 +2575,94 @@ def _git_in_repo(repo_dir: Path, args: list[str], *, timeout: int = 15) -> str |
     except (OSError, subprocess.TimeoutExpired):
         return None
     return None
+
+
+_GIT_WORKTREE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_GIT_WORKTREE_CACHE_TTL_SEC = 30
+_GIT_WORKTREE_LOCATION_LABELS = {
+    "mirror": "mirror Git",
+    "release": "release ativa",
+    "workspace": "checkout workspace",
+}
+
+
+def resolve_current_release_dir(base_dir: Path, env_name: str) -> Path | None:
+    current = base_dir / "deploy" / env_name / "current"
+    if not current.exists():
+        return None
+    try:
+        resolved = current.resolve()
+    except OSError:
+        return None
+    if not resolved.is_dir():
+        return None
+    return resolved
+
+
+def _git_worktree_status(repo_dir: Path) -> dict[str, Any]:
+    if not repo_dir.is_dir():
+        return {"supported": False, "dirty": False, "path": str(repo_dir)}
+    if not (repo_dir / ".git").exists():
+        return {"supported": False, "dirty": False, "path": str(repo_dir)}
+    output = _git_in_repo(repo_dir, ["status", "--porcelain"]) or ""
+    lines = [line for line in output.splitlines() if line.strip()]
+    return {
+        "supported": True,
+        "dirty": bool(lines),
+        "changeCount": len(lines),
+        "path": str(repo_dir),
+    }
+
+
+def read_env_git_worktree_status(
+    base_dir: Path,
+    env_name: str,
+    *,
+    repo_dir: Path | None = None,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    cache_key = env_name
+    now = time.time()
+    if use_cache:
+        cached = _GIT_WORKTREE_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _GIT_WORKTREE_CACHE_TTL_SEC:
+            return cached[1]
+
+    locations: list[dict[str, Any]] = []
+    candidates: list[tuple[str, Path | None]] = [
+        ("mirror", base_dir / "deploy" / env_name / "mirror"),
+        ("release", resolve_current_release_dir(base_dir, env_name)),
+        ("workspace", repo_dir),
+    ]
+    for loc_id, path in candidates:
+        if not path:
+            continue
+        status = _git_worktree_status(path)
+        status["id"] = loc_id
+        status["label"] = _GIT_WORKTREE_LOCATION_LABELS.get(loc_id, loc_id)
+        locations.append(status)
+
+    dirty_locations = [loc for loc in locations if loc.get("dirty")]
+    supported = any(loc.get("supported") for loc in locations)
+    dirty = bool(dirty_locations)
+    if dirty:
+        labels = ", ".join(str(loc.get("label") or loc.get("id") or "") for loc in dirty_locations)
+        reason = (
+            f"Working tree com alteracoes locais ({labels}). "
+            "Resolva manualmente antes de atualizar."
+        )
+    else:
+        reason = ""
+
+    payload = {
+        "supported": supported,
+        "dirty": dirty,
+        "locations": locations,
+        "reason": reason,
+        "checkedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    _GIT_WORKTREE_CACHE[cache_key] = (now, payload)
+    return payload
 
 
 def read_local_console_git_info(config: dict[str, Any]) -> dict[str, Any]:

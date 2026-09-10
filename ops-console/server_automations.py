@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,14 @@ from typing import Any
 ENVIRONMENTS = ("MAIN", "DEV", "HOM")
 PILOT_MODES = ("production", "rotina")
 MODE_LABELS = {"production": "Produção (H/H)", "rotina": "Rotina diária"}
+NATIVE_BUNDLE_ID = "ops-native"
+_RUNTIME_ENSURE_LOCK = threading.Lock()
+_RUNTIME_READINESS: dict[str, Any] | None = None
+_RUNTIME_BOOTSTRAP_STARTED = False
+
+
+class AutomationRuntimeNotReady(Exception):
+    """Raised when the native automation runtime cannot run bots/Okta validation."""
 # Mirrors RobotProcessManager defaults in automation-native/automacoes/app/services/robot_manager.py
 DEFAULT_PRODUCTION_CONFIG: dict[str, Any] = {
     "headless": False,
@@ -236,6 +245,30 @@ def _deploy_dir(config: dict[str, Any]) -> Path:
 def runtime_root(config: dict[str, Any]) -> Path:
     override = ((config.get("automationRuntime") or {}).get("root") or "").strip()
     return Path(override) if override else _base_dir(config) / "ops" / "data" / "automation-runtime"
+
+
+def resolve_automation_ops_dir(config: dict[str, Any]) -> Path:
+    """Resolve the Ops-owned bots source (automation-native)."""
+    configured = str(config.get("automationOpsDir") or "").strip()
+    if configured:
+        return Path(configured)
+    ops_console = str(config.get("opsConsoleDir") or "").strip()
+    if ops_console:
+        return Path(ops_console) / "automation-native"
+    return Path(__file__).resolve().parent / "automation-native"
+
+
+def okta_validate_headless(config: dict[str, Any]) -> bool:
+    """Prefer headless Chrome on servers; allow explicit override."""
+    env = (os.environ.get("OKTA_VALIDATE_HEADLESS") or "").strip().lower()
+    if env in {"1", "true", "yes", "y", "on"}:
+        return True
+    if env in {"0", "false", "no", "n", "off"}:
+        return False
+    runtime = config.get("automationRuntime") or {}
+    if isinstance(runtime, dict) and "oktaHeadless" in runtime:
+        return bool(runtime.get("oktaHeadless"))
+    return True
 
 
 def _settings_path(config: dict[str, Any]) -> Path:
@@ -608,6 +641,7 @@ def overview(config: dict[str, Any]) -> dict[str, Any]:
         "botsCatalog": list_bots(config),
         "databaseProfiles": list_database_profiles(config),
         "targetAvailability": target_availability,
+        "runtimeReadiness": get_runtime_readiness(config),
         "summary": {
             "running": sum(1 for state in bot_states.values() if state.get("running")),
             "errors": sum(1 for state in bot_states.values() if state.get("status") in {"error", "interrupted"}),
@@ -651,6 +685,359 @@ def _run_checked(args: list[str], *, cwd: Path | None = None, timeout: int = 180
         raise RuntimeError(tail or f"Comando falhou com código {result.returncode}")
 
 
+def _venv_python(bundle_dir: Path) -> Path:
+    return bundle_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def _venv_pip(bundle_dir: Path) -> Path:
+    return bundle_dir / ".venv" / ("Scripts/pip.exe" if os.name == "nt" else "bin/pip")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _native_deps_hash(ops_dir: Path) -> str:
+    parts: list[str] = []
+    for relative in ("backend/requirements.txt", "automacoes/requirements.txt"):
+        path = ops_dir / relative
+        if path.is_file():
+            parts.append(f"{relative}:{_file_sha256(path)}")
+        else:
+            parts.append(f"{relative}:missing")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _read_deps_hash(bundle_dir: Path) -> str:
+    marker = bundle_dir / ".deps-hash"
+    try:
+        return marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _write_deps_hash(bundle_dir: Path, value: str) -> None:
+    marker = bundle_dir / ".deps-hash"
+    marker.write_text(value + "\n", encoding="utf-8")
+
+
+def _smoke_test_bundle_python(python: Path, bundle_dir: Path) -> tuple[bool, str]:
+    if not python.is_file():
+        return False, f"Python do runtime ausente: {python}"
+    try:
+        result = subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import app; import django; import selenium; from app.services.robot_manager import RobotProcessManager",
+            ],
+            cwd=str(bundle_dir / "automacoes"),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        return False, str(exc)
+    if result.returncode != 0:
+        tail = "\n".join(((result.stdout or "") + "\n" + (result.stderr or "")).splitlines()[-12:]).strip()
+        return False, tail or "Smoke test do runtime falhou"
+    return True, ""
+
+
+def _sync_native_bundle_code(ops_dir: Path, native: Path) -> None:
+    bot_source = ops_dir / "automacoes"
+    backend_source = ops_dir / "backend"
+    if not backend_source.is_dir():
+        raise AutomationRuntimeNotReady("Código nativo dos bots não está instalado no Ops (backend ausente)")
+    if not bot_source.is_dir():
+        raise AutomationRuntimeNotReady("Código nativo dos bots não está instalado no Ops (automacoes ausente)")
+    native.mkdir(parents=True, exist_ok=True)
+    for name, source in (("automacoes", bot_source), ("backend", backend_source)):
+        target = native / name
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        shutil.copytree(source, target, ignore=_ignore_runtime_copy)
+
+
+def _install_bundle_venv(bundle_dir: Path) -> Path:
+    venv_dir = bundle_dir / ".venv"
+    if venv_dir.exists():
+        shutil.rmtree(venv_dir, ignore_errors=True)
+    _run_checked([sys.executable, "-m", "venv", str(venv_dir)])
+    python = _venv_python(bundle_dir)
+    pip = _venv_pip(bundle_dir)
+    if not python.is_file() or not pip.is_file():
+        raise AutomationRuntimeNotReady(f"Falha ao criar .venv em {bundle_dir}")
+    backend_req = bundle_dir / "backend" / "requirements.txt"
+    if not backend_req.is_file():
+        raise AutomationRuntimeNotReady("backend/requirements.txt ausente no runtime nativo")
+    _run_checked([str(pip), "install", "--disable-pip-version-check", "-r", str(backend_req)])
+    automacoes_dir = bundle_dir / "automacoes"
+    if not automacoes_dir.is_dir():
+        raise AutomationRuntimeNotReady("automacoes/ ausente no runtime nativo")
+    _run_checked([str(pip), "install", "--disable-pip-version-check", str(automacoes_dir)])
+    ok, reason = _smoke_test_bundle_python(python, bundle_dir)
+    if not ok:
+        raise AutomationRuntimeNotReady(f"Smoke test do runtime falhou: {reason}")
+    return python
+
+
+def _runtime_readiness_payload(
+    *,
+    ready: bool,
+    reason: str = "",
+    bundle_id: str = NATIVE_BUNDLE_ID,
+    python: str | None = None,
+    deps_installed: bool = False,
+    installing: bool = False,
+) -> dict[str, Any]:
+    return {
+        "ready": ready,
+        "reason": reason,
+        "bundleId": bundle_id,
+        "python": python,
+        "depsInstalled": deps_installed,
+        "installing": installing,
+        "checkedAt": _now(),
+    }
+
+
+def get_runtime_readiness(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    global _RUNTIME_READINESS
+    if _RUNTIME_READINESS:
+        return dict(_RUNTIME_READINESS)
+    if config is None:
+        return _runtime_readiness_payload(ready=False, reason="Runtime ainda não verificado", installing=False)
+    try:
+        settings = get_settings(config)
+        active = settings.get("activeBundle")
+        if isinstance(active, dict) and active.get("id") and active.get("id") != NATIVE_BUNDLE_ID:
+            published = runtime_root(config) / "bundles" / str(active["id"])
+            python = _venv_python(published)
+            if published.is_dir() and python.is_file():
+                return _runtime_readiness_payload(
+                    ready=True,
+                    bundle_id=str(active["id"]),
+                    python=str(python),
+                    deps_installed=True,
+                )
+            return _runtime_readiness_payload(
+                ready=False,
+                reason="Bundle publicado ativo sem .venv em disco",
+                bundle_id=str(active.get("id") or ""),
+            )
+
+        ops_dir = resolve_automation_ops_dir(config)
+        if not ops_dir.is_dir():
+            return _runtime_readiness_payload(
+                ready=False,
+                reason=f"Código nativo dos bots não encontrado em {ops_dir}",
+            )
+        native = runtime_root(config) / "native-bundle"
+        expected = _native_deps_hash(ops_dir)
+        stored = _read_deps_hash(native)
+        python_path = _venv_python(native)
+        if not python_path.is_file():
+            return _runtime_readiness_payload(
+                ready=False,
+                reason="Runtime nativo sem .venv. O console preparará as dependências automaticamente.",
+            )
+        if stored != expected:
+            return _runtime_readiness_payload(
+                ready=False,
+                reason="Dependências do runtime desatualizadas. Reinstalação necessária.",
+                python=str(python_path),
+            )
+        return _runtime_readiness_payload(
+            ready=True,
+            python=str(python_path),
+            deps_installed=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _runtime_readiness_payload(ready=False, reason=str(exc))
+
+
+def ensure_automation_runtime(config: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+    """Ensure native-bundle code + .venv exist and pass smoke tests.
+
+    Published release bundles are left untouched when already active and healthy.
+    """
+    global _RUNTIME_READINESS
+    with _RUNTIME_ENSURE_LOCK:
+        settings = get_settings(config)
+        active = settings.get("activeBundle")
+        if (
+            isinstance(active, dict)
+            and active.get("id")
+            and active.get("id") != NATIVE_BUNDLE_ID
+            and not force
+        ):
+            published = runtime_root(config) / "bundles" / str(active["id"])
+            python = _venv_python(published)
+            if published.is_dir() and python.is_file():
+                ok, reason = _smoke_test_bundle_python(python, published)
+                if ok:
+                    payload = _runtime_readiness_payload(
+                        ready=True,
+                        bundle_id=str(active["id"]),
+                        python=str(python),
+                        deps_installed=True,
+                    )
+                    _RUNTIME_READINESS = payload
+                    return payload
+                # Published bundle is unusable; demote to native runtime below.
+
+        ops_dir = resolve_automation_ops_dir(config)
+        if not ops_dir.is_dir():
+            payload = _runtime_readiness_payload(
+                ready=False,
+                reason=f"Código nativo dos bots não encontrado em {ops_dir}",
+            )
+            _RUNTIME_READINESS = payload
+            return payload
+
+        native = runtime_root(config) / "native-bundle"
+        expected_hash = _native_deps_hash(ops_dir)
+        python_path = _venv_python(native)
+        stored_hash = _read_deps_hash(native)
+        code_present = (native / "automacoes").is_dir() and (native / "backend").is_dir()
+        needs_install = force or not code_present or not python_path.is_file() or stored_hash != expected_hash
+        if not needs_install and code_present:
+            ok, reason = _smoke_test_bundle_python(python_path, native)
+            if ok:
+                settings = get_settings(config)
+                active_now = settings.get("activeBundle")
+                should_activate_native = not isinstance(active_now, dict) or not active_now.get("id")
+                if isinstance(active_now, dict) and active_now.get("id") and active_now.get("id") != NATIVE_BUNDLE_ID:
+                    published = runtime_root(config) / "bundles" / str(active_now["id"])
+                    pub_python = _venv_python(published)
+                    pub_ok = False
+                    if published.is_dir() and pub_python.is_file():
+                        pub_ok, _ = _smoke_test_bundle_python(pub_python, published)
+                    should_activate_native = not pub_ok
+                if should_activate_native:
+                    settings.update(
+                        {
+                            "activeBundle": {
+                                "id": NATIVE_BUNDLE_ID,
+                                "sourceEnvironment": "OPS",
+                                "sha": "internal",
+                                "publishedAt": _now(),
+                            },
+                            "updatedAt": _now(),
+                            "updatedBy": "ops",
+                        }
+                    )
+                    _atomic_json(_settings_path(config), settings)
+                payload = _runtime_readiness_payload(
+                    ready=True,
+                    python=str(python_path),
+                    deps_installed=True,
+                )
+                _RUNTIME_READINESS = payload
+                return payload
+            needs_install = True
+
+        _RUNTIME_READINESS = _runtime_readiness_payload(
+            ready=False,
+            reason="Preparando dependências do runtime de automações…",
+            python=str(python_path) if python_path.is_file() else None,
+            installing=True,
+        )
+
+        try:
+            _sync_native_bundle_code(ops_dir, native)
+            python_path = _install_bundle_venv(native)
+            _write_deps_hash(native, expected_hash)
+
+            payload = _runtime_readiness_payload(
+                ready=True,
+                python=str(python_path),
+                deps_installed=True,
+            )
+            settings = get_settings(config)
+            previous = settings.get("activeBundle")
+            native_meta = {
+                "id": NATIVE_BUNDLE_ID,
+                "sourceEnvironment": "OPS",
+                "sha": "internal",
+                "publishedAt": _now(),
+            }
+            # Prefer a working native runtime over a broken published bundle.
+            if (
+                not isinstance(previous, dict)
+                or not previous.get("id")
+                or previous.get("id") != NATIVE_BUNDLE_ID
+            ):
+                published_path = (
+                    runtime_root(config) / "bundles" / str(previous.get("id"))
+                    if isinstance(previous, dict) and previous.get("id")
+                    else None
+                )
+                published_python = _venv_python(published_path) if published_path else None
+                published_ok = False
+                if published_python and published_python.is_file():
+                    published_ok, _ = _smoke_test_bundle_python(published_python, published_path)
+                if not published_ok:
+                    settings.update(
+                        {
+                            "activeBundle": native_meta,
+                            "previousBundle": previous if previous and previous.get("id") != NATIVE_BUNDLE_ID else settings.get("previousBundle"),
+                            "updatedAt": _now(),
+                            "updatedBy": "ops",
+                        }
+                    )
+                    _atomic_json(_settings_path(config), settings)
+
+            _RUNTIME_READINESS = payload
+            return payload
+        except AutomationRuntimeNotReady as exc:
+            payload = _runtime_readiness_payload(ready=False, reason=str(exc))
+            _RUNTIME_READINESS = payload
+            return payload
+        except Exception as exc:  # noqa: BLE001
+            payload = _runtime_readiness_payload(ready=False, reason=str(exc))
+            _RUNTIME_READINESS = payload
+            return payload
+
+
+def start_automation_runtime_bootstrap(config: dict[str, Any]) -> None:
+    """Kick off native runtime preparation without blocking HTTP startup."""
+    global _RUNTIME_BOOTSTRAP_STARTED
+    if _RUNTIME_BOOTSTRAP_STARTED:
+        return
+    _RUNTIME_BOOTSTRAP_STARTED = True
+
+    def _worker() -> None:
+        try:
+            print("Preparando runtime de automações…", flush=True)
+            result = ensure_automation_runtime(config)
+            if result.get("ready"):
+                print("Runtime de automações pronto.", flush=True)
+            else:
+                print(f"Runtime de automações indisponível: {result.get('reason')}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Falha ao preparar runtime de automações: {exc}", flush=True)
+
+    threading.Thread(target=_worker, name="automation-runtime-bootstrap", daemon=True).start()
+
+
+def _require_runtime_ready(config: dict[str, Any]) -> dict[str, Any]:
+    readiness = ensure_automation_runtime(config)
+    if not readiness.get("ready"):
+        raise AutomationRuntimeNotReady(
+            readiness.get("reason")
+            or "Runtime de automações não está pronto. Aguarde a instalação das dependências."
+        )
+    return readiness
+
+
 def _any_running(config: dict[str, Any]) -> bool:
     return any(mode_status(config, mode).get("running") for mode in PILOT_MODES)
 
@@ -678,20 +1065,11 @@ def publish_runtime(config: dict[str, Any], source_environment: str, username: s
         meta = _read_json(final_dir / "bundle.json")
     else:
         try:
-            ops_bot_source = Path(str(config.get("automationOpsDir") or "")) / "automacoes"
+            ops_bot_source = resolve_automation_ops_dir(config) / "automacoes"
             bot_source = ops_bot_source if ops_bot_source.is_dir() else current / "automacoes"
             shutil.copytree(bot_source, staging / "automacoes", ignore=_ignore_runtime_copy)
             shutil.copytree(current / "backend", staging / "backend", ignore=_ignore_runtime_copy)
-            venv_dir = staging / ".venv"
-            _run_checked([sys.executable, "-m", "venv", str(venv_dir)])
-            python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-            pip = venv_dir / ("Scripts/pip.exe" if os.name == "nt" else "bin/pip")
-            _run_checked([str(pip), "install", "-r", str(staging / "backend" / "requirements.txt")])
-            _run_checked([str(pip), "install", str(staging / "automacoes")])
-            _run_checked(
-                [str(python), "-c", "import app; import django; from app.services.robot_manager import RobotProcessManager"],
-                cwd=staging / "automacoes",
-            )
+            python = _install_bundle_venv(staging)
             meta = {
                 "id": bundle_id,
                 "sourceEnvironment": source,
@@ -703,6 +1081,7 @@ def publish_runtime(config: dict[str, Any], source_environment: str, username: s
             _atomic_json(staging / "bundle.json", meta)
             final_dir.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staging, final_dir)
+            _ = python
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -768,26 +1147,34 @@ def update_config(config: dict[str, Any], mode: str, body: dict[str, Any]) -> di
     return {"ok": True, "mode": mode, "config": normalized}
 
 
-def _active_bundle(config: dict[str, Any]) -> tuple[dict[str, Any], Path]:
+def _active_bundle(config: dict[str, Any], *, ensure_ready: bool = False) -> tuple[dict[str, Any], Path]:
+    if ensure_ready:
+        readiness = ensure_automation_runtime(config)
+        if not readiness.get("ready"):
+            raise AutomationRuntimeNotReady(
+                readiness.get("reason")
+                or "Runtime de automações não está pronto. Aguarde a instalação das dependências."
+            )
+
     bundle = get_settings(config).get("activeBundle")
     if not isinstance(bundle, dict) or not bundle.get("id"):
         root = runtime_root(config)
         native = root / "native-bundle"
-        bot_source = Path(str(config.get("automationOpsDir") or "")) / "automacoes"
-        native_root = Path(str(config.get("automationOpsDir") or ""))
-        backend_source = native_root / "backend" if (native_root / "backend").is_dir() else Path(str(config.get("automationSourceDir") or "")) / "backend"
+        ops_dir = resolve_automation_ops_dir(config)
+        bot_source = ops_dir / "automacoes"
+        backend_source = ops_dir / "backend" if (ops_dir / "backend").is_dir() else Path(str(config.get("automationSourceDir") or "")) / "backend"
         if not bot_source.is_dir() or not backend_source.is_dir():
             raise ValueError("Código nativo dos bots não está instalado no Ops")
         if not (native / "automacoes").is_dir() or not (native / "backend").is_dir():
             native.mkdir(parents=True, exist_ok=True)
             shutil.copytree(bot_source, native / "automacoes", ignore=_ignore_runtime_copy, dirs_exist_ok=True)
             shutil.copytree(backend_source, native / "backend", ignore=_ignore_runtime_copy, dirs_exist_ok=True)
-        bundle = {"id": "ops-native", "sourceEnvironment": "OPS", "sha": "internal", "publishedAt": _now()}
+        bundle = {"id": NATIVE_BUNDLE_ID, "sourceEnvironment": "OPS", "sha": "internal", "publishedAt": _now()}
         settings = get_settings(config)
         settings.update({"activeBundle": bundle, "updatedAt": _now(), "updatedBy": "ops"})
         _atomic_json(_settings_path(config), settings)
     path = runtime_root(config) / "bundles" / str(bundle["id"])
-    if bundle.get("id") == "ops-native":
+    if bundle.get("id") == NATIVE_BUNDLE_ID:
         path = runtime_root(config) / "native-bundle"
     if not path.is_dir():
         raise ValueError("Bundle ativo não foi encontrado em disco")
@@ -795,7 +1182,7 @@ def _active_bundle(config: dict[str, Any]) -> tuple[dict[str, Any], Path]:
 
 
 def _bundle_python(bundle_dir: Path) -> Path:
-    candidate = bundle_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    candidate = _venv_python(bundle_dir)
     return candidate if candidate.is_file() else Path(sys.executable)
 
 
@@ -839,16 +1226,31 @@ def validate_credentials(config: dict[str, Any], body: dict[str, Any], username:
     senha = str(body.get("senha") or "")
     if not matricula or not senha:
         raise ValueError("Matrícula e senha são obrigatórias")
-    _bundle, bundle_dir = _active_bundle(config)
+    _require_runtime_ready(config)
+    _bundle, bundle_dir = _active_bundle(config, ensure_ready=False)
     python = _bundle_python(bundle_dir)
+    if python == Path(sys.executable) or not _venv_python(bundle_dir).is_file():
+        raise AutomationRuntimeNotReady(
+            "Runtime de automações sem .venv próprio. Reinicie o console para instalar as dependências dos bots."
+        )
     helper = Path(__file__).with_name("automation_credentials.py")
     env = os.environ.copy()
-    env.update({"OPS_BOT_USER": matricula, "OPS_BOT_PASSWORD": senha, "PYTHONUTF8": "1"})
+    headless = okta_validate_headless(config)
+    env.update(
+        {
+            "OPS_BOT_USER": matricula,
+            "OPS_BOT_PASSWORD": senha,
+            "PYTHONUTF8": "1",
+            "OKTA_VALIDATE_HEADLESS": "1" if headless else "0",
+        }
+    )
     try:
         result = subprocess.run(
             [str(python), str(helper), "--bundle", str(bundle_dir)],
             cwd=str(bundle_dir / "automacoes"), env=env, capture_output=True, text=True, timeout=210,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            encoding="utf-8",
+            errors="replace",
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Validação Okta excedeu o tempo limite") from exc
@@ -865,7 +1267,18 @@ def validate_credentials(config: dict[str, Any], body: dict[str, Any], username:
         except json.JSONDecodeError:
             continue
     if result.returncode or not payload.get("ok"):
-        message = str(payload.get("message") or "Falha na validação das credenciais no Okta")
+        stderr_tail = "\n".join((result.stderr or "").splitlines()[-12:]).strip()
+        stdout_tail = "\n".join((result.stdout or "").splitlines()[-8:]).strip()
+        message = str(payload.get("message") or "").strip()
+        if not message:
+            if "ModuleNotFoundError" in (result.stderr or "") or "ModuleNotFoundError" in (result.stdout or ""):
+                message = (
+                    "Dependências do runtime ausentes "
+                    f"({stderr_tail or stdout_tail or 'ModuleNotFoundError'}). "
+                    "Reinicie o ops-console para reinstalar o runtime de automações."
+                )
+            else:
+                message = stderr_tail or stdout_tail or "Falha na validação das credenciais no Okta"
         raise ValueError(message)
     _VALIDATED_CREDENTIALS["global"] = (_credential_digest(matricula, senha), time.time() + 15 * 60)
     return {"ok": True, "message": str(payload.get("message") or "Credenciais validadas"), "expiresInSeconds": 900}
@@ -968,6 +1381,7 @@ def start_bot(config: dict[str, Any], mode: str, body: dict[str, Any], username:
     if not _credentials_are_valid(matricula, senha):
         raise ValueError("Valide as credenciais globais no Okta antes de iniciar")
 
+    _require_runtime_ready(config)
     settings = get_settings(config)
     targets = list(settings.get("targetEnvironments") or [settings["targetEnvironment"]])
     for target in targets:
@@ -975,7 +1389,7 @@ def start_bot(config: dict[str, Any], mode: str, body: dict[str, Any], username:
         if not probe["available"]:
             raise ValueError(f"{target} indisponível: {probe['reason']}")
 
-    bundle, bundle_dir = _active_bundle(config)
+    bundle, bundle_dir = _active_bundle(config, ensure_ready=False)
     python = _bundle_python(bundle_dir)
     spawned: list[dict[str, Any]] = []
     try:

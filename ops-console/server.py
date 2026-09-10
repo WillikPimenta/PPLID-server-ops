@@ -306,6 +306,22 @@ def resolve_config_paths(config: dict[str, Any]) -> dict[str, Any]:
         config["automationSourceDir"] = str(machine["automationSourceDir"])
     if machine.get("automationOpsDir"):
         config["automationOpsDir"] = str(machine["automationOpsDir"])
+    if machine.get("opsConsoleDir") and not config.get("opsConsoleDir"):
+        config["opsConsoleDir"] = str(machine["opsConsoleDir"])
+
+    if not config.get("opsConsoleDir"):
+        config["opsConsoleDir"] = str(Path(__file__).resolve().parent)
+    if not config.get("automationOpsDir"):
+        config["automationOpsDir"] = str(Path(config["opsConsoleDir"]) / "automation-native")
+
+    runtime = config.get("automationRuntime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+        config["automationRuntime"] = runtime
+    if "oktaHeadless" not in runtime:
+        runtime["oktaHeadless"] = True
+    if not runtime.get("root"):
+        runtime["root"] = str(base_dir / "ops" / "data" / "automation-runtime")
 
     config["logDir"] = str(log_dir)
     config["statusFile"] = str(log_dir / "deploy-status.json")
@@ -915,6 +931,11 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
         log_dir = Path(config.get("logDir", ""))
         deploy_state = load_deploy_state(base_dir, env_name)
         pipeline_status = str(deploy_state.get("status") or "idle")
+        git_worktree = server_ops.read_env_git_worktree_status(
+            base_dir,
+            env_name,
+            repo_dir=repo_dir,
+        )
 
         if lite:
             if env_enabled:
@@ -984,6 +1005,7 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
                 "gitSha": stored.get("gitSha"),
                 "deployedSha": stored.get("deployedSha") or deploy_state.get("activeSha"),
                 "deploySummary": server_ops.build_deploy_summary(base_dir, env_name, deploy_state, stored),
+                "gitWorktree": git_worktree,
             }
             continue
 
@@ -1116,6 +1138,7 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
             "database": db_metrics,
             **commit_meta,
             **deploy_extra,
+            "gitWorktree": git_worktree,
         }
 
     normalize_overview_text(status, environments)
@@ -1557,6 +1580,9 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 return
         except ValueError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        except server_automations.AutomationRuntimeNotReady as exc:
+            self._send_json({"ok": False, "error": str(exc), "runtimeReady": False}, status=503)
             return
         except Exception as exc:  # noqa: BLE001
             self._send_json({"ok": False, "error": str(exc)}, status=500)
@@ -2363,6 +2389,7 @@ def run_server(host: str, port: int, config_path: Path) -> None:
     lan_ip = config.get("lanIp", host)
     print(f"Ops Console em http://{host}:{port}")
     print(f"Acesso LAN: http://{lan_ip}:{port}")
+    server_automations.start_automation_runtime_bootstrap(config)
     server_monitoring.start_monitoring_collector(config)
     server_host.start_host_collector(config)
     try:

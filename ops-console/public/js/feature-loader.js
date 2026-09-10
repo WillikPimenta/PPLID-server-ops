@@ -7,7 +7,7 @@
   const definitions = {
     env: ["/js/env-config.js"],
     database: ["/js/database-explorer.js"],
-    automations: ["/js/automations-config.js?v=20260909g", "/js/automations.js?v=20260909g"],
+    automations: ["/js/automations-config.js?v=20260910a", "/js/automations.js?v=20260910a"],
     host: ["/js/ops-perf.js", "/js/host.js"],
     monitoring: ["/js/ops-perf.js", "/js/monitoring.js", "/js/monitor-drawer.js"],
     deployDetails: ["/js/deploy-drawer.js", "/js/filters.js", "/js/drawer.js"],

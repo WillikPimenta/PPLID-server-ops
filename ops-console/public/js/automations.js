@@ -16,7 +16,7 @@
   let timer = null;
   let pendingAction = "";
   let configModalMode = "";
-  const credentialDraft = { matricula: "", senha: "", validated: false };
+  const credentialDraft = { matricula: "", senha: "", validated: false, error: "" };
 
   function request(url, method = "GET", body = null, timeoutMs = 15000) {
     return OC.fetchJson(url, {
@@ -24,6 +24,30 @@
       body: body == null ? undefined : JSON.stringify(body),
       timeoutMs,
     });
+  }
+
+  function runtimeReadiness() {
+    return data?.runtimeReadiness || {};
+  }
+
+  function runtimeReady() {
+    return runtimeReadiness().ready === true;
+  }
+
+  function runtimeStatusLabel() {
+    const readiness = runtimeReadiness();
+    if (pendingAction === "validate") return "Validando Okta…";
+    if (readiness.installing) return "Preparando dependências…";
+    if (readiness.ready) return "Runtime pronto";
+    return "Runtime pendente";
+  }
+
+  function runtimeStatusTone() {
+    const readiness = runtimeReadiness();
+    if (pendingAction === "validate") return "is-busy";
+    if (readiness.installing) return "is-busy";
+    if (readiness.ready) return "is-ready";
+    return "is-pending";
   }
 
   function tone(status) {
@@ -240,15 +264,27 @@
             <div class="auto-step-number">1</div>
             <div class="auto-control-content"><label>Banco de destino</label>${renderTargetChips(targets)}</div>
           </div>
-          <div class="auto-okta-panel ${credentialDraft.validated ? "is-valid" : ""}">
+          <div class="auto-okta-panel ${credentialDraft.validated ? "is-valid" : ""} ${!runtimeReady() ? "is-runtime-pending" : ""}">
             <div class="auto-step-number">2</div>
             <div class="auto-control-content">
-              <div class="auto-okta-title"><div><label>Credencial global Okta</label><small>Válida para todos os bots por 15 minutos</small></div><span class="auto-okta-state"><i aria-hidden="true"></i>${credentialDraft.validated ? "Validada" : "Pendente"}</span></div>
+              <div class="auto-okta-title">
+                <div>
+                  <label>Credencial global Okta</label>
+                  <small>Válida para todos os bots por 15 minutos</small>
+                </div>
+                <div class="auto-okta-title-status">
+                  <span class="auto-runtime-pill ${runtimeStatusTone()}" title="${OC.escapeHtml(runtimeReadiness().reason || "")}">${OC.escapeHtml(runtimeStatusLabel())}</span>
+                  <span class="auto-okta-state"><i aria-hidden="true"></i>${credentialDraft.validated ? "Validada" : "Pendente"}</span>
+                </div>
+              </div>
               <div class="auto-okta-fields">
                 <label><span>Matrícula</span><input type="text" autocomplete="username" data-auto-global-user placeholder="Sua matrícula"></label>
                 <label><span>Senha</span><input type="password" autocomplete="current-password" data-auto-global-pass placeholder="Sua senha"></label>
-                <button class="btn ${credentialDraft.validated ? "btn-secondary" : "btn-primary"}" data-auto-global-validate ${pendingAction === "validate" ? "disabled" : ""}>${pendingAction === "validate" ? "Validando…" : credentialDraft.validated ? "Validar novamente" : "Validar Okta"}</button>
+                <button class="btn ${credentialDraft.validated ? "btn-secondary" : "btn-primary"}" data-auto-global-validate ${pendingAction === "validate" || !runtimeReady() ? "disabled" : ""} title="${OC.escapeHtml(!runtimeReady() ? (runtimeReadiness().reason || "Aguarde o runtime de automações") : "")}">${pendingAction === "validate" ? "Validando…" : credentialDraft.validated ? "Validar novamente" : "Validar Okta"}</button>
               </div>
+              ${credentialDraft.error ? `<p class="auto-okta-error" role="alert">${OC.escapeHtml(credentialDraft.error)}</p>` : ""}
+              ${!runtimeReady() && runtimeReadiness().reason ? `<p class="auto-okta-hint">${OC.escapeHtml(runtimeReadiness().reason)}</p>` : ""}
+              ${pendingAction === "validate" ? `<p class="auto-okta-hint">Consultando Okta… isso pode levar até 3 minutos na primeira validação.</p>` : ""}
             </div>
           </div>
         </div>
@@ -307,16 +343,49 @@
     if (pass) pass.value = credentialDraft.senha;
   }
 
+  function syncCredentialsFromInputs(root) {
+    const user = root.querySelector("[data-auto-global-user]");
+    const pass = root.querySelector("[data-auto-global-pass]");
+    if (user) credentialDraft.matricula = String(user.value || "").trim();
+    if (pass) credentialDraft.senha = String(pass.value || "");
+    return { matricula: credentialDraft.matricula, senha: credentialDraft.senha };
+  }
+
+  function setCredentialError(root, message) {
+    credentialDraft.error = message || "";
+    const existing = root.querySelector(".auto-okta-error");
+    if (!message) {
+      existing?.remove();
+      return;
+    }
+    if (existing) {
+      existing.textContent = message;
+      return;
+    }
+    const panel = root.querySelector(".auto-okta-panel .auto-control-content");
+    if (!panel) return;
+    const error = document.createElement("p");
+    error.className = "auto-okta-error";
+    error.setAttribute("role", "alert");
+    error.textContent = message;
+    panel.appendChild(error);
+  }
+
   function invalidateCredentials(root) {
     credentialDraft.validated = false;
+    credentialDraft.error = "";
     const state = root.querySelector(".auto-okta-state");
     state && (state.innerHTML = '<i aria-hidden="true"></i>Pendente');
     root.querySelector(".auto-okta-panel")?.classList.remove("is-valid");
+    root.querySelector(".auto-okta-error")?.remove();
     root.querySelectorAll("[data-auto-start]").forEach((button) => { button.disabled = true; });
   }
 
   async function runAction(key, action) {
-    if (pendingAction) return;
+    if (pendingAction) {
+      OC.showToast?.("Aguarde a ação em andamento terminar", "warn");
+      return;
+    }
     pendingAction = key;
     render();
     try { await action(); }
@@ -398,13 +467,39 @@
     });
 
     root.querySelector("[data-auto-global-validate]")?.addEventListener("click", async () => {
+      const creds = syncCredentialsFromInputs(root);
+      setCredentialError(root, "");
+      if (!runtimeReady()) {
+        const message = runtimeReadiness().reason || "Runtime de automações ainda não está pronto";
+        setCredentialError(root, message);
+        OC.showToast?.(message, "warn");
+        return;
+      }
+      if (!creds.matricula || !creds.senha) {
+        const message = "Preencha matrícula e senha antes de validar no Okta";
+        setCredentialError(root, message);
+        OC.showToast?.(message, "warn");
+        return;
+      }
       try {
         await runAction("validate", async () => {
-          const result = await request("/api/v1/automations/credentials/validate", "POST", { matricula: credentialDraft.matricula, senha: credentialDraft.senha }, 210000);
+          const result = await request(
+            "/api/v1/automations/credentials/validate",
+            "POST",
+            { matricula: creds.matricula, senha: creds.senha },
+            210000
+          );
           credentialDraft.validated = true;
+          credentialDraft.error = "";
           OC.showToast?.(result.message || "Credencial global validada", "success");
         });
-      } catch (err) { credentialDraft.validated = false; OC.showToast?.(err.message, "error"); }
+      } catch (err) {
+        credentialDraft.validated = false;
+        const message = err.message || "Falha na validação Okta";
+        credentialDraft.error = message;
+        setCredentialError(root, message);
+        OC.showToast?.(message, "error");
+      }
     });
 
     root.querySelectorAll("[data-auto-start]").forEach((button) => button.addEventListener("click", async () => {

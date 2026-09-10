@@ -147,6 +147,37 @@ function Resolve-OpsConsolePython {
 $baseDir = Get-PplidBaseDir
 $pythonExe = Resolve-OpsConsolePython -BaseDir $baseDir
 
+function Ensure-AutomationRuntime {
+    param(
+        [string]$PythonExe,
+        [string]$OpsConsoleDir,
+        [string]$EnvConfigPath
+    )
+    Write-Host "Preparando runtime de automações..."
+    $env:OPS_CONFIG = $EnvConfigPath
+    $prev = Get-Location
+    try {
+        Set-Location $OpsConsoleDir
+        $bootstrapScript = Join-Path $OpsConsoleDir "tools\bootstrap_automation_runtime.py"
+        if (-not (Test-Path $bootstrapScript)) {
+            Write-Warning "Script de bootstrap nao encontrado: $bootstrapScript"
+            return
+        }
+        & $PythonExe $bootstrapScript $EnvConfigPath
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Runtime de automações pronto."
+        } else {
+            Write-Warning "Runtime de automações ainda nao esta pronto (veja a saida acima)."
+        }
+    } catch {
+        Write-Warning "Nao foi possivel preparar o runtime de automacoes agora: $_"
+    } finally {
+        Set-Location $prev
+    }
+}
+
+Ensure-AutomationRuntime -PythonExe $pythonExe -OpsConsoleDir $OpsDir -EnvConfigPath $ConfigPath
+
 $consolePort = 5190
 if ($Port -gt 0) {
     $consolePort = $Port

@@ -76,6 +76,30 @@
        </div>`;
   }
 
+  function localChangesBannerHtml(name, data) {
+    const wt = data.gitWorktree;
+    if (!wt?.dirty) return "";
+    const reason =
+      wt.reason || "Working tree com alteracoes locais. Resolva manualmente antes de atualizar.";
+    const locations = (wt.locations || []).filter((loc) => loc.dirty);
+    const detail = locations.length
+      ? locations
+          .map((loc) => {
+            const label = loc.label || loc.id || "repositorio";
+            return loc.changeCount ? `${label} (${loc.changeCount})` : label;
+          })
+          .join(" · ")
+      : "";
+    return `
+      <div class="env-deploy-banner env-local-changes-banner" data-env-local-changes="${name}">
+        <div class="env-deploy-banner-head">
+          <span class="env-deploy-label">Alterações locais</span>
+          ${detail ? `<span class="detail-muted">· ${OC.escapeHtml(detail)}</span>` : ""}
+        </div>
+        <p class="detail-muted">${OC.escapeHtml(reason)}</p>
+      </div>`;
+  }
+
   function shortCommit(value) {
     if (!value || value === "—") return "—";
     return String(value).slice(0, 8);
@@ -141,6 +165,11 @@
       : `implantado ${OC.formatRelativeTime(data.deployedAt || data.lastDeployFinishedAt)}`;
     const lastGood = data.lastGoodSha || data.deployState?.lastGoodSha || "";
     const canRollback = envEnabled && !busy && !!lastGood;
+    const localChanges = Boolean(data.gitWorktree?.dirty);
+    const redeployDisabled = !envEnabled || busy || localChanges;
+    const redeployTitle = localChanges
+      ? "Resolva as alteracoes locais antes de fazer redeploy"
+      : "";
     const expandClass = isExpanded ? "env-card-expand" : "env-card-expand hidden";
     const toggleAction = envEnabled ? "disable-env" : "enable-env";
     const toggleLabel = envEnabled ? "Desativar" : "Ativar";
@@ -172,7 +201,7 @@
           <div class="env-expand-action-group env-expand-action-group--operational">
             <p class="env-expand-action-label">Ações operacionais</p>
             <div class="env-expand-actions">
-              <button type="button" class="btn btn-primary btn-sm" data-card-action="redeploy" data-env="${name}" ${!envEnabled || busy ? "disabled" : ""}>Re-deploy</button>
+              <button type="button" class="btn btn-primary btn-sm" data-card-action="redeploy" data-env="${name}" title="${OC.escapeHtml(redeployTitle)}" ${redeployDisabled ? "disabled" : ""}>Re-deploy</button>
               <button type="button" class="btn btn-outline-danger btn-sm" data-card-action="rollback" data-env="${name}" title="${canRollback ? "Restaurar a última versão estável" : "Nenhuma versão estável disponível"}" ${!canRollback ? "disabled" : ""}>Rollback</button>
               ${busy && envEnabled ? `<button type="button" class="btn btn-danger btn-sm" data-card-action="cancel-deploy" data-env="${name}">Cancelar deploy</button>` : ""}
               <button type="button" class="${toggleClass}" data-card-action="${toggleAction}" data-env="${name}" ${toggleDisabled}>${toggleLabel}</button>
@@ -208,6 +237,11 @@
       services,
       data.lastDeployMessage || "",
       data.gitSha || data.deployedSha || "",
+      data.gitWorktree?.dirty ? "1" : "0",
+      (data.gitWorktree?.locations || [])
+        .filter((loc) => loc.dirty)
+        .map((loc) => `${loc.id}:${loc.changeCount || 0}`)
+        .join(","),
     ].join("|");
   };
 
@@ -246,18 +280,21 @@
           : "is-warn";
     const serviceSummary = services.length ? `${healthyServices}/${services.length} saudáveis` : "Sem dados";
     const disabledClass = data.enabled === false ? " summary-card--disabled" : "";
+    const localChanges = Boolean(data.gitWorktree?.dirty);
     return `
-        <article class="summary-card status-border-${OC.STATUS_META[statusKey]?.badgeClass || "idle"}${disabledClass}${isExpanded ? " is-config-expanded" : ""}" data-env="${name}" data-fingerprint="${OC.escapeHtml(OC.envCardFingerprint(data))}" aria-label="Ambiente ${name}">
+        <article class="summary-card status-border-${OC.STATUS_META[statusKey]?.badgeClass || "idle"}${disabledClass}${isExpanded ? " is-config-expanded" : ""}${localChanges ? " has-local-changes" : ""}" data-env="${name}" data-fingerprint="${OC.escapeHtml(OC.envCardFingerprint(data))}" aria-label="Ambiente ${name}">
           <header class="summary-card-header">
             <div class="summary-card-title">
               <h3 class="summary-env-name">${name}</h3>
               <span class="summary-env-branch"><code>${OC.escapeHtml(data.branch || "—")}</code></span>
+              ${localChanges ? `<span class="status-badge status-running summary-local-changes-badge">Alterações locais</span>` : ""}
             </div>
             <div class="summary-card-tools">
               ${OC.statusBadgeHtml(statusKey, "summary-badge")}
             </div>
           </header>
           ${blockedDeployBannerHtml(name, data)}
+          ${localChangesBannerHtml(name, data)}
           ${deployingBannerHtml(name, data)}
           ${envReleaseSummaryHtml(data)}
           <section class="summary-card-services">

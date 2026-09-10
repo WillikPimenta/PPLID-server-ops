@@ -197,9 +197,17 @@ if ($Apply) {
     $previousSha = $status.currentSha
     $targetSha = $status.remoteSha
     $requirements = Join-Path $opsConsoleDir "requirements.txt"
+    $nativeBackendReq = Join-Path $opsConsoleDir "automation-native\backend\requirements.txt"
+    $nativeBotsReq = Join-Path $opsConsoleDir "automation-native\automacoes\requirements.txt"
     $requirementsBefore = $null
     if (Test-Path $requirements) {
         $requirementsBefore = Get-FileHash $requirements -Algorithm SHA256
+    }
+    $nativeBefore = @()
+    foreach ($reqPath in @($nativeBackendReq, $nativeBotsReq)) {
+        if (Test-Path $reqPath) {
+            $nativeBefore += (Get-FileHash $reqPath -Algorithm SHA256).Hash
+        }
     }
 
     try {
@@ -223,6 +231,13 @@ if ($Apply) {
         $requirementsAfter = Get-FileHash $requirements -Algorithm SHA256
     }
     $depsChanged = $requirementsBefore -and $requirementsAfter -and ($requirementsBefore.Hash -ne $requirementsAfter.Hash)
+    $nativeAfter = @()
+    foreach ($reqPath in @($nativeBackendReq, $nativeBotsReq)) {
+        if (Test-Path $reqPath) {
+            $nativeAfter += (Get-FileHash $reqPath -Algorithm SHA256).Hash
+        }
+    }
+    $automationDepsChanged = ($nativeBefore -join "|") -ne ($nativeAfter -join "|")
 
     if ($depsChanged) {
         $venvPython = Join-Path $opsConsoleDir ".venv\Scripts\python.exe"
@@ -243,6 +258,31 @@ if ($Apply) {
         }
     }
 
+    if ($automationDepsChanged -or $depsChanged) {
+        $venvPython = Join-Path $opsConsoleDir ".venv\Scripts\python.exe"
+        $bootstrap = Join-Path $opsConsoleDir "tools\bootstrap_automation_runtime.py"
+        if ((Test-Path $venvPython) -and (Test-Path $bootstrap)) {
+            $cfg = if ($ConfigPath) { $ConfigPath } else { "" }
+            if ($cfg) {
+                & $venvPython $bootstrap $cfg --force
+            } else {
+                & $venvPython $bootstrap --force
+            }
+            if ($LASTEXITCODE -ne 0) {
+                Clear-ConsoleUpdateLock
+                Write-UpdateJson -Payload @{
+                    ok = $false
+                    applied = $true
+                    restarting = $false
+                    error = "git pull ok, mas bootstrap do runtime de automacoes falhou."
+                    previousSha = $previousSha
+                    targetSha = $newStatus.currentSha
+                }
+                exit 1
+            }
+        }
+    }
+
     Clear-ConsoleUpdateLock
     Write-UpdateJson -Payload @{
         ok = $true
@@ -252,6 +292,7 @@ if ($Apply) {
         targetSha = $newStatus.currentSha
         branch = $newStatus.branch
         depsChanged = [bool]$depsChanged
+        automationDepsChanged = [bool]$automationDepsChanged
     }
 
     $workerArgs = @(

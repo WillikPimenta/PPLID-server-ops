@@ -19,8 +19,10 @@ def main() -> int:
 
     matricula = os.environ.pop("OPS_BOT_USER", "")
     senha = os.environ.pop("OPS_BOT_PASSWORD", "")
+    headless_env = (os.environ.get("OKTA_VALIDATE_HEADLESS") or "1").strip().lower()
+    headless = headless_env not in {"0", "false", "no", "n", "off"}
     ok, message, _status = robot_manager.validate_okta_credentials(
-        matricula, senha, timeout=180, headless=False, session_id="ops-console"
+        matricula, senha, timeout=180, headless=headless, session_id="ops-console"
     )
     print(json.dumps({"ok": bool(ok), "message": str(message)}, ensure_ascii=False))
     return 0 if ok else 1

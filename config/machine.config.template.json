@@ -3,7 +3,9 @@
   "lanIp": null,
   "envConfigPath": "C:\\PPLID\\ops\\config\\env.config.json",
   "opsConsoleDir": "C:\\PPLID\\ops\\ops-console",
+  "automationOpsDir": "C:\\PPLID\\ops\\ops-console\\automation-native",
   "automationRuntime": {
-    "root": "C:\\PPLID\\ops\\data\\automation-runtime"
+    "root": "C:\\PPLID\\ops\\data\\automation-runtime",
+    "oktaHeadless": true
   }
 }

@@ -514,6 +514,15 @@ body {
   border: 1px solid rgba(220, 53, 69, 0.25);
 }
 
+.env-local-changes-banner {
+  background: rgba(255, 152, 0, 0.12);
+  border: 1px solid rgba(255, 152, 0, 0.28);
+}
+
+.summary-local-changes-badge {
+  margin-left: var(--spacing-1);
+}
+
 .env-deploy-banner-head {
   display: flex;
   flex-wrap: wrap;
@@ -8260,8 +8269,48 @@ body.monitor-api-route-modal-open {
 
 .auto-okta-title { display: flex; align-items: flex-start; justify-content: space-between; gap: .7rem; margin-bottom: .7rem; }
 .auto-okta-title small { display: block; margin-top: .12rem; color: var(--theme-text-muted); font-size: .68rem; }
+.auto-okta-title-status { display: grid; justify-items: end; gap: .35rem; }
 .auto-okta-state { display: inline-flex; align-items: center; gap: .4rem; color: var(--auto-amber); font-size: .7rem; font-weight: 700; white-space: nowrap; }
 .auto-okta-panel.is-valid .auto-okta-state { color: var(--auto-green); }
+.auto-runtime-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: .15rem .55rem;
+  border-radius: 999px;
+  font-size: .65rem;
+  font-weight: 700;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.auto-runtime-pill.is-ready {
+  color: var(--auto-green);
+  background: var(--auto-green-soft);
+  border-color: rgba(19, 138, 91, .28);
+}
+.auto-runtime-pill.is-busy {
+  color: var(--auto-amber);
+  background: rgba(245, 158, 11, .12);
+  border-color: rgba(245, 158, 11, .28);
+}
+.auto-runtime-pill.is-pending {
+  color: #b45309;
+  background: rgba(180, 83, 9, .1);
+  border-color: rgba(180, 83, 9, .25);
+}
+.auto-okta-error {
+  margin: .65rem 0 0;
+  color: #b42318;
+  font-size: .75rem;
+  font-weight: 600;
+}
+.auto-okta-hint {
+  margin: .55rem 0 0;
+  color: var(--theme-text-muted);
+  font-size: .72rem;
+}
+.auto-okta-panel.is-runtime-pending {
+  border-color: rgba(180, 83, 9, .28);
+}
 .auto-okta-fields { display: grid; grid-template-columns: minmax(8rem, .8fr) minmax(10rem, 1fr) auto; align-items: end; gap: .55rem; }
 .auto-okta-fields label { display: grid; gap: .25rem; min-width: 0; }
 .auto-okta-fields label span { color: var(--theme-text-muted); font-size: .68rem; font-weight: 650; }
