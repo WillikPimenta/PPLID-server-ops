@@ -93,7 +93,117 @@
     logNewCount: 0,
     logHistoryMode: false,
     dayDrill: null,
+    apiRouteSort: "priority",
+    apiRouteModalSort: "timeDesc",
   };
+
+  const API_ROUTE_SORT_OPTIONS = [
+    { value: "priority", label: "Prioridade" },
+    { value: "maxMsDesc", label: "Máximo (maior)" },
+    { value: "successAvgDesc", label: "Latência sucesso" },
+    { value: "samplesDesc", label: "Amostras" },
+    { value: "status5xxDesc", label: "Erros 5xx" },
+    { value: "routeAsc", label: "Rota A–Z" },
+  ];
+
+  const API_ROUTE_MODAL_SORT_OPTIONS = [
+    { value: "timeDesc", label: "Horário (recente)" },
+    { value: "timeAsc", label: "Horário (antigo)" },
+    { value: "msDesc", label: "ms (maior)" },
+    { value: "msAsc", label: "ms (menor)" },
+    { value: "requesterAsc", label: "Quem requisitou" },
+    { value: "statusDesc", label: "Status" },
+  ];
+
+  function renderApiTableSortToolbar(id, options, value, extraClass = "") {
+    const toolbarClass = extraClass ? `monitor-api-table-toolbar ${extraClass}` : "monitor-api-table-toolbar";
+    const opts = (options || [])
+      .map(
+        (option) =>
+          `<option value="${OC.escapeHtml(option.value)}"${option.value === value ? " selected" : ""}>${OC.escapeHtml(option.label)}</option>`
+      )
+      .join("");
+    return `<div class="${toolbarClass}">
+      <label class="monitor-api-table-sort-label" for="${OC.escapeHtml(id)}">Ordenar</label>
+      <select id="${OC.escapeHtml(id)}" class="monitor-api-table-sort" aria-label="Ordenar tabela">${opts}</select>
+    </div>`;
+  }
+
+  function compareApiRouteRows(a, b, sortKey) {
+    const num = (value) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : -1;
+    };
+    if (sortKey === "maxMsDesc") return num(b.maxMs) - num(a.maxMs) || b.samples - a.samples;
+    if (sortKey === "successAvgDesc") {
+      return num(b.successAvgMs) - num(a.successAvgMs) || num(b.maxMs) - num(a.maxMs);
+    }
+    if (sortKey === "samplesDesc") return b.samples - a.samples || num(b.maxMs) - num(a.maxMs);
+    if (sortKey === "status5xxDesc") {
+      return b.status5xx - a.status5xx || b.status4xx - a.status4xx || b.samples - a.samples;
+    }
+    if (sortKey === "routeAsc") {
+      return String(a.key || "").localeCompare(String(b.key || ""), "pt-BR", { sensitivity: "base" });
+    }
+    return (
+      a.rank - b.rank ||
+      num(b.successAvgMs) - num(a.successAvgMs) ||
+      b.status5xx - a.status5xx ||
+      b.status4xx - a.status4xx ||
+      b.samples - a.samples
+    );
+  }
+
+  function sortApiRouteRowsInDom(tbody, sortKey) {
+    if (!tbody) return;
+    const rows = [...tbody.querySelectorAll("tr[data-api-route]")];
+    rows.sort((left, right) => {
+      const pick = (tr, name) => tr.getAttribute(name) || "";
+      const a = {
+        rank: Number(pick(left, "data-sort-rank") || 0),
+        maxMs: Number(pick(left, "data-sort-max-ms") || -1),
+        successAvgMs: Number(pick(left, "data-sort-success-avg-ms") || -1),
+        samples: Number(pick(left, "data-sort-samples") || 0),
+        status5xx: Number(pick(left, "data-sort-status5xx") || 0),
+        status4xx: Number(pick(left, "data-sort-status4xx") || 0),
+        key: pick(left, "data-sort-route") || "",
+      };
+      const b = {
+        rank: Number(pick(right, "data-sort-rank") || 0),
+        maxMs: Number(pick(right, "data-sort-max-ms") || -1),
+        successAvgMs: Number(pick(right, "data-sort-success-avg-ms") || -1),
+        samples: Number(pick(right, "data-sort-samples") || 0),
+        status5xx: Number(pick(right, "data-sort-status5xx") || 0),
+        status4xx: Number(pick(right, "data-sort-status4xx") || 0),
+        key: pick(right, "data-sort-route") || "",
+      };
+      return compareApiRouteRows(a, b, sortKey);
+    });
+    rows.forEach((row) => tbody.appendChild(row));
+  }
+
+  function sortApiRouteModalSamples(samples, sortKey) {
+    const rows = [...(samples || [])];
+    rows.sort((a, b) => {
+      const timeA = new Date(a.recordedAt || 0).getTime();
+      const timeB = new Date(b.recordedAt || 0).getTime();
+      const msA = Number(a.durationMs || 0);
+      const msB = Number(b.durationMs || 0);
+      const statusA = Number(a.statusCode || 0);
+      const statusB = Number(b.statusCode || 0);
+      const requesterA = String(a.requester || "").toLocaleLowerCase("pt-BR");
+      const requesterB = String(b.requester || "").toLocaleLowerCase("pt-BR");
+      if (sortKey === "timeAsc") return timeA - timeB || msB - msA;
+      if (sortKey === "msDesc") return msB - msA || timeB - timeA;
+      if (sortKey === "msAsc") return msA - msB || timeB - timeA;
+      if (sortKey === "requesterAsc") {
+        return requesterA.localeCompare(requesterB, "pt-BR", { sensitivity: "base" }) || timeB - timeA;
+      }
+      if (sortKey === "statusDesc") return statusB - statusA || timeB - timeA;
+      return timeB - timeA || msB - msA;
+    });
+    return rows;
+  }
 
   function normalizeLogFilterList(values, allowed = null) {
     const list = Array.isArray(values) ? values : String(values || "").split(",");
@@ -1578,13 +1688,7 @@
         ? `<p class="monitor-empty monitor-empty-neutral">Nenhuma das rotas do instante selecionado aparece no ranking da janela atual.</p>`
         : `<p class="monitor-empty monitor-empty-ok">Nenhuma amostra de rota encontrada no período.</p>`;
     }
-    rows.sort((a, b) =>
-      a.rank - b.rank ||
-      Number(b.successAvgMs || 0) - Number(a.successAvgMs || 0) ||
-      b.status5xx - a.status5xx ||
-      b.status4xx - a.status4xx ||
-      b.samples - a.samples
-    );
+    rows.sort((a, b) => compareApiRouteRows(a, b, OC.monitorState.apiRouteSort || "priority"));
     const successPct = sampleTotals.samples
       ? (sampleTotals.success / sampleTotals.samples) * 100
       : 0;
@@ -1603,7 +1707,7 @@
           : row.status4xx
             ? { kind: "warning", label: "Somente 4xx" }
             : { kind: "neutral", label: "Sem classificação" };
-      return `<tr class="${filterSet.size ? "is-api-filter-hit" : ""} is-${state.kind}" data-api-route="${OC.escapeHtml(row.key)}">
+      return `<tr class="${filterSet.size ? "is-api-filter-hit" : ""} is-${state.kind} monitor-api-route-row is-clickable" data-api-route="${OC.escapeHtml(row.key)}" data-env="${OC.escapeHtml(row.env)}" data-method="${OC.escapeHtml(row.method)}" data-route="${OC.escapeHtml(row.route)}" data-sort-rank="${row.rank}" data-sort-max-ms="${Number(row.maxMs ?? -1)}" data-sort-success-avg-ms="${Number(row.successAvgMs ?? -1)}" data-sort-samples="${row.samples}" data-sort-status5xx="${row.status5xx}" data-sort-status4xx="${row.status4xx}" data-sort-route="${OC.escapeHtml(row.key.toLowerCase())}" role="button" tabindex="0" aria-label="Ver amostras de ${OC.escapeHtml(row.method)} ${OC.escapeHtml(row.route)}">
         <td><strong>${OC.escapeHtml(row.env)}</strong></td>
         <td class="monitor-api-route-cell">
           <code>${OC.escapeHtml(row.method)} ${OC.escapeHtml(row.route)}</code>
@@ -1641,10 +1745,20 @@
         <article class="${sampleTotals.status5xx ? "is-critical" : ""}"><span>5xx</span><strong>${formatAccessNumber(sampleTotals.status5xx)}</strong><small>falhas de servidor</small></article>
       </div>
       ${concentrationWarning}
-      <div class="monitor-table-wrap ops-table-wrap" id="monitor-api-routes-table"><table class="monitor-table monitor-api-route-diagnostics-table">
-        <thead><tr><th>Ambiente</th><th>Rota</th><th>Latência por resultado</th><th>Máximo</th><th>Respostas amostradas</th><th>Amostras</th></tr></thead>
-        <tbody>${rowHtml}</tbody>
-      </table></div>
+      <div class="monitor-api-data-card monitor-api-data-card--diagnostics">
+        ${renderApiTableSortToolbar(
+          "monitor-api-route-sort",
+          API_ROUTE_SORT_OPTIONS,
+          OC.monitorState.apiRouteSort || "priority",
+          "monitor-api-table-toolbar--card-bar"
+        )}
+        <div class="monitor-api-data-card-table" id="monitor-api-routes-table">
+          <table class="monitor-table monitor-api-route-diagnostics-table">
+            <thead><tr><th>Ambiente</th><th>Rota</th><th>Latência por resultado</th><th>Máximo</th><th>Respostas amostradas</th><th>Amostras</th></tr></thead>
+            <tbody>${rowHtml}</tbody>
+          </table>
+        </div>
+      </div>
     </section>`;
   }
 
@@ -1678,6 +1792,287 @@
         applyApiRouteFilter([]);
       });
     }
+  }
+
+  function apiRouteModalHost() {
+    let host = document.getElementById("monitor-api-route-modal-host");
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "monitor-api-route-modal-host";
+      host.setAttribute("aria-live", "polite");
+      document.body.appendChild(host);
+    }
+    return host;
+  }
+
+  function closeApiRouteDetailModal() {
+    document.body.classList.remove("monitor-api-route-modal-open");
+    const host = document.getElementById("monitor-api-route-modal-host");
+    if (host) host.innerHTML = "";
+  }
+
+  function renderApiRouteSampleStatusBadge(code) {
+    const value = Number(code);
+    if (value >= 500) return `<span class="monitor-api-route-modal-status is-5xx">${value}</span>`;
+    if (value >= 400) return `<span class="monitor-api-route-modal-status is-4xx">${value}</span>`;
+    return `<span class="monitor-api-route-modal-status is-ok">${value}</span>`;
+  }
+
+  function apiRouteSampleKey(sample) {
+    return `${sample.recordedAt}|${sample.statusCode}|${sample.durationMs}|${sample.requester || ""}`;
+  }
+
+  function formatApiRouteSampleParamsValue(value) {
+    if (value == null) return "";
+    if (typeof value === "string") return value;
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch (_err) {
+      return String(value);
+    }
+  }
+
+  function renderApiRouteSampleParamsBlock(label, value) {
+    if (value == null) return "";
+    if (typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length) return "";
+    const text = formatApiRouteSampleParamsValue(value);
+    if (!text) return "";
+    return `<div class="monitor-api-route-modal-params-block">
+      <span class="monitor-api-route-modal-params-label">${OC.escapeHtml(label)}</span>
+      <pre class="monitor-api-route-modal-params-code">${OC.escapeHtml(text)}</pre>
+    </div>`;
+  }
+
+  function renderApiRouteSampleParams(params) {
+    if (!params) {
+      return `<p class="monitor-api-route-modal-params-empty">Parâmetros não registrados nesta amostra. Novas requisições passam a registrar query string e corpo.</p>`;
+    }
+    const query = renderApiRouteSampleParamsBlock("Query string", params.query);
+    const body = renderApiRouteSampleParamsBlock("Corpo", params.body);
+    if (!query && !body) {
+      return `<p class="monitor-api-route-modal-params-empty">Nenhum parâmetro nesta requisição.</p>`;
+    }
+    return `<div class="monitor-api-route-modal-params">${query}${body}</div>`;
+  }
+
+  function renderApiRouteModalSamplesTable(samples, sortKey) {
+    const sorted = sortApiRouteModalSamples(samples, sortKey);
+    return sorted
+      .map((sample) => {
+        const key = apiRouteSampleKey(sample);
+        return `<tr class="monitor-api-route-modal-row is-clickable" data-sample-key="${OC.escapeHtml(key)}" tabindex="0" role="button" aria-expanded="false" aria-label="Ver parâmetros da requisição">
+                <td class="monitor-api-route-modal-time">${OC.escapeHtml(OC.formatDate(sample.recordedAt))}</td>
+                <td class="monitor-api-route-modal-requester">${OC.escapeHtml(sample.requester || "—")}</td>
+                <td class="monitor-api-route-modal-status-cell">${renderApiRouteSampleStatusBadge(sample.statusCode)}</td>
+                <td class="monitor-api-route-modal-ms">${formatLatencyMs(sample.durationMs)}</td>
+              </tr>
+              <tr class="monitor-api-route-modal-detail hidden" data-sample-detail="${OC.escapeHtml(key)}" hidden>
+                <td colspan="4">${renderApiRouteSampleParams(sample.requestParams)}</td>
+              </tr>`;
+      })
+      .join("");
+  }
+
+  function renderApiRouteDetailModalContent(data, meta, sortKey = "timeDesc") {
+    const samplingNote =
+      "Erros HTTP e requisições lentas são registrados integralmente; respostas normais usam amostragem.";
+    if (data.error) {
+      const hint =
+        data.error === "Sub-rota invalida"
+          ? " Reinicie o ops-console para carregar as rotas novas."
+          : String(data.error).startsWith("HTTP 404")
+            ? " O backend ainda nao expoe /ops-metrics/route-samples/. Reinicie o backend ou confira o acesso ao Postgres."
+            : "";
+      return `<p class="global-error">${OC.escapeHtml(data.error)}${OC.escapeHtml(hint)}</p>`;
+    }
+    const samples = data.samples || [];
+    if (!samples.length) {
+      return `<p class="monitor-empty monitor-empty-neutral">Nenhuma amostra no período selecionado.</p>
+        <p class="monitor-meta-muted">${OC.escapeHtml(samplingNote)}</p>`;
+    }
+    return `<div class="monitor-api-data-card monitor-api-data-card--modal">
+      ${renderApiTableSortToolbar(
+        "monitor-api-route-modal-sort",
+        API_ROUTE_MODAL_SORT_OPTIONS,
+        sortKey,
+        "monitor-api-table-toolbar--card-bar"
+      )}
+      <div class="monitor-api-data-card-table">
+        <table class="monitor-table monitor-api-route-modal-table">
+          <thead><tr>
+            <th>Horário</th>
+            <th>Quem requisitou</th>
+            <th class="is-numeric">Status</th>
+            <th class="is-numeric">ms</th>
+          </tr></thead>
+          <tbody id="monitor-api-route-modal-tbody">${renderApiRouteModalSamplesTable(samples, sortKey)}</tbody>
+        </table>
+      </div>
+      <p class="monitor-api-data-card-foot">${OC.escapeHtml(samplingNote)} Clique em uma linha para ver os parâmetros da requisição.</p>
+    </div>`;
+  }
+
+  function findApiRouteSampleDetail(tableWrap, key) {
+    return (
+      [...tableWrap.querySelectorAll("tr[data-sample-detail]")].find(
+        (row) => row.getAttribute("data-sample-detail") === key
+      ) || null
+    );
+  }
+
+  function closeApiRouteSampleDetails(tableWrap, exceptRow = null) {
+    tableWrap.querySelectorAll(".monitor-api-route-modal-row.is-expanded").forEach((row) => {
+      if (exceptRow && row === exceptRow) return;
+      row.classList.remove("is-expanded");
+      row.setAttribute("aria-expanded", "false");
+      const detail = findApiRouteSampleDetail(tableWrap, row.getAttribute("data-sample-key") || "");
+      if (detail) {
+        detail.hidden = true;
+        detail.classList.add("hidden");
+      }
+    });
+  }
+
+  function toggleApiRouteSampleDetail(tableWrap, row) {
+    const key = row.getAttribute("data-sample-key") || "";
+    const detail = findApiRouteSampleDetail(tableWrap, key);
+    if (!detail) return;
+    const open = !row.classList.contains("is-expanded");
+    closeApiRouteSampleDetails(tableWrap, open ? row : null);
+    row.classList.toggle("is-expanded", open);
+    row.setAttribute("aria-expanded", open ? "true" : "false");
+    detail.hidden = !open;
+    detail.classList.toggle("hidden", !open);
+  }
+
+  function bindApiRouteModalSort(modal, body, samples, meta) {
+    const select = body.querySelector("#monitor-api-route-modal-sort");
+    const tbody = body.querySelector("#monitor-api-route-modal-tbody");
+    const tableWrap = body.querySelector(".monitor-api-data-card-table");
+    if (!select || !tbody || select.dataset.bound === "1") return;
+    select.dataset.bound = "1";
+    select.addEventListener("change", () => {
+      OC.monitorState.apiRouteModalSort = select.value || "timeDesc";
+      tbody.innerHTML = renderApiRouteModalSamplesTable(samples, OC.monitorState.apiRouteModalSort);
+    });
+    if (!tableWrap || tableWrap.dataset.sampleExpandBound === "1") return;
+    tableWrap.dataset.sampleExpandBound = "1";
+    tableWrap.addEventListener("click", (event) => {
+      const row = event.target.closest(".monitor-api-route-modal-row.is-clickable");
+      if (!row || !tableWrap.contains(row)) return;
+      toggleApiRouteSampleDetail(tableWrap, row);
+    });
+    tableWrap.addEventListener("keydown", (event) => {
+      const row = event.target.closest(".monitor-api-route-modal-row.is-clickable");
+      if (!row || !tableWrap.contains(row)) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleApiRouteSampleDetail(tableWrap, row);
+      }
+    });
+  }
+
+  async function openApiRouteDetailModal({ env, method, route }) {
+    const win = OC.monitorState.apiWindow || "6h";
+    const host = apiRouteModalHost();
+    host.innerHTML = `<div id="monitor-api-route-modal" class="monitor-api-route-modal" aria-hidden="false">
+      <div class="monitor-api-route-modal-backdrop" data-monitor-api-route-close></div>
+      <div class="monitor-api-route-modal-card" role="dialog" aria-modal="true" aria-labelledby="monitor-api-route-modal-title">
+        <header class="monitor-api-route-modal-header">
+          <div class="monitor-api-route-modal-title-wrap">
+            <div class="monitor-api-route-modal-title-row">
+              <span class="monitor-api-route-modal-env">${OC.escapeHtml(env)}</span>
+              <span class="monitor-api-route-modal-method">${OC.escapeHtml(method)}</span>
+            </div>
+            <h2 id="monitor-api-route-modal-title" class="monitor-api-route-modal-route">${OC.escapeHtml(route)}</h2>
+            <p class="monitor-api-route-modal-meta" id="monitor-api-route-modal-meta" hidden></p>
+          </div>
+          <button type="button" class="drawer-close monitor-api-route-modal-close" data-monitor-api-route-close aria-label="Fechar">×</button>
+        </header>
+        <div class="monitor-api-route-modal-body" id="monitor-api-route-modal-body">
+          <div class="loading-inline"><div class="loading-spinner loading-spinner-sm"></div> Carregando amostras…</div>
+        </div>
+      </div>
+    </div>`;
+    document.body.classList.add("monitor-api-route-modal-open");
+
+    const modal = host.querySelector("#monitor-api-route-modal");
+    const body = host.querySelector("#monitor-api-route-modal-body");
+    modal?.querySelectorAll("[data-monitor-api-route-close]").forEach((el) => {
+      el.addEventListener("click", closeApiRouteDetailModal);
+    });
+    modal?.querySelector(".monitor-api-route-modal-card")?.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        closeApiRouteDetailModal();
+        document.removeEventListener("keydown", onKeyDown);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+
+    try {
+      const data = await OC.fetchMonitoringJson(
+        `/api/v1/monitoring/${encodeURIComponent(env)}/api-samples?window=${encodeURIComponent(win)}&method=${encodeURIComponent(method)}&route=${encodeURIComponent(route)}`,
+        { samples: [], sampleCount: 0 }
+      );
+      if (body) {
+        const meta = { env, method, route, window: win };
+        const sortKey = OC.monitorState.apiRouteModalSort || "timeDesc";
+        body.innerHTML = renderApiRouteDetailModalContent(data, meta, sortKey);
+        bindApiRouteModalSort(modal, body, data.samples || [], meta);
+        const metaEl = modal?.querySelector("#monitor-api-route-modal-meta");
+        const sampleCount = data.sampleCount ?? (data.samples || []).length;
+        if (metaEl && sampleCount) {
+          metaEl.textContent = `Janela ${meta.window} · ${formatAccessNumber(sampleCount)} amostra(s)`;
+          metaEl.hidden = false;
+        }
+      }
+    } catch (err) {
+      if (body) {
+        body.innerHTML = `<p class="global-error">${OC.escapeHtml(err.message)}</p>`;
+      }
+    }
+  }
+
+  function bindApiRouteTableSort(root) {
+    const select = root.querySelector("#monitor-api-route-sort");
+    const tbody = root.querySelector("#monitor-api-routes-table tbody");
+    if (!select || !tbody) return;
+    if (select.dataset.bound !== "1") {
+      select.dataset.bound = "1";
+      select.addEventListener("change", () => {
+        OC.monitorState.apiRouteSort = select.value || "priority";
+        sortApiRouteRowsInDom(tbody, OC.monitorState.apiRouteSort);
+      });
+    }
+    select.value = OC.monitorState.apiRouteSort || "priority";
+    sortApiRouteRowsInDom(tbody, select.value);
+  }
+
+  function bindApiRouteDetailRows(root) {
+    if (root.dataset.apiRouteModalBound === "1") return;
+    root.dataset.apiRouteModalBound = "1";
+    const activateRow = (row) => {
+      const env = row.getAttribute("data-env");
+      const method = row.getAttribute("data-method");
+      const route = row.getAttribute("data-route");
+      if (env && method && route) openApiRouteDetailModal({ env, method, route });
+    };
+    root.addEventListener("click", (event) => {
+      const row = event.target.closest(".monitor-api-route-row.is-clickable");
+      if (!row || !root.contains(row)) return;
+      activateRow(row);
+    });
+    root.addEventListener("keydown", (event) => {
+      const row = event.target.closest(".monitor-api-route-row.is-clickable");
+      if (!row || !root.contains(row)) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activateRow(row);
+      }
+    });
   }
 
   function apiWindowHours(window) {
@@ -1921,7 +2316,7 @@
     <div class="monitor-access-subhead monitor-access-subhead--diagnostics"><h4>Diagnóstico por rota</h4><span>latência de sucesso separada de respostas 4xx e 5xx</span></div>
     <p class="monitor-section-hint" id="monitor-api-routes-filter-note" hidden></p>
     <div id="monitor-api-routes-wrap">${renderApiRoutesTable(routesFocus)}</div>
-    <p class="monitor-meta-muted">Dica: clique em um ponto do gráfico para ver as APIs avaliadas naquele instante.</p>`;
+    <p class="monitor-meta-muted">Dica: clique em uma rota para ver amostras individuais, ou em um ponto do gráfico para filtrar por instante.</p>`;
   }
 
   function renderSyncTimeline(syncsByEnv, highlight) {
@@ -2841,6 +3236,8 @@
 
   function bindMonitoringInteractions(root) {
     OC.bindBackNavigation(root);
+    bindApiRouteDetailRows(root);
+    bindApiRouteTableSort(root);
     const openAlerts = () => {
       if (OC.openMonitorAlertsDrawer) OC.openMonitorAlertsDrawer(OC.lastAlertGroups || [], { refresh: false });
       else OC.navigate("monitoring", null, { tab: "incidents" });

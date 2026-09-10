@@ -28,6 +28,7 @@ import server_ops
 import server_db
 import server_host
 import server_monitoring
+import server_automations
 from health_probe import get_coordinator
 
 OPS_ROOT = Path(__file__).resolve().parent
@@ -50,6 +51,8 @@ PROTECTED_API_PREFIXES = (
     "/api/v1/host/",
     "/api/v1/diagnostics/",
     "/api/v1/monitoring",
+    "/api/v1/automations",
+    "/api/v1/console/",
 )
 AUTH_PUBLIC_PATHS = {"/api/v1/auth/status"}
 
@@ -274,10 +277,13 @@ def load_local_env() -> None:
 
 
 def load_machine_config() -> dict[str, Any]:
-    candidates = [
+    candidates = []
+    if os.environ.get("OPS_MACHINE_CONFIG"):
+        candidates.append(Path(os.environ["OPS_MACHINE_CONFIG"]))
+    candidates.extend([
         DEFAULT_BASE_DIR / "machine.config.json",
         Path(os.environ.get("ProgramData", "C:/ProgramData")) / "PPLID" / "machine.config.json",
-    ]
+    ])
     for path in candidates:
         if path.is_file():
             with path.open(encoding="utf-8-sig") as handle:
@@ -288,14 +294,22 @@ def load_machine_config() -> dict[str, Any]:
 def resolve_config_paths(config: dict[str, Any]) -> dict[str, Any]:
     machine = load_machine_config()
     base_dir = Path(machine.get("baseDir") or DEFAULT_BASE_DIR)
-    repos_dir = base_dir / "repos"
-    log_dir = base_dir / "logs"
+    repos_dir = Path(machine.get("reposDir") or (base_dir / "repos"))
+    log_dir = Path(machine.get("logDir") or (base_dir / "logs"))
+    deploy_dir = Path(machine.get("deployDir") or (base_dir / "deploy"))
 
     if machine.get("lanIp") and not config.get("lanIp"):
         config["lanIp"] = machine["lanIp"]
+    if machine.get("automationRuntime") and not config.get("automationRuntime"):
+        config["automationRuntime"] = machine["automationRuntime"]
+    if machine.get("automationSourceDir"):
+        config["automationSourceDir"] = str(machine["automationSourceDir"])
+    if machine.get("automationOpsDir"):
+        config["automationOpsDir"] = str(machine["automationOpsDir"])
 
     config["logDir"] = str(log_dir)
     config["statusFile"] = str(log_dir / "deploy-status.json")
+    config["deployDir"] = str(deploy_dir)
 
     for env_name in ENV_ORDER:
         env_cfg = config.get(env_name)
@@ -311,6 +325,27 @@ def resolve_config_paths(config: dict[str, Any]) -> dict[str, Any]:
 def load_config(config_path: Path) -> dict[str, Any]:
     with config_path.open(encoding="utf-8") as handle:
         config = json.load(handle)
+    local_machine_path = config_path.resolve().parent / "machine.config.local.json"
+    if local_machine_path.is_file():
+        os.environ.setdefault("OPS_MACHINE_CONFIG", str(local_machine_path))
+        try:
+            with local_machine_path.open(encoding="utf-8-sig") as handle:
+                local_machine = json.load(handle)
+            for key in (
+                "baseDir",
+                "deployDir",
+                "reposDir",
+                "automationSourceDir",
+                "automationOpsDir",
+                "automationRuntime",
+                "opsConsoleDir",
+                "envConfigPath",
+            ):
+                value = local_machine.get(key)
+                if value not in (None, ""):
+                    config[key] = value
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
     return resolve_config_paths(config)
 
 
@@ -1329,6 +1364,25 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         status = 200 if result.get("ok") else 500
         self._send_json(result, status=status)
 
+    def _handle_console_update_status(self) -> None:
+        result = server_ops.check_console_update(self.config)
+        # Sempre 200 com payload estruturado; o campo ok indica sucesso da verificacao remota.
+        self._send_json(result, status=200)
+
+    def _handle_console_update_apply(self) -> None:
+        result = server_ops.apply_console_update(self.config)
+        server_ops.audit_log(
+            self.config,
+            self._session_username(),
+            "console-update-apply",
+            (
+                f"ok={result.get('ok')} restarting={result.get('restarting')} "
+                f"from={result.get('previousSha', '')} to={result.get('targetSha', '')}"
+            ),
+        )
+        status = 200 if result.get("ok") else 500
+        self._send_json(result, status=status)
+
     def _handle_action_cleanup_orphan_bots(self) -> None:
         result = server_ops.action_cleanup_orphan_bots(self.config)
         server_ops.audit_log(
@@ -1412,6 +1466,105 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             )
         self._send_json(payload, status=status)
 
+    def _handle_automations(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        query: dict[str, list[str]] | None = None,
+    ) -> None:
+        """Dispatch the small, explicit Ops-owned automation API."""
+        body = body or {}
+        query = query or {}
+        username = self._session_username()
+        action = ""
+        detail = ""
+        try:
+            if method == "GET" and path == "/api/v1/automations/overview":
+                result = server_automations.overview(self.config)
+            elif method == "GET" and path == "/api/v1/automations/bots":
+                result = {"ok": True, "bots": server_automations.list_bots(self.config)}
+            elif method == "POST" and path == "/api/v1/automations/bots":
+                result = {"ok": True, "bot": server_automations.save_bot(self.config, body)}
+                action, detail = "automation_bot_create", f"id={result['bot']['id']}"
+            elif method == "PATCH" and path.startswith("/api/v1/automations/bots/") and "/" not in path.removeprefix("/api/v1/automations/bots/"):
+                bot_id = path.rsplit("/", 1)[-1].lower()
+                result = {"ok": True, "bot": server_automations.save_bot(self.config, body, bot_id)}
+                action, detail = "automation_bot_update", f"id={bot_id}"
+            elif method == "GET" and path == "/api/v1/automations/database-profiles":
+                result = {"ok": True, "profiles": server_automations.list_database_profiles(self.config)}
+            elif method == "PATCH" and path.startswith("/api/v1/automations/database-profiles/"):
+                environment = path.rsplit("/", 1)[-1]
+                result = {"ok": True, "profile": server_automations.save_database_profile(self.config, environment, body)}
+                action, detail = "automation_database_profile_update", f"environment={environment.upper()}"
+            elif method == "PATCH" and path == "/api/v1/automations/settings":
+                result = server_automations.update_settings(self.config, body, username)
+                result = {"ok": True, "settings": result}
+                action = "automation_target_update"
+                detail = f"target={result['settings'].get('targetEnvironment')}"
+            elif method == "POST" and path == "/api/v1/automations/runtime/publish":
+                source = str(body.get("sourceEnvironment") or "").upper()
+                result = server_automations.publish_runtime(self.config, source, username)
+                action = "automation_runtime_publish"
+                detail = f"source={source} bundle={(result.get('bundle') or {}).get('id')}"
+            elif method == "POST" and path == "/api/v1/automations/runtime/rollback":
+                result = server_automations.rollback_runtime(self.config, username)
+                action = "automation_runtime_rollback"
+                detail = f"bundle={(result.get('settings') or {}).get('activeBundle', {}).get('id')}"
+            elif method == "POST" and path == "/api/v1/automations/credentials/validate":
+                result = server_automations.validate_credentials(self.config, body, username)
+                action = "automation_credentials_validate"
+                detail = "ok=true"
+            elif method == "GET" and path == "/api/v1/automations/credentials/status":
+                result = {"ok": True, **server_automations.credentials_status()}
+            elif path.startswith("/api/v1/automations/config/"):
+                mode = path.removeprefix("/api/v1/automations/config/").strip("/").lower()
+                if method == "GET":
+                    result = server_automations.get_config(self.config, mode)
+                elif method == "PATCH":
+                    result = server_automations.update_config(self.config, mode, body)
+                    action = "automation_config_update"
+                    detail = f"mode={mode}"
+                else:
+                    self._send_json({"error": "Método não permitido"}, status=405)
+                    return
+            elif path.startswith("/api/v1/automations/bots/"):
+                remainder = path.removeprefix("/api/v1/automations/bots/").strip("/")
+                parts = remainder.split("/")
+                if len(parts) != 2:
+                    raise ValueError("Rota de bot inválida")
+                mode, operation = parts[0].lower(), parts[1].lower()
+                if method == "POST" and operation == "start":
+                    result = server_automations.start_bot(self.config, mode, body, username)
+                    action = "automation_bot_start"
+                    detail = f"mode={mode} target={(result.get('bot') or {}).get('targetEnvironment')}"
+                elif method == "POST" and operation == "stop":
+                    result = server_automations.stop_bot(self.config, mode)
+                    action = "automation_bot_stop"
+                    detail = f"mode={mode}"
+                elif method == "GET" and operation == "logs":
+                    tail = int((query.get("tail") or ["120"])[0])
+                    result = server_automations.read_logs(self.config, mode, tail)
+                elif method == "POST" and operation == "clear-logs":
+                    result = server_automations.clear_logs(self.config, mode)
+                    action = "automation_logs_clear"
+                    detail = f"mode={mode}"
+                else:
+                    self._send_json({"error": "Operação não encontrada"}, status=404)
+                    return
+            else:
+                self._send_json({"error": "Não encontrado"}, status=404)
+                return
+        except ValueError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"ok": False, "error": str(exc)}, status=500)
+            return
+        if action:
+            server_ops.audit_log(self.config, username, action, detail)
+        self._send_json(result)
+
     def _handle_env_apply(self, env_name: str) -> None:
         result = server_ops.apply_env_vars(self.config, env_name)
         server_ops.audit_log(
@@ -1431,6 +1584,14 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/v1/database/"):
             self._handle_database("DELETE", path, self._read_json_body())
             return
+        if path.startswith("/api/v1/automations/bots/"):
+            bot_id = path.rsplit("/", 1)[-1].lower()
+            try:
+                server_automations.delete_bot(self.config, bot_id)
+                self._send_json({"ok": True, "id": bot_id})
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=400)
+            return
         self._send_json({"error": "Nao encontrado"}, status=404)
 
     def do_PATCH(self) -> None:  # noqa: N802
@@ -1440,6 +1601,9 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/v1/database/"):
             self._handle_database("PATCH", path, self._read_json_body())
+            return
+        if path.startswith("/api/v1/automations"):
+            self._handle_automations("PATCH", path, self._read_json_body())
             return
         self._send_json({"error": "Nao encontrado"}, status=404)
 
@@ -1582,6 +1746,13 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             self._send_json(result)
             return
 
+        if path == "/api/v1/console/update/apply":
+            if not self._require_unlocked_session():
+                self._send_json({"error": "Bloqueado ou nao autenticado"}, status=401)
+                return
+            self._handle_console_update_apply()
+            return
+
         if path.startswith("/api/v1/actions/"):
             if not self._require_unlocked_session():
                 self._send_json({"error": "Bloqueado ou nao autenticado"}, status=401)
@@ -1628,6 +1799,13 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             self._handle_database("POST", path, self._read_json_body())
             return
 
+        if path.startswith("/api/v1/automations"):
+            if not self._require_unlocked_session():
+                self._send_json({"error": "Bloqueado ou nao autenticado"}, status=401)
+                return
+            self._handle_automations("POST", path, self._read_json_body())
+            return
+
         self._send_json({"error": "Nao encontrado"}, status=404)
 
     def do_GET(self) -> None:  # noqa: N802
@@ -1650,6 +1828,14 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/overview-lite":
             overview = build_overview(self.config, lite=True)
             self._send_json(overview)
+            return
+
+        if path == "/api/v1/console/update/status":
+            self._handle_console_update_status()
+            return
+
+        if path.startswith("/api/v1/automations"):
+            self._handle_automations("GET", path, query=parse_qs(parsed.query))
             return
 
         if path == "/api/v1/host/orphan-bots":
@@ -2082,6 +2268,25 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 )
                 return
             if sub == "api-samples":
+                method = (query.get("method") or [""])[0].strip().upper()
+                route = (query.get("route") or [""])[0].strip()
+                if method and route:
+                    window = (query.get("window") or ["24h"])[0]
+                    try:
+                        limit = int((query.get("limit") or ["50"])[0])
+                    except ValueError:
+                        limit = 50
+                    self._send_json(
+                        server_monitoring.build_monitoring_api_route_samples(
+                            self.config,
+                            env_name,
+                            window=window,
+                            method=method,
+                            route=route,
+                            limit=limit,
+                        )
+                    )
+                    return
                 at = (query.get("at") or [""])[0]
                 if not at:
                     self._send_json({"error": "Parametro at obrigatorio"}, status=400)
@@ -2101,6 +2306,28 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                         at=at,
                         radius_minutes=radius,
                         min_ms=min_ms,
+                    )
+                )
+                return
+            if sub == "api-route-samples":
+                window = (query.get("window") or ["24h"])[0]
+                method = (query.get("method") or [""])[0].strip().upper()
+                route = (query.get("route") or [""])[0].strip()
+                if not method or not route:
+                    self._send_json({"error": "Parametros method e route obrigatorios"}, status=400)
+                    return
+                try:
+                    limit = int((query.get("limit") or ["50"])[0])
+                except ValueError:
+                    limit = 50
+                self._send_json(
+                    server_monitoring.build_monitoring_api_route_samples(
+                        self.config,
+                        env_name,
+                        window=window,
+                        method=method,
+                        route=route,
+                        limit=limit,
                     )
                 )
                 return
@@ -2152,7 +2379,8 @@ def main() -> None:
     load_local_env()
     config_path = Path(os.environ.get("OPS_CONFIG", DEFAULT_CONFIG))
     host = os.environ.get("OPS_HOST", "0.0.0.0")
-    port = int(os.environ.get("OPS_PORT", "5190"))
+    port_env = os.environ.get("OPS_PORT")
+    port = int(port_env or "5190")
 
     if len(sys.argv) > 1:
         config_path = Path(sys.argv[1])
@@ -2161,7 +2389,8 @@ def main() -> None:
 
     if config_path.is_file():
         cfg = load_config(config_path)
-        port = int(cfg.get("opsConsolePort", port))
+        if len(sys.argv) <= 2 and not port_env:
+            port = int(cfg.get("opsConsolePort", port))
 
     run_server(host, port, config_path)
 

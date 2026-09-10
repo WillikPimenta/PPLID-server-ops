@@ -1,0 +1,191 @@
+{
+  "meta": {
+    "title": "Glossário — termos técnicos em português claro",
+    "subtitle": "Use este material para gravar treinamentos e explicar o PSA Cyber pro time sem jargão."
+  },
+  "terms": [
+    {
+      "id": "cors",
+      "term": "CORS",
+      "full_name": "Cross-Origin Resource Sharing",
+      "plain": "Regra que define quais sites (URLs) podem chamar a API do portal a partir do navegador. Se estiver aberto demais, um site malicioso poderia tentar ler dados usando o login de alguém.",
+      "analogy": "Como a portaria que só deixa entrar visitantes de empresas autorizadas."
+    },
+    {
+      "id": "csrf",
+      "term": "CSRF",
+      "full_name": "Cross-Site Request Forgery",
+      "plain": "Proteção contra sites falsos que tentam enviar comandos em nome do usuário logado (ex.: apagar dados sem você perceber). O portal exige um token secreto em cada ação de escrita.",
+      "analogy": "Como um carimbo de confirmação que só o nosso site sabe gerar."
+    },
+    {
+      "id": "drf",
+      "term": "DRF",
+      "full_name": "Django REST Framework",
+      "plain": "Biblioteca Python que expõe as APIs REST do backend (login, falhas, agents, etc.). É o “tradutor” entre o frontend Vue e o banco de dados.",
+      "analogy": "O garçom entre a cozinha (banco) e o salão (tela do portal)."
+    },
+    {
+      "id": "debug",
+      "term": "DEBUG",
+      "full_name": "Modo desenvolvedor",
+      "plain": "Quando ligado, o servidor mostra detalhes internos de erro na tela. Ótimo no PC do dev; perigoso se exposto na rede corporativa.",
+      "analogy": "Mostrar o manual de falhas do motor para todo mundo ver."
+    },
+    {
+      "id": "secret-key",
+      "term": "SECRET_KEY",
+      "full_name": "Chave secreta do Django",
+      "plain": "Senha mestra do servidor usada para assinar sessões e tokens. Se vazar ou for previsível, alguém pode forjar login.",
+      "analogy": "A chave do cofre da intranet — nunca pode ser '123456'."
+    },
+    {
+      "id": "allowed-hosts",
+      "term": "ALLOWED_HOSTS",
+      "full_name": "Hosts permitidos",
+      "plain": "Lista de endereços (domínios/IPs) que o Django aceita atender. Evita ataques que mentem o nome do site no cabeçalho HTTP.",
+      "analogy": "Lista de CNPJs autorizados na portaria."
+    },
+    {
+      "id": "session-cookie",
+      "term": "Cookie de sessão",
+      "full_name": "Identificador de login no navegador",
+      "plain": "Pequeno arquivo que o navegador guarda depois do login. Flags HttpOnly/SameSite/Secure controlam quem pode ler e em quais condições.",
+      "analogy": "Crachá digital — precisa ser difícil de copiar."
+    },
+    {
+      "id": "security-headers",
+      "term": "Security headers",
+      "full_name": "Cabeçalhos de segurança HTTP",
+      "plain": "Instruções extras que o servidor manda ao navegador (ex.: não embutir o site em iframe, não adivinhar tipo de arquivo).",
+      "analogy": "Placas de 'proibido fotografar' no prédio."
+    },
+    {
+      "id": "api-endpoint",
+      "term": "Endpoint / API",
+      "full_name": "Ponto de acesso da API",
+      "plain": "URL específica que devolve ou grava dados (ex.: /api/v1/falhas/...). Cada tela do portal consome vários endpoints.",
+      "analogy": "Guichê específico no balcão de atendimento."
+    },
+    {
+      "id": "auth",
+      "term": "Autenticação",
+      "full_name": "Login obrigatório",
+      "plain": "Garantir que só usuário logado acessa dados. Resposta 401/403 = 'não pode entrar'.",
+      "analogy": "Crachá na catraca."
+    },
+    {
+      "id": "can-sync",
+      "term": "can_sync",
+      "full_name": "Permissão de importação destrutiva",
+      "plain": "Flag de liderança global que permite importar planilha de Falhas (operação que apaga e recria dados). Usuário comum não tem.",
+      "analogy": "Chave master só do gerente."
+    },
+    {
+      "id": "pii",
+      "term": "PII",
+      "full_name": "Dados pessoais identificáveis",
+      "plain": "Informação que identifica uma pessoa (nome, LAN ID, CPF). Exige cuidado extra com SI/LGPD.",
+      "analogy": "Dados do RH — não espalhar."
+    },
+    {
+      "id": "health-check",
+      "term": "Health check / Smoke test",
+      "full_name": "Teste automático de saúde",
+      "plain": "Robô que acessa URLs da API e verifica se respondem OK. Não substitui teste manual, mas pega quebra grosseira.",
+      "analogy": "Checklist antes de abrir a loja."
+    },
+    {
+      "id": "si",
+      "term": "SI",
+      "full_name": "Segurança da Informação",
+      "plain": "Área corporativa que aprova se sistemas podem ir a produção. O PSA Cyber gera evidências para apoiar, não substitui o processo deles.",
+      "analogy": "Auditoria oficial — nosso console é o rascunho preparado."
+    },
+    {
+      "id": "env-profile",
+      "term": "Perfil de ambiente",
+      "full_name": "local / staging / production",
+      "plain": "Indica se estamos no PC de dev, homologação ou produção. Em 'local', alguns alertas (DEBUG) são esperados.",
+      "analogy": "Etiqueta 'obras' vs 'loja aberta'."
+    }
+  ],
+  "checks": {
+    "CYBER-AUTO-DEBUG": {
+      "plain_title": "Modo desenvolvedor ligado?",
+      "plain_what": "O servidor está com DEBUG=True, mostrando erros detalhados.",
+      "plain_why": "Em rede interna de dev é comum; em produção expõe estrutura interna.",
+      "plain_fix": "Manter DEBUG=False no .env de homologação/produção.",
+      "related_terms": ["debug"]
+    },
+    "CYBER-AUTO-SECRET": {
+      "plain_title": "Senha mestra do servidor é forte?",
+      "plain_what": "A SECRET_KEY está fraca ou é a padrão de fábrica.",
+      "plain_why": "Com chave fraca, sessões podem ser falsificadas.",
+      "plain_fix": "Gerar chave longa no .env e nunca commitar no Git.",
+      "related_terms": ["secret-key"]
+    },
+    "CYBER-AUTO-HOSTS": {
+      "plain_title": "Servidor aceita qualquer endereço?",
+      "plain_what": "ALLOWED_HOSTS pode estar com '*' (qualquer um).",
+      "plain_why": "Facilita ataques de host header em produção.",
+      "plain_fix": "Listar só localhost e o IP/nome real do servidor.",
+      "related_terms": ["allowed-hosts"]
+    },
+    "CYBER-AUTO-CORS": {
+      "plain_title": "Qual site pode chamar a API?",
+      "plain_what": "CORS define origens permitidas (ex.: só localhost:5174).",
+      "plain_why": "CORS aberto = qualquer site poderia tentar usar a API.",
+      "plain_fix": "Manter só URLs do frontend do portal em CORS_ALLOWED_ORIGINS.",
+      "related_terms": ["cors"]
+    },
+    "CYBER-AUTO-CSRF": {
+      "plain_title": "Proteção anti-formulário falso configurada?",
+      "plain_what": "CSRF_TRUSTED_ORIGINS lista de onde o portal pode enviar comandos.",
+      "plain_why": "Sem isso, mutações (POST) podem falhar ou ficar vulneráveis.",
+      "plain_fix": "Incluir URLs do Vite e do servidor no .env.",
+      "related_terms": ["csrf"]
+    },
+    "CYBER-AUTO-SESSION": {
+      "plain_title": "Cookie de login está protegido?",
+      "plain_what": "Verifica HttpOnly, SameSite e Secure nos cookies de sessão.",
+      "plain_why": "Cookie mal configurado pode vazar ou ser roubado.",
+      "plain_fix": "HttpOnly + SameSite=Lax; Secure=True quando usar HTTPS.",
+      "related_terms": ["session-cookie"]
+    },
+    "CYBER-AUTO-DRF-DEFAULT": {
+      "plain_title": "API aberta por padrão?",
+      "plain_what": "O DRF (framework das APIs) está com permissão AllowAny global.",
+      "plain_why": "Cada endpoint precisa bloquear acesso sozinho — um esquecimento vira vazamento.",
+      "plain_fix": "Revisar views sensíveis; idealmente IsAuthenticated como padrão.",
+      "related_terms": ["drf", "auth"]
+    },
+    "CYBER-AUTO-HEADERS": {
+      "plain_title": "Cabeçalhos de segurança HTTP presentes?",
+      "plain_what": "Verifica X-Frame-Options e X-Content-Type-Options na resposta.",
+      "plain_why": "Evita clickjacking e interpretação errada de arquivos.",
+      "plain_fix": "SecurityMiddleware do Django já ajuda; validar em produção.",
+      "related_terms": ["security-headers"]
+    },
+    "CYBER-AUTO-OPS-HEALTH": {
+      "plain_title": "Console Ops rodou validação recente?",
+      "plain_what": "Checa se existe relatório de health do portal (psa-live-report.json).",
+      "plain_why": "SI quer saber se as telas/APIs principais respondem.",
+      "plain_fix": "Abrir Console Ops → Rodar validação antes do pacote SI.",
+      "related_terms": ["health-check"]
+    }
+  },
+  "control_hints": {
+    "GOV-CSRF": { "related_terms": ["csrf"] },
+    "GOV-CORS": { "related_terms": ["cors"] },
+    "GOV-DEBUG": { "related_terms": ["debug"] },
+    "GOV-SECRET": { "related_terms": ["secret-key"] },
+    "GOV-HOSTS": { "related_terms": ["allowed-hosts"] },
+    "GOV-SESSION": { "related_terms": ["session-cookie"] },
+    "GOV-HEADERS": { "related_terms": ["security-headers"] },
+    "GOV-AUTH": { "related_terms": ["auth"] },
+    "GOV-SYNC": { "related_terms": ["can-sync"] },
+    "GOV-DATA": { "related_terms": ["pii"] },
+    "GOV-OPS-HEALTH": { "related_terms": ["health-check"] }
+  }
+}

@@ -108,6 +108,18 @@ class ApiFallbackTests(unittest.TestCase):
 
         self.assertEqual(sent, [(b"<html>Painel TV</html>", "text/html; charset=utf-8")])
 
+    def test_automations_overview_route_returns_json(self) -> None:
+        sent: list[tuple] = []
+        handler = server.OpsConsoleHandler.__new__(server.OpsConsoleHandler)
+        handler.config = {"logDir": "C:/PPLID/logs"}
+        handler._require_unlocked_session = lambda: {"locked": False}  # type: ignore[method-assign]
+        handler._send_json = lambda payload, status=200: sent.append((payload, status))  # type: ignore[method-assign]
+        handler.path = "/api/v1/automations/overview"
+        payload = {"ok": True, "bots": {}}
+        with patch.object(server.server_automations, "overview", return_value=payload):
+            handler.do_GET()
+        self.assertEqual(sent, [(payload, 200)])
+
 
 if __name__ == "__main__":
     unittest.main()

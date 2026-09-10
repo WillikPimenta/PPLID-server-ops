@@ -137,7 +137,7 @@ function updateRefreshIntervalLabel() {
 }
 
 OC.restartAutoRefreshIfNeeded = function restartAutoRefreshIfNeeded() {
-  if (OC.authState.locked || OC.refreshPaused || document.hidden) return;
+  if (OC.authState.locked || OC.refreshPaused || document.hidden || !OC.isDeployView?.()) return;
   // Interval is re-read on each scheduled tick — no need to restart unless stopped.
   if (!OC.refreshTimer) startAutoRefresh();
 };
@@ -210,7 +210,7 @@ function hideLockScreen() {
   setLockError("");
   updateAuthBanner();
   resetIdleTimer();
-  if (!OC.refreshPaused) startAutoRefresh();
+  if (!OC.refreshPaused && OC.isDeployView?.()) startAutoRefresh();
   startDurationTicker();
 }
 
@@ -328,7 +328,7 @@ function togglePauseRefresh() {
   } else if (!OC.authState.locked) {
     if (OC.currentRoute?.view === "host") OC.startHostRefresh?.();
     else if (OC.currentRoute?.view === "monitoring") OC.startMonitoringRefresh?.();
-    else startAutoRefresh();
+    else if (OC.isDeployView?.()) startAutoRefresh();
   }
 }
 
@@ -346,8 +346,7 @@ function scheduleNextRefresh(ms) {
     clearTimeout(OC.refreshTimer);
     OC.refreshTimer = null;
   }
-  if (OC.authState.locked || OC.refreshPaused || document.hidden) return;
-  if (["monitoring", "host"].includes(OC.currentRoute?.view)) return;
+  if (OC.authState.locked || OC.refreshPaused || document.hidden || !OC.isDeployView?.()) return;
   const delay = Math.max(500, Number(ms) || getRefreshInterval());
   OC._refreshIntervalMs = delay;
   OC.refreshTimer = setTimeout(() => {
@@ -360,8 +359,7 @@ function scheduleNextRefresh(ms) {
 
 function startAutoRefresh() {
   stopAutoRefresh();
-  if (OC.authState.locked || OC.refreshPaused || document.hidden) return;
-  if (["monitoring", "host"].includes(OC.currentRoute?.view)) return;
+  if (OC.authState.locked || OC.refreshPaused || document.hidden || !OC.isDeployView?.()) return;
   scheduleNextRefresh(getRefreshInterval());
 }
 
@@ -559,13 +557,15 @@ function bindUi() {
       if (refreshMonitoring?.finally) refreshMonitoring.finally(() => OC.startMonitoringRefresh?.());
       return;
     }
-    // Resume with jitter so many tabs don't align.
-    const jitter = 200 + Math.floor(Math.random() * 800);
-    if (OC._hiddenResumeTimer) clearTimeout(OC._hiddenResumeTimer);
-    OC._hiddenResumeTimer = setTimeout(() => {
-      OC._hiddenResumeTimer = null;
-      OC.refresh().finally(() => startAutoRefresh());
-    }, jitter);
+    if (OC.isDeployView?.()) {
+      // Resume with jitter so many tabs don't align.
+      const jitter = 200 + Math.floor(Math.random() * 800);
+      if (OC._hiddenResumeTimer) clearTimeout(OC._hiddenResumeTimer);
+      OC._hiddenResumeTimer = setTimeout(() => {
+        OC._hiddenResumeTimer = null;
+        OC.refresh().finally(() => startAutoRefresh());
+      }, jitter);
+    }
   });
 }
 
@@ -585,7 +585,7 @@ async function bootstrap() {
       await OC.refresh({ full: false });
       OC.setDashboardVisible(true);
       OC.renderRoute();
-      startAutoRefresh();
+      if (OC.isDeployView?.()) startAutoRefresh();
       startDurationTicker();
       tryEnterKioskFullscreen();
     } else {

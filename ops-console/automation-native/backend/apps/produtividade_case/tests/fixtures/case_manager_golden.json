@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "timezone": "America/Sao_Paulo",
+  "periodo_mes": "jul-2026",
+  "description": "Dataset sintético determinístico, sem PII, para reconciliação do Case Manager.",
+  "facts": [
+    {
+      "protocolo_destino": "QA-P001",
+      "protocolo_origem": "QA-O001",
+      "workflow_origem": "WF-ALFA",
+      "matricula_destino": "qa0001",
+      "resultado_origem": "APROVADO",
+      "resultado_destino": "APROVADO",
+      "conclusao_destino_at": "2026-07-10T14:00:00-03:00",
+      "tempo_analise_segundos": 60
+    },
+    {
+      "protocolo_destino": "QA-P002",
+      "protocolo_origem": "QA-O002",
+      "workflow_origem": "WF-ALFA",
+      "matricula_destino": "qa0001",
+      "resultado_origem": "APROVADO",
+      "resultado_destino": "REPROVADO",
+      "conclusao_destino_at": "2026-07-10T15:00:00-03:00",
+      "tempo_analise_segundos": 180
+    },
+    {
+      "protocolo_destino": "QA-P003",
+      "protocolo_origem": "QA-O003",
+      "workflow_origem": "WF-BETA",
+      "matricula_destino": "qa0002",
+      "resultado_origem": "REPROVADO",
+      "resultado_destino": "REPROVADO",
+      "conclusao_destino_at": "2026-07-11T09:30:00-03:00",
+      "tempo_analise_segundos": null
+    },
+    {
+      "protocolo_destino": "QA-P004",
+      "protocolo_origem": "QA-O004",
+      "workflow_origem": "WF-BETA",
+      "matricula_destino": "qa0002",
+      "resultado_origem": "",
+      "resultado_destino": "APROVADO",
+      "conclusao_destino_at": "2026-07-11T10:00:00-03:00",
+      "tempo_analise_segundos": 300
+    }
+  ],
+  "expected": {
+    "total_protocolos": 4,
+    "tempo_com_cobertura": 3,
+    "tempo_sem_cobertura": 1,
+    "analysis_seconds_sum": 540,
+    "tma_seconds": 180,
+    "mediana_seconds": 180,
+    "p90_seconds": 300,
+    "total_comparavel": 3,
+    "total_coincidente": 2,
+    "total_nao_coincidente": 1,
+    "total_nao_comparavel": 1,
+    "taxa_coincidencia": 66.67,
+    "by_workflow": {
+      "WF-ALFA": 2,
+      "WF-BETA": 2
+    }
+  }
+}

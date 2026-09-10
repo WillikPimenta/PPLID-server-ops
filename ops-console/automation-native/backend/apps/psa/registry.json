@@ -1,0 +1,72 @@
+{
+  "meta": {
+    "title": "Console Ops — Portal PPLID",
+    "product": "Intranet ONBOARDING PROTECTION",
+    "updated_at": "2026-06-25"
+  },
+  "modules": [
+    {"id": "home", "section": "core", "title": "Home", "status": "live", "route": "/home", "api_prefix": null, "notes": "Landing pós-login"},
+    {"id": "noticias", "section": "core", "title": "Notícias", "status": "live", "route": "/noticias", "api_prefix": "/api/v1/news/", "notes": ""},
+    {"id": "login", "section": "core", "title": "Login", "status": "live", "route": "/", "api_prefix": "/api/v1/auth/", "notes": ""},
+    {"id": "auditorias", "section": "qualidade", "title": "Auditorias", "status": "placeholder", "route": null, "api_prefix": null, "notes": "Card sem rota em sections.ts"},
+    {"id": "nao-conformidades", "section": "qualidade", "title": "Não Conformidades", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "documentos-qualidade", "section": "qualidade", "title": "Documentos da Qualidade", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "indicadores-qualidade", "section": "qualidade", "title": "Indicadores de Qualidade", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "falhas-criticas", "section": "qualidade", "title": "Falhas Críticas", "status": "live", "route": "/secao/qualidade/falhas", "api_prefix": "/api/v1/falhas/", "notes": "8 módulos; fases 1–5 concluídas"},
+    {"id": "dimensionamento", "section": "planejamento", "title": "Dimensionamento", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "forecast", "section": "planejamento", "title": "Forecast / Previsões", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "escalas", "section": "planejamento", "title": "Escalas", "status": "live", "route": "/planejamento/escalas", "api_prefix": "/api/v1/escala-flex/", "notes": "Planejamento + escala-flex"},
+    {"id": "falhas-import", "section": "planejamento", "title": "Importar Falhas", "status": "live", "route": "/planejamento/falhas-import", "api_prefix": "/api/v1/falhas/sync/", "notes": ""},
+    {"id": "automacao", "section": "planejamento", "title": "Automação", "status": "live", "route": "/planejamento/automacao", "api_prefix": "/api/v1/automacoes/", "notes": "Requer pacote automacoes instalado"},
+    {"id": "portal-ops", "section": "planejamento", "title": "Console Ops", "status": "live", "route": "/planejamento/portal-ops", "api_prefix": "/api/v1/portal-ops/", "notes": "ADM: inventário e health do portal"},
+    {"id": "cyber-psa", "section": "planejamento", "title": "PSA Cyber", "status": "live", "route": "/planejamento/psa-cyber", "api_prefix": "/api/v1/cyber-psa/", "notes": "Governança e assessment de segurança para SI"},
+    {"id": "monitoramento", "section": "planejamento", "title": "Monitoramento", "status": "live", "route": "/planejamento/monitoramento", "api_prefix": "/api/v1/escala-flex/", "notes": "Painel, escala, NH, intervalo e dashboards"},
+    {"id": "controle-jornada", "section": "operacao", "title": "Controle de jornada", "status": "live", "route": "/operacao/controle-de-jornada", "api_prefix": "/api/v1/escala-flex/", "notes": "Painel, escala, histórico, meu status e alterar usuário"},
+    {"id": "rotinas", "section": "operacao", "title": "Rotinas Operacionais", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "ocorrencias-aprovacao", "section": "planejamento", "title": "Aprovação de ocorrências", "status": "live", "route": "/planejamento/ocorrencias", "api_prefix": "/api/v1/escala-flex/operational-occurrences/", "notes": "Fluxo de aprovação pelo planejamento"},
+    {"id": "ocorrencias", "section": "operacao", "title": "Ocorrências", "status": "live", "route": "/operacao/ocorrencias", "api_prefix": "/api/v1/escala-flex/operational-occurrences/", "notes": "Cadastro com fluxo de aprovação"},
+    {"id": "mapeamento", "section": "processos", "title": "Mapeamento de Processos", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "pops", "section": "processos", "title": "POPs", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "melhorias", "section": "processos", "title": "Melhorias", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "dashboard-hc", "section": "indicadores", "title": "Dashboard de Headcount", "status": "live", "route": "/dashboard", "api_prefix": "/api/v1/dashboard/", "notes": ""},
+    {"id": "agents", "section": "indicadores", "title": "Colaboradores (Agents)", "status": "live", "route": "/agents", "api_prefix": "/api/v1/agents/", "notes": ""},
+    {"id": "produtividade", "section": "indicadores", "title": "Produtividade", "status": "live", "route": "/secao/indicadores/produtividade", "api_prefix": "/api/v1/produtividade/", "notes": ""},
+    {"id": "kpis-indicadores", "section": "indicadores", "title": "KPIs", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "relatorios", "section": "indicadores", "title": "Relatórios", "status": "placeholder", "route": null, "api_prefix": null, "notes": ""},
+    {"id": "home-layout-mockups", "section": "dev", "title": "Home Layout Mockups", "status": "live", "route": "/dev/home-layout-mockups", "api_prefix": null, "notes": "Variações do layout atual da página inicial"}
+  ],
+  "links": [
+    {"label": "Guia técnico", "path": "documentation/technical-guide.md", "kind": "doc"},
+    {"label": "Guia operação servidor", "path": "documentation/guia-operacao-servidor.md", "kind": "doc"},
+    {"label": "Revisão Falhas Críticas", "path": "documentation/revisao-falhas-criticas-portal.md", "kind": "doc"},
+    {"label": "QA Fase 2.5", "path": "documentation/fase25-qa-aceite.md", "kind": "doc"},
+    {"label": "Escala Flex — modelo", "path": "documentation/escala-flex-data-model.md", "kind": "doc"},
+    {"label": "Script validate_psa_portal", "path": "backend/scripts/validate_psa_portal.py", "kind": "script"},
+    {"label": "Script validate_falhas_local", "path": "backend/scripts/validate_falhas_local.py", "kind": "script"}
+  ],
+  "roadmap": [
+    {"id": "FALHAS-PHASE-1", "title": "Falhas — Correções seguras", "description": "Início enxuto, reincidência, comparativo, redirects", "status": "done", "area": "qualidade"},
+    {"id": "FALHAS-PHASE-2", "title": "Falhas — UX/QA", "description": "Histórico executivo, heatmap, smoke funcional", "status": "done", "area": "qualidade"},
+    {"id": "FALHAS-PHASE-3", "title": "Falhas — Base e bridges", "description": "Stats pós-import, bridges Suporte e Capacitação", "status": "done", "area": "qualidade"},
+    {"id": "FALHAS-PHASE-4", "title": "Falhas — Agregadores", "description": "dashboard-summary, diagnostico, fallbacks", "status": "done", "area": "qualidade"},
+    {"id": "FALHAS-PHASE-5", "title": "Falhas — Performance", "description": "reincidence-summary, modal agente, duration_ms", "status": "done", "area": "qualidade"},
+    {"id": "PORTAL-PHASE-6", "title": "Portal — Qualidade restante", "description": "Auditorias, NC, Documentos, Indicadores Qualidade", "status": "open", "area": "qualidade"},
+    {"id": "PORTAL-PHASE-7", "title": "Portal — Processos", "description": "Mapeamento, POPs, Melhorias", "status": "open", "area": "processos"}
+  ],
+  "risks": [
+    {"id": "RISK-PLACEHOLDERS", "title": "Muitos cards sem produto", "severity": "medium", "impact": "Seções Qualidade, Processos e parte de Indicadores são placeholders", "mitigation": "Inventário PSA; priorizar backlog por área", "status": "open", "owner": "Produto", "refs": ["frontend/src/config/sections.ts"], "notes": ""},
+    {"id": "RISK-LOCAL-SERVER", "title": "Servidor local sem HA", "severity": "medium", "impact": "Máquina Windows única; deploy via GitHub; ops-console manual", "mitigation": "guia-operacao-servidor.md; validação PSA periódica", "status": "open", "owner": "ADM", "refs": ["documentation/guia-operacao-servidor.md"], "notes": ""},
+    {"id": "RISK-AUTOMACOES-PKG", "title": "Automações dependem de pacote externo", "severity": "medium", "impact": "pip install -e ../automacoes necessário para bots", "mitigation": "Documentar no guia; checar meta/status no PSA", "status": "open", "owner": "ADM", "refs": ["backend/requirements.txt", "frontend/src/views/planejamento/AutomacaoView.vue"], "notes": ""},
+    {"id": "RISK-ESCALA-PROFILE", "title": "Escala/Monitoramento exigem perfil operacional", "severity": "low", "impact": "API escala-flex retorna 403 sem UserProfile/Agent vinculado", "mitigation": "Testar com usuário staff; documentar pré-requisito", "status": "open", "owner": "ADM", "refs": ["backend/apps/escala_flex/services/permissions.py"], "notes": ""},
+    {"id": "RISK-SYNC-DESTRUCTIVE", "title": "Sync Falhas destrutivo", "severity": "high", "impact": "Import apaga e recria tabelas de falhas", "mitigation": "SyncAuditLog + backup planilha", "status": "accepted", "owner": "ADM", "refs": ["backend/apps/falhas_criticas/services/excel_sync.py"], "notes": ""},
+    {"id": "RISK-CACHE", "title": "Cache agregadores Falhas não implementado", "severity": "medium", "impact": "Recálculo a cada request; risco stale se cache sem invalidação", "mitigation": "meta.duration_ms; invalidação por sync_id", "status": "accepted", "owner": "ADM", "refs": ["backend/apps/falhas_criticas/services/aggregators.py"], "notes": ""}
+  ],
+  "backlog": [
+    {"id": "BL-QUALIDADE-PLACEHOLDERS", "title": "Implementar cards Qualidade restantes", "priority": "medium", "status": "open", "owner": "Produto", "refs": ["frontend/src/config/sections.ts"], "notes": "Auditorias, NC, Documentos, Indicadores"},
+    {"id": "BL-PROCESSOS-SECTION", "title": "Seção Processos inteira", "priority": "low", "status": "open", "owner": "Produto", "refs": ["frontend/src/config/sections.ts"], "notes": ""},
+    {"id": "BL-PORTAL-OPS", "title": "Console Ops geral do portal", "priority": "high", "status": "done", "owner": "ADM", "refs": ["backend/apps/psa/", "frontend/src/views/planejamento/PortalOpsView.vue"], "notes": "/planejamento/portal-ops"},
+    {"id": "BL-CYBER-PSA", "title": "PSA Cyber — governança e scan", "priority": "high", "status": "done", "owner": "ADM", "refs": ["backend/apps/cyber_psa/"], "notes": "/planejamento/psa-cyber"},
+    {"id": "BL-CACHE-TTL", "title": "Cache Falhas com TTL pós-sync", "priority": "medium", "status": "open", "owner": "ADM", "refs": ["backend/apps/falhas_criticas/services/aggregators.py"], "notes": ""},
+    {"id": "BL-KPIS-RELATORIOS", "title": "KPIs e Relatórios em Indicadores", "priority": "low", "status": "open", "owner": "Produto", "refs": ["frontend/src/config/sections.ts"], "notes": ""}
+  ]
+}

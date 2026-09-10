@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+logs/
+archive/
+execution_history.json
+ged_estado.json
+processed_rows.json
+robot_config.json
+dimNivelHierarquico.csv
+.web-server.pid
+.env
+*.pem
+tmp_preflight_test/

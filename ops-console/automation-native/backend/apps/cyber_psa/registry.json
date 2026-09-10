@@ -1,0 +1,259 @@
+{
+  "meta": {
+    "title": "PSA Cyber — Portal PPLID",
+    "product": "Intranet ONBOARDING PROTECTION",
+    "scope": "Avaliação de postura de segurança e material de governança para apresentação à Segurança da Informação",
+    "updated_at": "2026-06-25",
+    "disclaimer": "Este PSA Cyber é um assessment técnico interno. Não substitui o processo formal de Segurança da Informação da empresa, mas gera evidências e riscos atualizados para apoiar a apresentação."
+  },
+  "presentation": [
+    {
+      "id": "PRES-01",
+      "title": "Contexto da aplicação",
+      "bullets": [
+        "Intranet local para equipes de Planejamento, Qualidade e Operação",
+        "Hospedagem em servidor Windows interno (sem exposição pública)",
+        "Autenticação via sessão Django compartilhada com o frontend Vue",
+        "Dados operacionais: headcount, falhas críticas, produtividade, escalas"
+      ]
+    },
+    {
+      "id": "PRES-02",
+      "title": "Classificação e escopo de dados",
+      "bullets": [
+        "Dados corporativos operacionais — não é sistema de crédito/score",
+        "Planilhas Excel importadas manualmente (Falhas, Produtividade)",
+        "PII limitada a identificadores de colaboradores (LAN ID, nome)",
+        "Ambiente DEV/local — produção corporativa segue processo SI separado"
+      ]
+    },
+    {
+      "id": "PRES-03",
+      "title": "Controles implementados",
+      "bullets": [
+        "Login obrigatório para rotas do portal",
+        "Escopo por grupo (Brasília / São Carlos / Global) em módulos sensíveis",
+        "can_sync restrito a liderança global para importações destrutivas",
+        "CSRF em mutações; sessão com cookie SameSite=Lax",
+        "SyncAuditLog para rastreio de importações de Falhas"
+      ]
+    },
+    {
+      "id": "PRES-04",
+      "title": "Riscos conhecidos e mitigação",
+      "bullets": [
+        "Sync de Falhas é destrutivo — mitigado por backup da planilha e audit log",
+        "Servidor único sem HA — aceito para intranet local",
+        "DEBUG pode estar ativo em DEV — não usar mesma config em produção",
+        "REST framework com AllowAny global — endpoints sensíveis protegem individualmente"
+      ]
+    },
+    {
+      "id": "PRES-05",
+      "title": "Evidências anexáveis",
+      "bullets": [
+        "Relatório exportável deste console (botão Baixar pacote de governança)",
+        "Resultado do scan automático com data/hora",
+        "Console Ops: inventário de módulos e health checks",
+        "Documentação versionada no repositório (guias e revisões técnicas)"
+      ]
+    }
+  ],
+  "governance": [
+    {
+      "id": "GOV-AUTH",
+      "category": "Autenticação e autorização",
+      "title": "Acesso autenticado ao portal",
+      "description": "Usuários não autenticados não devem acessar dados operacionais.",
+      "evidence": "Rotas Vue com requiresAuth; APIs sensíveis com IsAuthenticated",
+      "status": "implemented",
+      "auto_check": "unauth_sensitive_endpoints"
+    },
+    {
+      "id": "GOV-SCOPE",
+      "category": "Autenticação e autorização",
+      "title": "Escopo por unidade (BSB/SC/Global)",
+      "description": "Dados de Falhas e Produtividade filtrados por grupo do usuário.",
+      "evidence": "apps.falhas_criticas.scoping.get_user_scope",
+      "status": "implemented",
+      "auto_check": null
+    },
+    {
+      "id": "GOV-SYNC",
+      "category": "Integridade de dados",
+      "title": "Controle de importação destrutiva",
+      "description": "Apenas can_sync pode importar planilha de Falhas; ação registrada em audit log.",
+      "evidence": "SyncAuditLog, permissão can_sync",
+      "status": "implemented",
+      "auto_check": null
+    },
+    {
+      "id": "GOV-CSRF",
+      "category": "Proteção web",
+      "title": "CSRF em operações de escrita",
+      "description": "Mutações via API exigem token CSRF na sessão autenticada.",
+      "evidence": "CsrfViewMiddleware, auth/csrf endpoint",
+      "status": "implemented",
+      "auto_check": "csrf_configured"
+    },
+    {
+      "id": "GOV-SESSION",
+      "category": "Proteção web",
+      "title": "Cookies de sessão",
+      "description": "Sessão com SameSite; Secure recomendado em HTTPS.",
+      "evidence": "SESSION_COOKIE_SAMESITE, SESSION_COOKIE_SECURE",
+      "status": "partial",
+      "auto_check": "session_cookie_flags"
+    },
+    {
+      "id": "GOV-DEBUG",
+      "category": "Configuração",
+      "title": "DEBUG desabilitado em produção",
+      "description": "DEBUG=True expõe stack traces e informações internas.",
+      "evidence": "settings.DEBUG",
+      "status": "review",
+      "auto_check": "debug_enabled"
+    },
+    {
+      "id": "GOV-SECRET",
+      "category": "Configuração",
+      "title": "SECRET_KEY forte e não versionada",
+      "description": "Chave secreta única por ambiente, via variável de ambiente.",
+      "evidence": ".env / SECRET_KEY",
+      "status": "review",
+      "auto_check": "weak_secret_key"
+    },
+    {
+      "id": "GOV-CORS",
+      "category": "Configuração",
+      "title": "CORS restrito",
+      "description": "Origens permitidas limitadas ao frontend do portal.",
+      "evidence": "CORS_ALLOWED_ORIGINS",
+      "status": "implemented",
+      "auto_check": "cors_permissive"
+    },
+    {
+      "id": "GOV-HOSTS",
+      "category": "Configuração",
+      "title": "ALLOWED_HOSTS definido",
+      "description": "Hosts aceitos explicitamente configurados.",
+      "evidence": "ALLOWED_HOSTS",
+      "status": "implemented",
+      "auto_check": "allowed_hosts_wildcard"
+    },
+    {
+      "id": "GOV-LOG",
+      "category": "Rastreabilidade",
+      "title": "Trilha de importações",
+      "description": "Importações de Falhas registram usuário, arquivo e resultado.",
+      "evidence": "SyncAuditLog",
+      "status": "implemented",
+      "auto_check": null
+    },
+    {
+      "id": "GOV-DATA",
+      "category": "Privacidade",
+      "title": "Classificação de dados documentada",
+      "description": "Escopo de PII e dados operacionais descrito para SI.",
+      "evidence": "Seção Apresentação deste registry",
+      "status": "implemented",
+      "auto_check": null
+    },
+    {
+      "id": "GOV-BACKUP",
+      "category": "Continuidade",
+      "title": "Backup de planilhas fonte",
+      "description": "Planilhas Excel mantidas fora do banco; backup manual antes de sync.",
+      "evidence": "guia-operacao-servidor.md",
+      "status": "partial",
+      "auto_check": null
+    },
+    {
+      "id": "GOV-HEADERS",
+      "category": "Proteção web",
+      "title": "Security headers HTTP",
+      "description": "X-Frame-Options e X-Content-Type-Options nas respostas da API.",
+      "evidence": "SecurityMiddleware Django",
+      "status": "implemented",
+      "auto_check": "security_headers"
+    },
+    {
+      "id": "GOV-SYNC-POST",
+      "category": "Integridade de dados",
+      "title": "Upload de Falhas bloqueado para anônimos",
+      "description": "POST em sync/upload não aceita requisição sem autenticação.",
+      "evidence": "/api/v1/falhas/sync/upload/",
+      "status": "implemented",
+      "auto_check": "sync_post_protected"
+    },
+    {
+      "id": "GOV-OPS-HEALTH",
+      "category": "Operação",
+      "title": "Health check Console Ops",
+      "description": "Última validação técnica do portal registrada e revisada.",
+      "evidence": "documentation/psa-live-report.json",
+      "status": "partial",
+      "auto_check": "ops_health_ok"
+    }
+  ],
+  "manual_risks": [
+    {
+      "id": "CYBER-M-001",
+      "title": "Ambiente local sem hardening corporativo",
+      "severity": "medium",
+      "impact": "Servidor Windows operado pela equipe; não passou por baseline SI de datacenter",
+      "mitigation": "Manter intranet; documentar no PSA Cyber; seguir checklist SI formal",
+      "status": "open",
+      "source": "manual",
+      "owner": "ADM"
+    },
+    {
+      "id": "CYBER-M-002",
+      "title": "Dados de colaboradores no portal",
+      "severity": "medium",
+      "impact": "LAN ID e nomes em Agents, Falhas e Produtividade",
+      "mitigation": "Acesso autenticado; escopo por unidade; não exportar sem necessidade",
+      "status": "accepted",
+      "source": "manual",
+      "owner": "ADM"
+    }
+  ],
+  "documents": [
+    {
+      "id": "guia-operacao",
+      "label": "Guia de operação do servidor",
+      "path": "documentation/guia-operacao-servidor.md",
+      "kind": "doc"
+    },
+    {
+      "id": "guia-tecnico",
+      "label": "Guia técnico",
+      "path": "documentation/technical-guide.md",
+      "kind": "doc"
+    },
+    {
+      "id": "revisao-falhas",
+      "label": "Revisão Falhas Críticas no portal",
+      "path": "documentation/revisao-falhas-criticas-portal.md",
+      "kind": "doc"
+    },
+    {
+      "id": "qa-fase25",
+      "label": "QA Fase 2.5 — aceite",
+      "path": "documentation/fase25-qa-aceite.md",
+      "kind": "doc"
+    },
+    {
+      "id": "portal-ops-report",
+      "label": "Último health check do portal",
+      "path": "documentation/psa-live-report.json",
+      "kind": "report"
+    },
+    {
+      "id": "cyber-findings",
+      "label": "Último scan PSA Cyber",
+      "path": "documentation/cyber-psa-findings.json",
+      "kind": "report"
+    }
+  ]
+}

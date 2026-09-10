@@ -1,0 +1,87 @@
+from django.urls import path
+
+from apps.falhas_criticas.views.me import MeView
+from apps.falhas_criticas.views.analytics import (
+    AgentDetailView,
+    AlertsView,
+    ChartsView,
+    ClientesWorkflowsView,
+    ComparativoBsbScView,
+    ConsolidadoView,
+    ContestacoesView,
+    DashboardSummaryView,
+    DiagnosticoSummaryView,
+    FailureCasesView,
+    ReincidenceSummaryView,
+    DashboardKPIsView,
+    ExecutiveView,
+    FilterOptionsView,
+    MatrixHeatmapView,
+    RankDeltaView,
+    ReincidenceByTurnoView,
+    ReincidenceListView,
+    SupportStatsView,
+    TreinamentosAgenteView,
+    TreinamentosResumoMesView,
+    TreinamentosView,
+    Ult3mView,
+)
+from apps.falhas_criticas.views.exports import (
+    ExecutiveDownloadView,
+    ExecutiveHistoryDownloadView,
+    ExecutiveHistoryView,
+    ExportFailuresCsvView,
+    ExportReincidenciaXlsxView,
+)
+from apps.falhas_criticas.views.base_overview import BaseOverviewView
+from apps.falhas_criticas.views.sync import SyncDatabaseView
+from apps.falhas_criticas.views.sync_history import SyncImportListView
+from apps.falhas_criticas.views.sync_upload import SyncUploadView
+from apps.falhas_criticas.views.tickets import (
+    TicketCommentView,
+    TicketDetailView,
+    TicketListCreateView,
+    TicketSyncView,
+    TicketTransitionView,
+)
+
+urlpatterns = [
+    path('me/', MeView.as_view(), name='me'),
+    path('base-overview/', BaseOverviewView.as_view(), name='base-overview'),
+    path('filters/', FilterOptionsView.as_view(), name='filter-options'),
+    path('executive/', ExecutiveView.as_view(), name='executive'),
+    path('executive/download/', ExecutiveDownloadView.as_view(), name='executive-download'),
+    path('executive/history/', ExecutiveHistoryView.as_view(), name='executive-history'),
+    path('executive/history/<int:archive_id>/download/', ExecutiveHistoryDownloadView.as_view(), name='executive-history-download'),
+    path('alerts/', AlertsView.as_view(), name='alerts'),
+    path('export/failures.csv', ExportFailuresCsvView.as_view(), name='export-failures-csv'),
+    path('export/reincidencia.xlsx', ExportReincidenciaXlsxView.as_view(), name='export-reincidencia-xlsx'),
+    path('consolidado/', ConsolidadoView.as_view(), name='consolidado'),
+    path('rank-delta/', RankDeltaView.as_view(), name='rank-delta'),
+    path('reincidence-by-turno/', ReincidenceByTurnoView.as_view(), name='reincidence-by-turno'),
+    path('clientes-workflows/', ClientesWorkflowsView.as_view(), name='clientes-workflows'),
+    path('ult3m/', Ult3mView.as_view(), name='ult3m'),
+    path('treinamentos/', TreinamentosView.as_view(), name='treinamentos'),
+    path('treinamentos/resumo-mes/', TreinamentosResumoMesView.as_view(), name='treinamentos-resumo-mes'),
+    path('treinamentos/agente/<str:matricula>/', TreinamentosAgenteView.as_view(), name='treinamentos-agente'),
+    path('comparativo-bsb-sc/', ComparativoBsbScView.as_view(), name='comparativo-bsb-sc'),
+    path('contestacoes/', ContestacoesView.as_view(), name='contestacoes'),
+    path('dashboard-summary/', DashboardSummaryView.as_view(), name='dashboard-summary'),
+    path('diagnostico/', DiagnosticoSummaryView.as_view(), name='diagnostico-summary'),
+    path('cases/', FailureCasesView.as_view(), name='failure-cases'),
+    path('reincidence-summary/', ReincidenceSummaryView.as_view(), name='reincidence-summary'),
+    path('kpis/', DashboardKPIsView.as_view(), name='dashboard-kpis'),
+    path('charts/', ChartsView.as_view(), name='dashboard-charts'),
+    path('reincidence/', ReincidenceListView.as_view(), name='reincidence-list'),
+    path('agent/<str:matricula>/', AgentDetailView.as_view(), name='agent-detail'),
+    path('matrix/', MatrixHeatmapView.as_view(), name='matrix-heatmap'),
+    path('support/', SupportStatsView.as_view(), name='support-stats'),
+    path('sync/', SyncDatabaseView.as_view(), name='sync-database'),
+    path('sync/upload/', SyncUploadView.as_view(), name='sync-upload'),
+    path('sync/imports/', SyncImportListView.as_view(), name='sync-imports'),
+    path('tickets/', TicketListCreateView.as_view(), name='tickets-list'),
+    path('tickets/<int:ticket_id>/', TicketDetailView.as_view(), name='tickets-detail'),
+    path('tickets/<int:ticket_id>/comments/', TicketCommentView.as_view(), name='tickets-comments'),
+    path('tickets/<int:ticket_id>/sync/', TicketSyncView.as_view(), name='tickets-sync'),
+    path('tickets/<int:ticket_id>/transition/', TicketTransitionView.as_view(), name='tickets-transition'),
+]

@@ -23,6 +23,56 @@ cd C:\PPLID\ops\ops-console
 python server.py C:\PPLID\ops\config\env.config.json
 ```
 
+## Atualizar o console
+
+Na **Visão geral**, use o botão **Verificar atualização**. O console consulta o repositório ops no GitHub; se houver nova versão, pede confirmação, executa `git pull`, reinstala dependências Python se necessário e reinicia automaticamente.
+
+Alternativa manual:
+
+```powershell
+cd C:\PPLID\ops
+git pull
+powershell -ExecutionPolicy Bypass -File .\start_ops_console.ps1 -Restart
+```
+
+## Cópia local para desenvolvimento
+
+No clone local deste repositório, use o modo isolado:
+
+```powershell
+cd C:\caminho\PPLID-server-ops
+powershell -ExecutionPolicy Bypass -File .\start_ops_console.ps1 -Local
+```
+
+Para executar os bots usando um checkout local do PPLID, informe a pasta que
+contém `backend` e `automacoes`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start_ops_console.ps1 -Local `
+  -PplidDir C:\Users\c93123a\PPLID -Restart
+```
+
+Depois publique o runtime em **Automações**. Somente então o botão **Validar
+Okta** ficará disponível. O checkout também precisa ter as dependências do
+backend e um PostgreSQL acessível pelo `config/machine.config.local.json` e
+pelos arquivos `deploy\<AMBIENTE>\shared\backend.env` locais.
+
+Na primeira execução, o launcher cria automaticamente:
+
+- `config/env.config.local.json`, a partir do exemplo;
+- `config/machine.config.local.json`;
+- `.local/`, contendo logs, repositórios e runtime dos testes;
+- `ops-console/.venv`, com as dependências Python.
+
+O console local escuta somente em `127.0.0.1:5191`, portanto não conflita com a
+instância do servidor (`5190`) e não expõe a máquina na rede. Acesse
+`http://localhost:5191` (usuário inicial `admin1`, senha `admin`).
+
+Essa instância é independente: ela monitora apenas os processos, arquivos e
+bancos configurados no computador local. Para mudar a porta ou os ambientes,
+edite `config/env.config.local.json`; para apontar os repositórios locais,
+ajuste `baseDir` em `config/machine.config.local.json`.
+
 ## Bloqueio por senha
 
 O console inicia **bloqueado** (`opsConsole.startLocked` em `env.config.json`). É preciso desbloquear para ver dados.
@@ -150,6 +200,25 @@ cd C:\PPLID\ops\ops-console
 python -m pytest tests/
 ```
 
-## Dados
+## Automações resilientes (piloto)
+
+A rota `/automations` opera os bots **Produção (H/H)** e **Rotina diária** fora da
+árvore de releases. Antes do primeiro uso, publique manualmente uma release
+MAIN, DEV ou HOM, escolha separadamente o banco de destino, valide as credenciais
+Okta e inicie o bot.
+
+Cada publicação cria um bundle imutável em
+`C:\PPLID\ops\data\automation-runtime\bundles`. O supervisor recebe a marca
+`--pplid-supervised`, portanto a limpeza de órfãos do deploy preserva a execução.
+Banco e versão ficam congelados no início do run; mudar o seletor afeta apenas
+execuções futuras. Publicação e rollback ficam bloqueados enquanto um bot do
+piloto estiver ativo.
+
+Credenciais são transmitidas apenas pelo ambiente do processo e não são gravadas
+em configurações, estado, logs ou auditoria. O diretório pode ser sobrescrito em
+`machine.config.json` por `automationRuntime.root`.
+
+Arquivos `.env` nunca são copiados para os bundles. O supervisor carrega o arquivo
+autoritativo `deploy\<ENV>\shared\backend.env` do banco congelado no início do run.
 
 O arquivo `deploy-status.json` (em `C:\PPLID\logs\`) é atualizado pelos scripts de deploy e sync. O console cruza com `/api/v1/health/` de cada ambiente.

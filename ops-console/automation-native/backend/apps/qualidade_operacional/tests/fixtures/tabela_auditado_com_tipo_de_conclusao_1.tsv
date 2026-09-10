@@ -1,0 +1,3 @@
+Data	Data análise	ID_Cliente	ID_Workflow	Tipo de análise	Matricula	Matricula auditor	Protocolo	Cenário	Etapa	STATUS	IRREGULARIDADES_APONTADAS	Cadastrado anteriormente	ID_Operations	Resultado Origem	Resultado Destino	Protocolo Destino	Tipo de conclusão
+01/04/2025	01/04/2025	6	144	G Auditoria	c93460a	c92898a	45008984	Não se aplica	Análise Visual	Não se aplica	Não se aplica	Não se aplica	647	SEM RISCO APARENTE	SEM RISCO APARENTE	8585174	MANUAL
+20/02/2025	20/02/2025	6	245	G Auditoria			44386851	Não se aplica			Não se aplica	Não se aplica	647				AUTOMATICO

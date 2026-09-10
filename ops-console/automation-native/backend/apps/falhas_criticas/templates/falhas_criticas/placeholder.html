@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Falhas Críticas — PPLID</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; background: #f8fafc; }
+    .card { max-width: 36rem; padding: 1.5rem 2rem; background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+    h1 { margin: 0 0 .5rem; font-size: 1.5rem; color: #0f766e; }
+    p { margin: .5rem 0; line-height: 1.5; color: #475569; }
+    a { color: #2563eb; }
+    .badge { display: inline-block; margin-top: 1rem; padding: .25rem .75rem; background: #ecfdf5; color: #047857; border-radius: 999px; font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Falhas Críticas</h1>
+    <p>Olá, <strong>{{ display_name }}</strong>. Você está autenticado pela sessão do PPLID.</p>
+    <p>O painel completo (sync Excel, KPIs, filtros) será integrado nas próximas fases desta migração.</p>
+    <span class="badge">Módulo em integração — Fase 0</span>
+    <p style="margin-top:1.5rem"><a href="{{ pplid_home_url }}">← Voltar ao PPLID</a></p>
+  </div>
+</body>
+</html>

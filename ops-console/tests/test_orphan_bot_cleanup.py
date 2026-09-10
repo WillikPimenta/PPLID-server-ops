@@ -80,5 +80,11 @@ class OrphanBotCleanupTests(unittest.TestCase):
         self.assertEqual(result["items"], [])
 
 
+    def test_orphan_manager_preserves_supervised_marker(self) -> None:
+        script = Path(__file__).resolve().parents[2] / "lib" / "orphan_bot_manager.ps1"
+        text = script.read_text(encoding="utf-8", errors="replace")
+        self.assertTrue("pplid[_-]supervised" in text or "pplid-supervised" in text)
+
+
 if __name__ == "__main__":
     unittest.main()

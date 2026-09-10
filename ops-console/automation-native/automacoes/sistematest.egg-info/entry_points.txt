@@ -1,0 +1,4 @@
+[console_scripts]
+sistematest-runner = app.orchestration.robot_runner:main
+sistematest-web = run:main
+sistematest-web-bg = web_background:main

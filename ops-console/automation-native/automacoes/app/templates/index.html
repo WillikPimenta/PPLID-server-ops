@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Painel de Automação</title>
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='img/icon_barrasuperior.png') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <h1>Sistema de Automação</h1>
+      <p>Interface web para iniciar, parar e monitorar robôs via Flask.</p>
+    </header>
+
+    <section class="panel credentials-panel">
+      <h2>Credenciais</h2>
+      <div class="credentials-grid">
+        <label class="checkline credentials-checkline" for="show-okta-validator">
+          <input id="show-okta-validator" type="checkbox" checked />
+          Exibir validador Okta
+        </label>
+
+        <label for="matricula">Matrícula</label>
+        <input id="matricula" type="text" placeholder="Ex: c12345a" required />
+
+        <label for="senha">Senha</label>
+        <input id="senha" type="password" placeholder="Digite a senha" required />
+
+        <div id="okta-validator-block" class="okta-validator-block">
+          <div class="credentials-actions">
+            <button id="validate-credentials-btn" class="btn" type="button" onclick="validateCredentials()">Validar credenciais</button>
+            <p id="credentials-status" class="credentials-status">Status: não validado</p>
+          </div>
+          <label class="checkline credentials-checkline" for="okta-validate-show-browser">
+            <input id="okta-validate-show-browser" type="checkbox" checked />
+            Exibir navegador na validação Okta
+          </label>
+        </div>
+
+        <!-- Container para seleção de tarefas: será renderizado dentro do modal de configuração do robô -->
+
+
+        <p id="credentials-help" class="credentials-help">Preencha matrícula e senha, valide no Okta e então os botões de início serão liberados.</p>
+      </div>
+    </section>
+
+    {% macro robot_card(mode, legacy=false) %}
+      <article class="robot-card{% if legacy %} robot-card--legacy{% endif %}" data-mode="{{ mode }}">
+        <button
+          class="config-trigger"
+          type="button"
+          title="Configurar robô"
+          onclick="openRobotConfig('{{ mode }}')"
+        >⚙</button>
+        <h3>{{ mode_labels[mode] }}</h3>
+        <p class="config-summary" id="config-summary-{{ mode }}">Configuração: padrão</p>
+
+        <div class="robot-exec-panel">
+          <div class="robot-status-top">
+            <p class="status" id="status-{{ mode }}">Estado: parado</p>
+            <p class="robot-pid" id="pid-{{ mode }}">PID: -</p>
+          </div>
+
+          <div class="robot-progress-block">
+            <div class="robot-progress-head">
+              <span class="robot-progress-label">Progresso</span>
+              <span class="robot-progress-pct" id="progress-pct-{{ mode }}">0%</span>
+            </div>
+            <div class="robot-progress-track" aria-label="Progresso do robô {{ mode_labels[mode] }}">
+              <div class="robot-progress-fill" id="progress-bar-{{ mode }}" style="width: 0%"></div>
+            </div>
+            <p class="robot-progress-text" id="progress-text-{{ mode }}">Aguardando execução</p>
+          </div>
+
+          <p class="execution-meta" id="exec-{{ mode }}">Última execução: sem histórico.</p>
+          <p class="robot-updated" id="updated-{{ mode }}">Atualizado: -</p>
+        </div>
+
+        <div class="actions">
+          <button class="btn" data-action="start" onclick="startRobot('{{ mode }}')" disabled title="Preencha matrícula e senha para iniciar o robô.">Iniciar</button>
+          <button class="btn btn-danger" data-action="stop" onclick="stopRobot('{{ mode }}')" disabled>Parar</button>
+        </div>
+      </article>
+    {% endmacro %}
+
+    <section class="panel robots-grid">
+      {% for mode in modes_primary %}
+      {{ robot_card(mode) }}
+      {% endfor %}
+    </section>
+
+    {% if modes_legacy %}
+    <section class="panel robots-legacy-panel">
+      <details class="robots-legacy-details">
+        <summary class="robots-legacy-summary">Legados</summary>
+        <p class="robots-legacy-help">Robôs mantidos para compatibilidade. Prefira os da grade principal.</p>
+        <div class="robots-grid robots-grid--legacy">
+          {% for mode in modes_legacy %}
+          {{ robot_card(mode, legacy=true) }}
+          {% endfor %}
+        </div>
+      </details>
+    </section>
+    {% endif %}
+
+    <section class="footer-actions">
+      <button id="stop-all-btn" class="btn btn-danger" onclick="stopAllRobots()">Parar todos</button>
+      <a href="{{ url_for('web.sobre') }}" class="btn btn-ghost">Sobre</a>
+    </section>
+
+    <p class="feedback" id="feedback"></p>
+
+    <div id="robot-config-modal" class="modal" hidden>
+      <div class="modal-backdrop" onclick="closeRobotConfig()"></div>
+      <div class="modal-dialog modal-dialog--config" role="dialog" aria-modal="true" aria-labelledby="robot-config-title">
+        <h3 id="robot-config-title">Configuração do robô</h3>
+        <p id="robot-config-mode" class="modal-subtitle"></p>
+
+        <div class="modal-dialog-body">
+          <nav class="config-tabs" role="tablist" aria-label="Seções de configuração">
+            <button type="button" role="tab" class="config-tab is-active" data-tab="execucao" id="robot-config-tab-execucao-btn" aria-selected="true" aria-controls="robot-config-tab-execucao">Execução</button>
+            <button type="button" role="tab" class="config-tab" data-tab="pastas" id="robot-config-tab-pastas-btn" aria-selected="false" aria-controls="robot-config-tab-pastas">Pastas e links</button>
+            <button type="button" role="tab" class="config-tab" data-tab="opcoes" id="robot-config-tab-opcoes-btn" aria-selected="false" aria-controls="robot-config-tab-opcoes">Opções</button>
+            <button type="button" role="tab" class="config-tab" data-tab="logs" id="robot-config-tab-logs-btn" aria-selected="false" aria-controls="robot-config-tab-logs">Logs</button>
+          </nav>
+
+          <div class="config-tab-panels">
+            <div role="tabpanel" id="robot-config-tab-execucao" class="config-tab-panel is-active" aria-labelledby="robot-config-tab-execucao-btn">
+              <div class="config-section-body">
+                <label class="checkline" for="robot-config-headless">
+                  <input id="robot-config-headless" type="checkbox" />
+                  Executar em modo headless
+                </label>
+
+                <label for="robot-config-workers">Máximo de workers (opcional)</label>
+                <input id="robot-config-workers" type="number" min="1" max="5" placeholder="Vazio = automático" />
+              </div>
+            </div>
+
+            <div role="tabpanel" id="robot-config-tab-pastas" class="config-tab-panel" aria-labelledby="robot-config-tab-pastas-btn" hidden>
+              <div class="config-section-body">
+                <label for="robot-config-output-dir">Pasta final dos arquivos</label>
+                <div class="path-picker-row">
+                  <input id="robot-config-output-dir" type="text" readonly placeholder="Clique em Procurar..." />
+                  <button class="btn btn-ghost" type="button" onclick="browseRobotOutputDir()">Procurar...</button>
+                  <button class="btn btn-ghost" type="button" onclick="clearRobotOutputDir()">Limpar</button>
+                </div>
+
+                <div id="robot-config-sharepoint-block">
+                  <label>Links SharePoint</label>
+                  <div id="robot-config-sharepoint-folders" class="sharepoint-folders-list"></div>
+                  <p class="credentials-help">Use estes links para acessar as pastas do bot em outro PC, mesmo sem a sincronização local do SharePoint.</p>
+                </div>
+              </div>
+            </div>
+
+            <div role="tabpanel" id="robot-config-tab-opcoes" class="config-tab-panel" aria-labelledby="robot-config-tab-opcoes-btn" hidden>
+              <div class="config-section-body">
+                <p id="robot-config-no-options" class="config-empty-hint" hidden>
+                  Este robô não possui opções adicionais nesta tela.
+                </p>
+
+                <div id="robot-config-rotina-options" class="config-mode-panel" hidden>
+                  <!-- Sem atributo for: o input já está dentro do label (evita double-toggle). -->
+                  <label class="checkline" id="robot-config-imediata-label">
+                    <input id="robot-config-imediata" type="checkbox" />
+                    <span>Executar rotina imediatamente</span>
+                  </label>
+
+                  <label for="robot-config-data-inicio">Período da rotina (início)</label>
+                  <input id="robot-config-data-inicio" type="date" disabled />
+
+                  <label for="robot-config-data-fim">Período da rotina (fim)</label>
+                  <input id="robot-config-data-fim" type="date" disabled />
+
+                  <p class="credentials-help">No modo imediato, o período pode ser qualquer intervalo válido e o robô processará um dia por vez.</p>
+
+                  <div id="robot-config-tarefas-container" style="display: none;"></div>
+                </div>
+
+                <div id="robot-config-ged-options" class="config-mode-panel config-choice-group" hidden>
+                  <p class="config-choice-title">Download imediato ao iniciar (GED)</p>
+                  <div class="config-choice-buttons">
+                    <label class="config-choice-btn" for="robot-config-ged-imediata-auto">
+                      <input id="robot-config-ged-imediata-auto" type="radio" name="robot-config-ged-imediata" value="" checked />
+                      Padrão
+                    </label>
+                    <label class="config-choice-btn" for="robot-config-ged-imediata-diurno">
+                      <input id="robot-config-ged-imediata-diurno" type="radio" name="robot-config-ged-imediata" value="diurno" />
+                      Diurno
+                    </label>
+                    <label class="config-choice-btn" for="robot-config-ged-imediata-noturno">
+                      <input id="robot-config-ged-imediata-noturno" type="radio" name="robot-config-ged-imediata" value="noturno" />
+                      Noturno
+                    </label>
+                  </div>
+                  <p class="credentials-help">Escolha qual ciclo o GED deve executar imediatamente ao iniciar. Depois disso, o robô volta para o agendamento normal.</p>
+                </div>
+
+                <div id="robot-config-production-options" class="config-mode-panel" hidden>
+                  <label for="robot-config-production-dias-brflow">Dias para baixar do BRFlow</label>
+                  <input
+                    id="robot-config-production-dias-brflow"
+                    type="number"
+                    min="1"
+                    max="31"
+                    step="1"
+                    value="3"
+                  />
+                  <p class="credentials-help">
+                    Quantidade de dias incluídos em cada ciclo da Produção H/H, contando hoje. Padrão: 3 dias.
+                  </p>
+                </div>
+
+                <div id="robot-config-replicacao-options" class="config-mode-panel config-choice-group" hidden>
+                  <div class="config-replicacao-layout">
+                    <div class="config-subgroup">
+                      <p class="config-choice-title">Execução</p>
+                      <div class="config-grid-2">
+                        <label class="checkline" for="robot-config-replicacao-apenas-planejamento" title="Gera CSVs e resumos sem abrir o Chrome">
+                          <input id="robot-config-replicacao-apenas-planejamento" type="checkbox" />
+                          Apenas planejamento (sem BRFlow)
+                        </label>
+
+                        <label class="checkline" for="robot-config-replicacao-gerar-novo-plano" title="Ignora execução anterior e gera novo plano">
+                          <input id="robot-config-replicacao-gerar-novo-plano" type="checkbox" />
+                          Gerar novo plano
+                        </label>
+
+                        <label class="checkline" for="robot-config-replicacao-forcar-reexecucao" title="Reprocessa workflows já com upload OK">
+                          <input id="robot-config-replicacao-forcar-reexecucao" type="checkbox" />
+                          Forçar reexecução
+                        </label>
+
+                        <label class="checkline" for="robot-config-replicacao-apenas-pendentes" title="No Selenium, ignora workflows já concluídos no JSON de estado">
+                          <input id="robot-config-replicacao-apenas-pendentes" type="checkbox" checked />
+                          Apenas pendentes
+                        </label>
+                      </div>
+
+                      <label for="robot-config-replicacao-run-id">Run ID</label>
+                      <input
+                        id="robot-config-replicacao-run-id"
+                        type="text"
+                        placeholder="Ex.: 20260527_143052 (vazio = automático)"
+                        title="Identificador da execução para retomar ou amarrar planejamento + Selenium"
+                      />
+                    </div>
+
+                    <div class="config-subgroup">
+                      <p class="config-choice-title">Planejamento / amostra</p>
+
+                      <label class="checkline" for="robot-config-replicacao-usar-escala" title="capacidade = auditores × meta; amostra ajustada proporcional à soma diária">
+                        <input id="robot-config-replicacao-usar-escala" type="checkbox" checked />
+                        Aplicar escala de auditores (fórmula Excel)
+                      </label>
+
+                      <label for="robot-config-replicacao-auditores-ativos">Auditores ativos (opcional)</label>
+                      <input
+                        id="robot-config-replicacao-auditores-ativos"
+                        type="number"
+                        min="1"
+                        placeholder="Vazio = OneDrive …/brflow-auditoria-replic/escala/"
+                        title="Sobrescreve o CSV; padrão: brflow-auditoria-replic/config/escala/escala_auditores.csv (colunas data e auditores_ativos)"
+                      />
+
+                      <label for="robot-config-replicacao-meta-produ">Meta Produ (diária)</label>
+                      <input
+                        id="robot-config-replicacao-meta-produ"
+                        type="number"
+                        min="1"
+                        step="1"
+                        value="300"
+                        placeholder="300"
+                        title="Prioridade: valor do modal; se vazio, lê Meta Produ (diária) do Excel (bloco resumo A/B)"
+                      />
+
+                      <div class="config-grid-2">
+                        <label class="checkline" for="robot-config-replicacao-excluir-historico" title="Remove protocolos já usados em execuções anteriores">
+                          <input id="robot-config-replicacao-excluir-historico" type="checkbox" checked />
+                          Excluir protocolos do histórico
+                        </label>
+
+                        <label class="checkline" for="robot-config-replicacao-sobrescrever" title="Reutiliza pasta legada protocolos/YYYYMMDD do dia">
+                          <input id="robot-config-replicacao-sobrescrever" type="checkbox" />
+                          Sobrescrever pasta do dia
+                        </label>
+
+                        <label class="checkline" for="robot-config-replicacao-fallback-parquet" title="Usa o último parquet disponível se D-1 não existir">
+                          <input id="robot-config-replicacao-fallback-parquet" type="checkbox" />
+                          Fallback último parquet
+                        </label>
+                      </div>
+
+                      <label for="robot-config-replicacao-dias-historico">Dias de histórico</label>
+                      <input
+                        id="robot-config-replicacao-dias-historico"
+                        type="number"
+                        min="1"
+                        max="365"
+                        value="30"
+                        title="Janela em dias para varrer protocolos e planos anteriores"
+                      />
+
+                      <label for="robot-config-replicacao-workflows-amostra-100">Workflows amostra 100%</label>
+                      <input
+                        id="robot-config-replicacao-workflows-amostra-100-search"
+                        type="search"
+                        class="config-search-input"
+                        placeholder="Pesquisar workflow ou cliente..."
+                      />
+                      <select
+                        id="robot-config-replicacao-workflows-amostra-100"
+                        class="config-multiselect"
+                        multiple
+                        size="7"
+                      ></select>
+                      <p class="config-field-help">
+                        Segure Ctrl (ou Cmd) para selecionar vários. Força pegar 100% dos protocolos disponíveis no D-1
+                        (respeita exclusão por histórico).
+                      </p>
+
+                      <label for="robot-config-replicacao-seed">Seed da amostra</label>
+                      <input id="robot-config-replicacao-seed" type="number" min="0" value="42" />
+
+                      <label for="robot-config-replicacao-data-ref">Data referência parquet (YYYYMMDD)</label>
+                      <input
+                        id="robot-config-replicacao-data-ref"
+                        type="text"
+                        maxlength="8"
+                        placeholder="Vazio = D-1 automático"
+                        title="Força qual parquet D-1 usar no planejamento"
+                      />
+
+                      <p class="config-choice-title">Filtros BRFlow (pesquisa)</p>
+                      <label for="robot-config-replicacao-cliente-cod">Código cliente destino</label>
+                      <input id="robot-config-replicacao-cliente-cod" type="text" value="751" title="Valor do select Cliente Destino" />
+
+                      <label for="robot-config-replicacao-workflow-cod">Código workflow destino</label>
+                      <input id="robot-config-replicacao-workflow-cod" type="text" value="17047" title="Valor do select WorkFlow Destino" />
+                    </div>
+                  </div>
+
+                  <div class="config-subgroup">
+                    <p class="config-choice-title">Pré-voo e execuções</p>
+                    <button type="button" id="robot-config-replicacao-validar-plano" class="secondary-btn">
+                      Validar plano (sem BRFlow)
+                    </button>
+                    <pre id="robot-config-replicacao-validar-resultado" class="config-validar-resultado" hidden></pre>
+                    <ul id="robot-config-replicacao-runs-list" class="config-runs-list"></ul>
+                  </div>
+
+                  <p class="credentials-help">
+                    Fluxo sugerido: rode com &quot;Apenas planejamento&quot;, anote o Run ID gerado e depois execute o Selenium com o mesmo Run ID para retomar pendentes.
+                    No Excel, use <strong>Workflow</strong> (tela BRFlow) e <strong>Workflow d-1</strong> (parquet).
+                  </p>
+                </div>
+
+                <div id="robot-config-replicacao-d1-options" class="config-mode-panel config-choice-group" hidden>
+                  <div class="config-replicacao-layout">
+                    <div class="config-subgroup">
+                      <p class="config-choice-title">Execução</p>
+                      <div class="config-grid-2">
+                        <label class="checkline" for="robot-config-replicacao-d1-apenas-planejamento">
+                          <input id="robot-config-replicacao-d1-apenas-planejamento" type="checkbox" />
+                          Apenas planejamento (sem BRFlow)
+                        </label>
+                        <label class="checkline" for="robot-config-replicacao-d1-gerar-novo-plano">
+                          <input id="robot-config-replicacao-d1-gerar-novo-plano" type="checkbox" />
+                          Gerar novo plano
+                        </label>
+                        <label class="checkline" for="robot-config-replicacao-d1-forcar-reexecucao">
+                          <input id="robot-config-replicacao-d1-forcar-reexecucao" type="checkbox" />
+                          Forçar reexecução
+                        </label>
+                        <label class="checkline" for="robot-config-replicacao-d1-apenas-pendentes">
+                          <input id="robot-config-replicacao-d1-apenas-pendentes" type="checkbox" checked />
+                          Apenas pendentes
+                        </label>
+                      </div>
+                      <label for="robot-config-replicacao-d1-run-id">Run ID</label>
+                      <input
+                        id="robot-config-replicacao-d1-run-id"
+                        type="text"
+                        placeholder="Ex.: 20260527_143052 (vazio = automático)"
+                      />
+                    </div>
+
+                    <div class="config-subgroup">
+                      <p class="config-choice-title">Planejamento D-1 (volumetria do parquet)</p>
+                      <label class="checkline" for="robot-config-replicacao-d1-usar-escala">
+                        <input id="robot-config-replicacao-d1-usar-escala" type="checkbox" checked />
+                        Aplicar escala de auditores (fórmula Excel)
+                      </label>
+                      <label for="robot-config-replicacao-d1-auditores-ativos">Auditores ativos (opcional)</label>
+                      <input
+                        id="robot-config-replicacao-d1-auditores-ativos"
+                        type="number"
+                        min="1"
+                        placeholder="Vazio = brflow-auditoria-replic-d1/config/escala/"
+                      />
+                      <label for="robot-config-replicacao-d1-meta-produ">Meta Produ (diária)</label>
+                      <input id="robot-config-replicacao-d1-meta-produ" type="number" min="1" step="1" value="300" />
+                      <div class="config-grid-2">
+                        <label class="checkline" for="robot-config-replicacao-d1-excluir-historico">
+                          <input id="robot-config-replicacao-d1-excluir-historico" type="checkbox" checked />
+                          Excluir protocolos do histórico
+                        </label>
+                        <label class="checkline" for="robot-config-replicacao-d1-sobrescrever">
+                          <input id="robot-config-replicacao-d1-sobrescrever" type="checkbox" />
+                          Sobrescrever pasta do dia
+                        </label>
+                        <label class="checkline" for="robot-config-replicacao-d1-fallback-parquet">
+                          <input id="robot-config-replicacao-d1-fallback-parquet" type="checkbox" checked />
+                          Fallback último parquet
+                        </label>
+                      </div>
+                      <label for="robot-config-replicacao-d1-dias-historico">Dias de histórico</label>
+                      <input id="robot-config-replicacao-d1-dias-historico" type="number" min="1" max="365" value="30" />
+                      <label for="robot-config-replicacao-d1-workflows-amostra-100">Workflows amostra 100%</label>
+                      <input
+                        id="robot-config-replicacao-d1-workflows-amostra-100-search"
+                        type="search"
+                        class="config-search-input"
+                        placeholder="Pesquisar workflow ou cliente..."
+                      />
+                      <select
+                        id="robot-config-replicacao-d1-workflows-amostra-100"
+                        class="config-multiselect"
+                        multiple
+                        size="7"
+                      ></select>
+                      <p class="config-field-help">
+                        Segure Ctrl (ou Cmd) para selecionar vários. Força pegar 100% dos protocolos disponíveis no D-1
+                        (respeita exclusão por histórico).
+                      </p>
+                      <p class="config-choice-title">Retenção de planos</p>
+                      <div class="config-grid-2">
+                        <label class="checkline" for="robot-config-replicacao-d1-limpar-planos-automatico">
+                          <input id="robot-config-replicacao-d1-limpar-planos-automatico" type="checkbox" />
+                          Limpar planos antigos automaticamente
+                        </label>
+                        <label class="checkline" for="robot-config-replicacao-d1-limpar-planos-ao-gerar">
+                          <input id="robot-config-replicacao-d1-limpar-planos-ao-gerar" type="checkbox" />
+                          Limpar ao gerar novo plano
+                        </label>
+                        <label class="checkline" for="robot-config-replicacao-d1-limpar-planos-apos-conclusao">
+                          <input id="robot-config-replicacao-d1-limpar-planos-apos-conclusao" type="checkbox" />
+                          Limpar após conclusão BRFlow
+                        </label>
+                      </div>
+                      <label for="robot-config-replicacao-d1-manter-planos-n">Manter últimos N planos</label>
+                      <input id="robot-config-replicacao-d1-manter-planos-n" type="number" min="1" max="50" value="5" />
+                      <label for="robot-config-replicacao-d1-dias-retencao-planos">Dias de retenção (0 = desativado)</label>
+                      <input id="robot-config-replicacao-d1-dias-retencao-planos" type="number" min="0" max="365" value="0" />
+                      <button type="button" id="robot-config-replicacao-d1-limpar-planos-btn" class="btn-secondary">
+                        Limpar planos antigos agora
+                      </button>
+                      <label for="robot-config-replicacao-d1-seed">Seed da amostra</label>
+                      <input id="robot-config-replicacao-d1-seed" type="number" min="0" value="42" />
+                      <label for="robot-config-replicacao-d1-data-ref">Data referência parquet (YYYYMMDD)</label>
+                      <input id="robot-config-replicacao-d1-data-ref" type="text" maxlength="8" placeholder="Vazio = D-1 automático" />
+                      <p class="config-choice-title">Filtros BRFlow (pesquisa)</p>
+                      <label for="robot-config-replicacao-d1-cliente-cod">Código cliente destino</label>
+                      <input id="robot-config-replicacao-d1-cliente-cod" type="text" value="751" />
+                      <label for="robot-config-replicacao-d1-workflow-cod">Código workflow destino</label>
+                      <input id="robot-config-replicacao-d1-workflow-cod" type="text" value="17047" />
+                    </div>
+                  </div>
+                  <div class="config-subgroup">
+                    <p class="config-choice-title">Pré-voo e execuções</p>
+                    <button type="button" id="robot-config-replicacao-d1-validar-plano" class="secondary-btn">
+                      Validar plano (sem BRFlow)
+                    </button>
+                    <div id="robot-config-replicacao-d1-validar-resultado" class="config-validar-resultado" hidden></div>
+                    <p class="config-choice-title config-choice-title--sub">Planos recentes — selecione para apagar</p>
+                    <div class="config-runs-toolbar" id="robot-config-replicacao-d1-runs-toolbar">
+                      <label class="checkline" for="robot-config-replicacao-d1-runs-select-all">
+                        <input id="robot-config-replicacao-d1-runs-select-all" type="checkbox" />
+                        Selecionar todos
+                      </label>
+                      <label class="checkline" for="robot-config-replicacao-d1-limpar-forcar">
+                        <input id="robot-config-replicacao-d1-limpar-forcar" type="checkbox" />
+                        Forçar (mesmo com pendências)
+                      </label>
+                      <label class="checkline" for="robot-config-replicacao-d1-remover-ledger">
+                        <input id="robot-config-replicacao-d1-remover-ledger" type="checkbox" />
+                        Remover consumo do ledger ao apagar
+                      </label>
+                      <button
+                        type="button"
+                        id="robot-config-replicacao-d1-apagar-selecionados-btn"
+                        class="secondary-btn"
+                      >
+                        Apagar planos selecionados
+                      </button>
+                    </div>
+                    <ul id="robot-config-replicacao-d1-runs-list" class="config-runs-list config-runs-list--selectable"></ul>
+                  </div>
+                  <div class="config-subgroup">
+                    <p class="config-choice-title config-choice-title--sub">Controle mensal de balanceamento por workflow</p>
+                    <p class="credentials-help">Estes limites são usados somente para redirecionar a redistribuição. Não são metas analíticas.</p>
+                    <div class="config-meta-mensal-toolbar">
+                      <label for="robot-config-replicacao-d1-meta-ano-mes">Mês (YYYY-MM)</label>
+                      <input id="robot-config-replicacao-d1-meta-ano-mes" type="text" placeholder="2026-06" maxlength="7" />
+                      <button type="button" id="robot-config-replicacao-d1-meta-carregar-btn" class="secondary-btn">
+                        Carregar
+                      </button>
+                      <button type="button" id="robot-config-replicacao-d1-meta-recalcular-btn" class="secondary-btn">
+                        Recalcular saldos
+                      </button>
+                    </div>
+                    <div id="robot-config-replicacao-d1-meta-tabela" class="config-meta-mensal-tabela"></div>
+                    <div class="config-meta-mensal-ajuste">
+                      <label for="robot-config-replicacao-d1-meta-ajuste-workflow">Workflow (ajuste manual)</label>
+                      <input id="robot-config-replicacao-d1-meta-ajuste-workflow" type="text" placeholder="Nome do workflow" />
+                      <label for="robot-config-replicacao-d1-meta-ajuste-consumo">Consumo acumulado</label>
+                      <input id="robot-config-replicacao-d1-meta-ajuste-consumo" type="number" min="0" value="0" />
+                      <button type="button" id="robot-config-replicacao-d1-meta-ajuste-btn" class="secondary-btn">
+                        Aplicar ajuste
+                      </button>
+                    </div>
+                  </div>
+                  <p class="credentials-help">
+                    Volumetria vem do parquet D-1 (contagem diária). Redistribuição: mesmo cliente → mesma categoria → demais workflows.
+                    Pasta de saída: <strong>brflow-auditoria-replic-d1</strong>.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div role="tabpanel" id="robot-config-tab-logs" class="config-tab-panel" aria-labelledby="robot-config-tab-logs-btn" hidden>
+              <div class="config-section-body">
+                <div class="config-log-buttons">
+                  <button class="btn btn-ghost" id="robot-config-download-log-btn" type="button" onclick="downloadActiveRobotLog()">Baixar log</button>
+                  <button class="btn btn-ghost" id="robot-config-clear-log-btn" type="button" onclick="clearActiveRobotLog()">Limpar log</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-actions modal-actions--sticky">
+          <button class="btn btn-ghost" type="button" onclick="closeRobotConfig()">Cancelar</button>
+          <button class="btn" id="robot-config-save-btn" type="button" onclick="saveRobotConfig()">Salvar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="credentials-loading-overlay" class="loading-overlay" hidden aria-live="polite" aria-busy="true">
+      <div class="loading-overlay-card">
+        <div class="loading-spinner" aria-hidden="true"></div>
+        <p class="loading-title">Validando credenciais</p>
+        <p class="loading-text">Aguarde enquanto verificamos o acesso no Okta.</p>
+      </div>
+    </div>
+  </main>
+
+  <script id="app-modes-data" type="application/json">{{ modes | tojson }}</script>
+  <script id="app-mode-labels-data" type="application/json">{{ mode_labels | tojson }}</script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=production-days-brflow-1"></script>
+</body>
+</html>

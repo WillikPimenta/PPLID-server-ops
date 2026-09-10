@@ -91,9 +91,8 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def _import_ops_store():
-    base_dir = Path(server_ops.DEFAULT_BASE_DIR if hasattr(server_ops, "DEFAULT_BASE_DIR") else "C:/PPLID")
-    ops_root = base_dir / "ops" / "lib"
+def _import_ops_store(config: dict[str, Any] | None = None):
+    ops_root = server_ops.resolve_ops_lib_dir(config)
     if str(ops_root) not in sys.path:
         sys.path.insert(0, str(ops_root))
     import ops_store  # type: ignore
@@ -692,7 +691,7 @@ def _evaluate_alerts(config: dict[str, Any], snapshot: dict[str, Any], ops_store
 def collect_and_store(config: dict[str, Any]) -> dict[str, Any]:
     global _LATEST_SNAPSHOT, _LAST_SAMPLE_MONOTONIC
     snapshot = collect_host_snapshot(config)
-    ops_store = _import_ops_store()
+    ops_store = _import_ops_store(config)
     db_path = server_ops.get_ops_store_db_path(server_ops.get_base_dir(config))
     if not db_path:
         db_path = server_ops.get_base_dir(config) / "ops" / "data" / "ops-store.db"
@@ -785,7 +784,7 @@ def build_host_series(config: dict[str, Any], metric: str, *, hours: int = 24) -
     if metric not in HOST_METRICS:
         raise ValueError("Métrica de host inválida")
     hours = max(1, min(int(hours), 168))
-    ops_store = _import_ops_store()
+    ops_store = _import_ops_store(config)
     db_path = server_ops.get_ops_store_db_path(server_ops.get_base_dir(config))
     if not db_path:
         db_path = server_ops.get_base_dir(config) / "ops" / "data" / "ops-store.db"

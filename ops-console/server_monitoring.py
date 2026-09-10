@@ -89,9 +89,9 @@ def _iso_days_ago(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def _import_ops_store():
-    base_dir = Path(server_ops.DEFAULT_BASE_DIR if hasattr(server_ops, "DEFAULT_BASE_DIR") else "C:/PPLID")
-    ops_root = base_dir / "ops" / "lib"
+def _import_ops_store(config: dict[str, Any] | None = None):
+    cfg = config or _COLLECTOR_CONFIG or {}
+    ops_root = server_ops.resolve_ops_lib_dir(cfg or None)
     if str(ops_root) not in sys.path:
         sys.path.insert(0, str(ops_root))
     import ops_store  # type: ignore
@@ -239,6 +239,187 @@ def fetch_backend_api_samples_around(
         return {"error": f"HTTP {exc.code}", "detail": body, "reachable": False}
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc), "reachable": False}
+
+
+def fetch_backend_api_route_samples(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    window: str = "24h",
+    method: str,
+    route: str,
+    limit: int = 50,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    env_cfg = config.get(env_name, {})
+    port = int(env_cfg.get("backendPort") or 0)
+    if not port:
+        return {"error": "Porta backend nao configurada"}
+    params = urllib.parse.urlencode(
+        {
+            "window": window,
+            "method": method,
+            "route": route,
+            "limit": max(1, min(100, int(limit or 50))),
+        }
+    )
+    url = f"http://127.0.0.1:{port}/api/v1/ops-metrics/route-samples/?{params}"
+    try:
+        request = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        return {"error": f"HTTP {exc.code}", "detail": body, "reachable": False}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc), "reachable": False}
+
+
+_API_WINDOW_DELTAS = {
+    "1h": timedelta(hours=1),
+    "6h": timedelta(hours=6),
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+}
+
+_ROUTE_SAMPLES_SAMPLING = {
+    "mode": "priority_sample",
+    "normalRatePct": 10,
+    "capturesAll4xx": True,
+    "capturesAll5xx": True,
+    "capturesAllSlow": True,
+    "slowRequestMs": 2000,
+}
+
+
+def _metric_user_id_from_pk(raw: str) -> int | None:
+    raw = str(raw or "").strip()
+    if not raw:
+        return None
+    try:
+        numeric = int(raw)
+        if 0 < numeric <= 2_147_483_647:
+            return numeric
+    except (TypeError, ValueError):
+        pass
+    digest = hashlib.blake2s(raw.encode("utf-8"), digest_size=4).digest()
+    return (int.from_bytes(digest, "big") & 0x7FFF_FFFF) or 1
+
+
+def _build_requester_map_from_pg(conn) -> dict[int, str]:
+    requester_map: dict[int, str] = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, username, first_name, last_name
+                FROM auth_user
+                WHERE is_active = TRUE
+                """
+            )
+            for user_id, username, first_name, last_name in cur.fetchall():
+                metric_id = _metric_user_id_from_pk(str(user_id))
+                if metric_id is None:
+                    continue
+                fn = (first_name or "").strip()
+                ln = (last_name or "").strip()
+                full = f"{fn} {ln}".strip()
+                requester_map[metric_id] = full or (username or "").strip() or "Usuário desconhecido"
+    except Exception:
+        return {}
+    return requester_map
+
+
+def _resolve_route_sample_requester(user_id: int | None, requester_map: dict[int, str]) -> str:
+    if user_id is None:
+        return "Anônimo"
+    return requester_map.get(int(user_id), "Usuário desconhecido")
+
+
+def _normalize_route_sample_request_params(raw) -> dict | None:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def fetch_route_samples_from_postgres(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    window: str = "24h",
+    method: str,
+    route: str,
+    limit: int = 50,
+) -> dict[str, Any] | None:
+    """Fallback quando o backend ainda nao expoe /ops-metrics/route-samples/."""
+    window_key = (window or "24h").lower()
+    since = datetime.now(timezone.utc) - _API_WINDOW_DELTAS.get(window_key, _API_WINDOW_DELTAS["24h"])
+    bounded_limit = max(1, min(100, int(limit or 50)))
+    try:
+        conn = server_db.get_pg_connection(config, env_name)
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("route samples postgres fallback unavailable: %s", exc)
+        return None
+    try:
+        requester_map = _build_requester_map_from_pg(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM ops_api_request_metric
+                WHERE recorded_at >= %s AND method = %s AND route = %s
+                """,
+                (since, method, route),
+            )
+            sample_count = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                SELECT recorded_at, status_code, duration_ms, user_id, request_params
+                FROM ops_api_request_metric
+                WHERE recorded_at >= %s AND method = %s AND route = %s
+                ORDER BY recorded_at DESC
+                LIMIT %s
+                """,
+                (since, method, route, bounded_limit),
+            )
+            rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("route samples postgres query failed: %s", exc)
+        return None
+    finally:
+        conn.close()
+
+    samples = [
+        {
+            "recordedAt": row[0].isoformat(),
+            "statusCode": int(row[1]),
+            "durationMs": int(row[2]),
+            "requester": _resolve_route_sample_requester(row[3], requester_map),
+            "requestParams": _normalize_route_sample_request_params(row[4] if len(row) > 4 else None),
+        }
+        for row in rows
+    ]
+    return {
+        "window": window_key,
+        "method": method,
+        "route": route,
+        "since": since.isoformat(),
+        "sampleCount": sample_count,
+        "sampling": dict(_ROUTE_SAMPLES_SAMPLING),
+        "samples": samples,
+    }
 
 
 def _record_event(
@@ -1370,7 +1551,7 @@ def _check_sync_anomalies(
 def _collector_tick(config: dict[str, Any]) -> None:
     global _LAST_PURGE_AT, _LAST_COLLECTOR_TICK_AT
     settings = get_monitoring_settings(config)
-    ops_store = _import_ops_store()
+    ops_store = _import_ops_store(config)
     db_path = resolve_ops_store_path(config)
     try:
         ops_store.init_store(db_path)
@@ -2872,6 +3053,72 @@ def build_monitoring_api_samples(
                 "source": "live",
             }
         )
+    return result
+
+
+def build_monitoring_api_route_samples(
+    config: dict[str, Any],
+    env_name: str,
+    *,
+    window: str = "24h",
+    method: str,
+    route: str,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Amostras individuais de uma rota dentro da janela selecionada."""
+    env_name = env_name.upper()
+    live = fetch_backend_api_route_samples(
+        config,
+        env_name,
+        window=window,
+        method=method,
+        route=route,
+        limit=limit,
+    )
+    result: dict[str, Any] = {
+        "environment": env_name,
+        "window": window,
+        "method": method,
+        "route": route,
+        "limit": max(1, min(100, int(limit or 50))),
+    }
+    if live.get("error"):
+        fallback = None
+        if str(live.get("error")).startswith("HTTP 404"):
+            fallback = fetch_route_samples_from_postgres(
+                config,
+                env_name,
+                window=window,
+                method=method,
+                route=route,
+                limit=limit,
+            )
+        if fallback is not None:
+            result.update(
+                {
+                    "since": fallback.get("since"),
+                    "sampleCount": fallback.get("sampleCount", 0),
+                    "sampling": fallback.get("sampling") or {},
+                    "samples": fallback.get("samples") or [],
+                    "source": "postgres_fallback",
+                }
+            )
+            return result
+        result["error"] = live.get("error")
+        result["detail"] = live.get("detail")
+        result["samples"] = []
+        result["sampleCount"] = 0
+        result["source"] = "unavailable"
+        return result
+    result.update(
+        {
+            "since": live.get("since"),
+            "sampleCount": live.get("sampleCount", 0),
+            "sampling": live.get("sampling") or {},
+            "samples": live.get("samples") or [],
+            "source": "live",
+        }
+    )
     return result
 
 

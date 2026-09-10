@@ -1,0 +1,80 @@
+# -*- coding: utf-8 -*-
+from apps.produtividade.models import CASE_ETAPA, CASE_STAGE_GOAL  # noqa: F401
+
+REPORT_CONSOLIDADO = "consolidado"
+REPORT_PROD_HORA = "prod_hora"
+REPORT_TEMPO_LOGADO = "tempo_logado"
+REPORT_FILA_ABERTA = "fila_aberta"
+
+REPORTS_TO_PRODUCTIVITY = frozenset({REPORT_CONSOLIDADO, REPORT_PROD_HORA})
+
+# Buckets de idade da fila (sem blockedDate)
+IDADE_BUCKET_0_1H = "0-1h"
+IDADE_BUCKET_1_4H = "1-4h"
+IDADE_BUCKET_4_24H = "4-24h"
+IDADE_BUCKET_24H_PLUS = "24h+"
+IDADE_BUCKETS = (
+    IDADE_BUCKET_0_1H,
+    IDADE_BUCKET_1_4H,
+    IDADE_BUCKET_4_24H,
+    IDADE_BUCKET_24H_PLUS,
+)
+
+STALE_SNAPSHOT_HOURS = 2
+
+# Dimensões de agregação do consolidado (dashboard Case Manager)
+DIM_WORKFLOW_ORIGEM = "workflow_origem"
+DIM_MATRICULA_DESTINO = "matricula_destino"
+DIM_RESULTADO_DESTINO = "resultado_destino"
+DIM_STATUS_DESTINO = "status_destino"
+DIM_TIPO_CONCLUSAO_ORIGEM = "tipo_conclusao_origem"
+DIM_VOLUME_DIA = "volume_dia"
+DIM_VOLUME_CADASTRO_DIA = "volume_cadastro_dia"
+DIM_CRUZAMENTO_WF_RESULTADO = "cruzamento_wf_resultado"
+DIM_NH_ORIGEM = "nh_origem"
+DIM_CLIENTE_ORIGEM = "cliente_origem"
+DIM_MATRICULA_ORIGEM = "matricula_origem"
+DIM_ALERTA_DESTINO = "alerta_destino"
+
+CONSOLIDADO_AGG_DIMENSIONS = (
+    DIM_WORKFLOW_ORIGEM,
+    DIM_MATRICULA_DESTINO,
+    DIM_RESULTADO_DESTINO,
+    DIM_STATUS_DESTINO,
+    DIM_TIPO_CONCLUSAO_ORIGEM,
+    DIM_VOLUME_DIA,
+    DIM_VOLUME_CADASTRO_DIA,
+    DIM_CRUZAMENTO_WF_RESULTADO,
+    DIM_NH_ORIGEM,
+    DIM_CLIENTE_ORIGEM,
+    DIM_MATRICULA_ORIGEM,
+    DIM_ALERTA_DESTINO,
+)
+
+# Ranking paramétrico (API)
+RANKING_DIMENSIONS = frozenset(
+    {
+        DIM_WORKFLOW_ORIGEM,
+        DIM_MATRICULA_DESTINO,
+        DIM_RESULTADO_DESTINO,
+        DIM_STATUS_DESTINO,
+        DIM_TIPO_CONCLUSAO_ORIGEM,
+        DIM_NH_ORIGEM,
+        DIM_CLIENTE_ORIGEM,
+        DIM_MATRICULA_ORIGEM,
+        DIM_ALERTA_DESTINO,
+    }
+)
+
+TOP_N_CLIENTE = 30
+TOP_N_MATRICULA_ORIGEM = 50
+TOP_N_ALERTA = 40
+OUTROS_KEY = "(outros)"
+
+FILA_SAMPLE_LIMIT = 100_000  # teto de segurança; lista completa da fila (não amostra 200)
+FILA_ITEMS_BULK_SIZE = 1000
+ALERTAS_FACT_MAX_LEN = 500
+
+STALE_CONSOLIDADO_HOURS = 36
+CRUZAMENTO_KEY_SEP = "|||"
+VOLUME_DIA_KEY = "total"

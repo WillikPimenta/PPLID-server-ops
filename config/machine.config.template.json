@@ -2,5 +2,8 @@
   "baseDir": "C:\\PPLID",
   "lanIp": null,
   "envConfigPath": "C:\\PPLID\\ops\\config\\env.config.json",
-  "opsConsoleDir": "C:\\PPLID\\ops\\ops-console"
+  "opsConsoleDir": "C:\\PPLID\\ops\\ops-console",
+  "automationRuntime": {
+    "root": "C:\\PPLID\\ops\\data\\automation-runtime"
+  }
 }

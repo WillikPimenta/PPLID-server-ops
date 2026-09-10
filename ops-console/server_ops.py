@@ -182,12 +182,34 @@ def get_base_dir(config: dict[str, Any]) -> Path:
     return Path(log_dir).parent
 
 
+def resolve_ops_lib_dir(config: dict[str, Any] | None = None) -> Path:
+    """Resolve checkout lib/ops_store.py for both server (C:/PPLID/ops/lib) and local dev."""
+    candidates: list[Path] = []
+    if config:
+        base_dir = get_base_dir(config)
+        candidates.append(base_dir / "ops" / "lib")
+        ops_console = config.get("opsConsoleDir")
+        if ops_console:
+            candidates.append(Path(str(ops_console)).resolve().parent / "lib")
+    candidates.append(Path(__file__).resolve().parent.parent / "lib")
+    seen: set[str] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if (resolved / "ops_store.py").is_file():
+            return resolved
+    return candidates[0].resolve()
+
+
 def audit_log(config: dict[str, Any], username: str, action: str, detail: str = "") -> None:
     """Persist console audit events to SQLite (audit_events). File fallback for legacy only."""
     base_dir = get_base_dir(config)
     db_path = get_ops_store_db_path(base_dir) or (base_dir / "ops" / "data" / "ops-store.db")
     try:
-        ops_lib = base_dir / "ops" / "lib"
+        ops_lib = resolve_ops_lib_dir(config)
         if str(ops_lib) not in sys.path:
             sys.path.insert(0, str(ops_lib))
         import ops_store  # type: ignore
@@ -881,7 +903,7 @@ def parse_env_file(path: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
     result: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -913,7 +935,7 @@ def write_env_file(path: Path, updates: dict[str, str], existing: dict[str, str]
 
     lines = []
     if path.is_file():
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#") and "=" in stripped:
                 key = stripped.split("=", 1)[0].strip()
@@ -934,7 +956,7 @@ def remove_env_keys(path: Path, keys: list[str]) -> None:
     if not keys_set or not path.is_file():
         return
     lines = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.split("=", 1)[0].strip()
@@ -960,7 +982,7 @@ def _copy_file_if_exists(src: Path, dest: Path) -> bool:
     if not src.is_file():
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(src.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    dest.write_text(src.read_text(encoding="utf-8-sig", errors="replace"), encoding="utf-8")
     return True
 
 
@@ -2143,7 +2165,7 @@ def _load_log_chunk_from_sqlite(
     db_path = get_ops_store_db_path(base_dir)
     if not db_path:
         return {"lines": [], "parsed": [], "nextOffset": since_id}
-    ops_root = base_dir / "ops" / "lib"
+    ops_root = resolve_ops_lib_dir({"logDir": str(base_dir / "logs")})
     if str(ops_root) not in sys.path:
         sys.path.insert(0, str(ops_root))
     try:
@@ -2465,3 +2487,272 @@ def build_run_logs_zip(base_dir: Path, env_name: str, run_id: str) -> bytes | No
             if path.is_file():
                 zf.write(path, arcname=name)
     return buffer.getvalue()
+
+
+_CONSOLE_UPDATE_LOCK_TTL_SEC = 120
+
+
+def resolve_ops_repo_dir(config: dict[str, Any]) -> Path:
+    base_dir = get_base_dir(config)
+    installed = base_dir / "ops"
+    if (installed / "lib" / "paths.ps1").is_file():
+        return installed
+    checkout = Path(__file__).resolve().parent.parent
+    if (checkout / "lib" / "paths.ps1").is_file():
+        return checkout
+    return installed
+
+
+def _console_update_script(config: dict[str, Any]) -> Path:
+    return resolve_ops_repo_dir(config) / "update_ops_console.ps1"
+
+
+def _console_update_lock_path(config: dict[str, Any]) -> Path:
+    return get_base_dir(config) / "logs" / "console-update.lock"
+
+
+def _read_console_update_lock(config: dict[str, Any]) -> dict[str, Any] | None:
+    path = _console_update_lock_path(config)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"active": True, "reason": "lock_corrupt"}
+    if not isinstance(payload, dict):
+        return {"active": True, "reason": "lock_invalid"}
+    started = float(payload.get("startedAt") or 0)
+    if started and (time.time() - started) > _CONSOLE_UPDATE_LOCK_TTL_SEC:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    payload["active"] = True
+    return payload
+
+
+def _write_console_update_lock(config: dict[str, Any], detail: str = "") -> None:
+    path = _console_update_lock_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"startedAt": time.time(), "detail": detail}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _clear_console_update_lock(config: dict[str, Any]) -> None:
+    try:
+        _console_update_lock_path(config).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _git_in_repo(repo_dir: Path, args: list[str], *, timeout: int = 15) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if proc.returncode == 0:
+            return (proc.stdout or "").strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return None
+
+
+def read_local_console_git_info(config: dict[str, Any]) -> dict[str, Any]:
+    repo_dir = resolve_ops_repo_dir(config)
+    if not (repo_dir / ".git").exists():
+        return {
+            "ok": False,
+            "supported": False,
+            "reason": f"Repositorio Git nao encontrado em {repo_dir}",
+        }
+
+    branch = _git_in_repo(repo_dir, ["rev-parse", "--abbrev-ref", "HEAD"]) or ""
+    current_full = _git_in_repo(repo_dir, ["rev-parse", "HEAD"]) or ""
+    current_short = _git_in_repo(repo_dir, ["rev-parse", "--short", "HEAD"]) or current_full[:7]
+    dirty_output = _git_in_repo(repo_dir, ["status", "--porcelain"]) or ""
+    return {
+        "ok": True,
+        "supported": True,
+        "dirty": bool(dirty_output.strip()),
+        "branch": branch,
+        "currentSha": current_short,
+        "currentShaFull": current_full,
+        "repoDir": str(repo_dir),
+    }
+
+
+def _merge_console_update_payload(
+    payload: dict[str, Any],
+    local: dict[str, Any],
+    *,
+    in_progress: bool = False,
+) -> dict[str, Any]:
+    merged = {**local, **payload}
+    for key in ("branch", "currentSha", "currentShaFull", "dirty", "supported", "repoDir"):
+        if not merged.get(key) and local.get(key) is not None:
+            merged[key] = local.get(key)
+    if in_progress:
+        merged["inProgress"] = True
+    merged["checkedAt"] = datetime.now(timezone.utc).isoformat()
+    return merged
+
+
+def _parse_powershell_json(stdout: str) -> dict[str, Any]:
+    text = (stdout or "").strip()
+    if not text:
+        return {"ok": False, "error": "Resposta vazia do script de atualizacao."}
+    for line in reversed(text.splitlines()):
+        candidate = line.strip()
+        if not candidate.startswith("{"):
+            continue
+        try:
+            payload = json.loads(candidate)
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            continue
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            return payload
+    except json.JSONDecodeError:
+        pass
+    return {"ok": False, "error": "JSON invalido do script de atualizacao.", "stdout": text[-500:]}
+
+
+def check_console_update(config: dict[str, Any]) -> dict[str, Any]:
+    local = read_local_console_git_info(config)
+    lock = _read_console_update_lock(config)
+    if lock:
+        return _merge_console_update_payload(
+            {
+                "ok": False,
+                "supported": local.get("supported", True),
+                "error": "Atualizacao do console ja em andamento.",
+                "lockDetail": lock.get("detail") or "",
+            },
+            local,
+            in_progress=True,
+        )
+
+    script = _console_update_script(config)
+    if not script.is_file():
+        return _merge_console_update_payload(
+            {
+                "ok": False,
+                "supported": False,
+                "reason": f"Script de atualizacao nao encontrado: {script}",
+            },
+            local,
+        )
+
+    repo_dir = resolve_ops_repo_dir(config)
+    args = ["-CheckOnly", "-OpsRepoDir", str(repo_dir)]
+    config_path = config.get("_configPath") or config.get("configPath")
+    if config_path:
+        args.extend(["-ConfigPath", str(config_path)])
+
+    result = run_powershell(script, args, timeout=120)
+    stdout = str(result.get("stdout") or "").strip()
+    if stdout:
+        payload = _parse_powershell_json(stdout)
+    else:
+        payload = {
+            "ok": False,
+            "supported": True,
+            "reason": (result.get("error") or "Script de atualizacao nao retornou dados.")[:500],
+        }
+    if not payload.get("ok") and result.get("error"):
+        payload.setdefault("error", result.get("error"))
+    payload.setdefault("supported", bool(payload.get("supported", True)))
+    return _merge_console_update_payload(payload, local)
+
+
+def _spawn_detached_powershell(script: Path, args: list[str]) -> None:
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        *args,
+    ]
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
+            subprocess, "DETACHED_PROCESS", 0
+        )
+    subprocess.Popen(
+        cmd,
+        creationflags=creationflags,
+        close_fds=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
+    script = _console_update_script(config)
+    if not script.is_file():
+        return {
+            "ok": False,
+            "supported": False,
+            "error": f"Script de atualizacao nao encontrado: {script}",
+        }
+
+    lock = _read_console_update_lock(config)
+    if lock:
+        return {
+            "ok": False,
+            "inProgress": True,
+            "error": "Atualizacao do console ja em andamento.",
+        }
+
+    status = check_console_update(config)
+    if not status.get("ok"):
+        return status
+    if not status.get("supported", True):
+        return status
+    if status.get("dirty"):
+        return status
+    if not status.get("updateAvailable"):
+        return {
+            "ok": True,
+            "applied": False,
+            "restarting": False,
+            "message": "Console ja esta atualizado.",
+            "currentSha": status.get("currentSha"),
+            "remoteSha": status.get("remoteSha"),
+        }
+
+    previous_sha = str(status.get("currentSha") or "")
+    target_sha = str(status.get("remoteSha") or "")
+
+    try:
+        _write_console_update_lock(config, detail=f"{previous_sha}->{target_sha}")
+        repo_dir = resolve_ops_repo_dir(config)
+        args = ["-Apply", "-OpsRepoDir", str(repo_dir)]
+        config_path = config.get("_configPath") or config.get("configPath")
+        if config_path:
+            args.extend(["-ConfigPath", str(config_path)])
+        _spawn_detached_powershell(script, args)
+    except OSError as exc:
+        _clear_console_update_lock(config)
+        return {"ok": False, "error": str(exc)}
+
+    return {
+        "ok": True,
+        "accepted": True,
+        "applied": True,
+        "restarting": True,
+        "previousSha": previous_sha,
+        "targetSha": target_sha,
+        "branch": status.get("branch"),
+    }

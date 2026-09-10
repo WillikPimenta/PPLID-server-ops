@@ -10,7 +10,7 @@
         document.documentElement.setAttribute("data-theme", t === "dark" ? "dark" : "light");
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260908-automations" />
   </head>
   <body>
     <div class="app-shell">
@@ -173,6 +173,15 @@
                   </span>
                   <span>Banco</span>
                 </a>
+                <a class="sidebar-link" href="/automations" data-sidebar-view="automations" title="Automações">
+                  <span class="sidebar-link-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="4" y="7" width="16" height="12" rx="3" />
+                      <path d="M9 12h.01M15 12h.01M9 16h6M12 3v4" />
+                    </svg>
+                  </span>
+                  <span>Automações</span>
+                </a>
               </nav>
             </div>
             <div class="sidebar-footer"><span class="sidebar-health-dot" aria-hidden="true"></span><span>Operação PPLID</span></div>
@@ -189,6 +198,7 @@
             <div id="dashboard" class="dashboard hidden">
               <div id="view-deploy">
                 <div id="deploy-hero"></div>
+                <div id="deploy-console-update" class="ops-console-update-bar" aria-live="polite"></div>
                 <div id="deploy-kpi"></div>
                 <section class="ops-section monitor-section" aria-labelledby="summary-heading">
                   <div class="ops-section-head monitor-section-head">
@@ -202,6 +212,7 @@
               <div id="view-database" class="hidden"></div>
               <div id="view-host" class="hidden"></div>
               <div id="view-monitoring" class="hidden"></div>
+              <div id="view-automations" class="hidden"></div>
             </div>
           </div>
         </div>
@@ -268,11 +279,15 @@
       </div>
     </aside>
 
+    <div id="auto-config-modal-host" aria-live="polite"></div>
+    <div id="monitor-api-route-modal-host" aria-live="polite"></div>
+
     <script src="/js/utils.js"></script>
     <script src="/js/feature-loader.js"></script>
     <script src="/js/ops-ui.js"></script>
     <script src="/js/status.js"></script>
     <script src="/js/actions.js"></script>
+    <script src="/js/console-update.js"></script>
     <script src="/js/router.js"></script>
     <script src="/js/history.js"></script>
     <script src="/js/render.js"></script>

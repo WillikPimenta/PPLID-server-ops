@@ -1,0 +1,128 @@
+# Cenários de carga versionados — Qualidade EO
+
+# Consumidos por backend/scripts/bench_qualidade_eo.py (espelho documental).
+
+# Não contém dados pessoais.
+
+
+
+version: 2
+
+defaults:
+
+  date_axis: auditoria
+
+  grain: etapa
+
+  repeats: 3
+
+
+
+scenarios:
+
+  - id: jul_mtd
+
+    label: Jul/2026 MTD resumo
+
+    route: dashboard
+
+    module: resumo
+
+    start_date: "2026-07-01"
+
+    end_date: "2026-07-24"
+
+    slo_cold_ms: 15000
+
+    slo_warm_ms: 50
+
+
+
+  - id: jul_full
+
+    label: Jul/2026 completo resumo
+
+    route: dashboard
+
+    module: resumo
+
+    start_date: "2026-07-01"
+
+    end_date: "2026-07-31"
+
+    slo_cold_ms: 20000
+
+    slo_warm_ms: 50
+
+
+
+  - id: jun_full
+
+    label: Jun/2026 completo resumo
+
+    route: dashboard
+
+    module: resumo
+
+    start_date: "2026-06-01"
+
+    end_date: "2026-06-30"
+
+    slo_cold_ms: 25000
+
+    slo_warm_ms: 50
+
+
+
+  - id: jul_agentes
+
+    label: Jul/2026 agentes
+
+    route: dashboard
+
+    module: agentes
+
+    start_date: "2026-07-01"
+
+    end_date: "2026-07-31"
+
+    slo_cold_ms: 30000
+
+    slo_warm_ms: 80
+
+
+
+  - id: jul_kpis_only
+
+    label: Jul/2026 só KPIs
+
+    route: kpis
+
+    start_date: "2026-07-01"
+
+    end_date: "2026-07-31"
+
+    slo_cold_ms: 8000
+
+    slo_warm_ms: 50
+
+
+
+  - id: jul_localidade
+
+    label: Jul/2026 filtro localidade
+
+    route: dashboard
+
+    module: resumo
+
+    start_date: "2026-07-01"
+
+    end_date: "2026-07-31"
+
+    localidade: Brasília
+
+    slo_cold_ms: 20000
+
+    slo_warm_ms: 50
+

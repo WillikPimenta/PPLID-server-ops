@@ -1,0 +1,36 @@
+{
+  "confidence": 0.85,
+  "connected_disconnected_margin": 0.05,
+  "icon_confidence": {
+    "connected.png": 0.80,
+    "AppBlue.png": 0.80,
+    "syncing.png": 0.75,
+    "disconnected.png": 0.70,
+    "AppErrorBlue.png": 0.70,
+    "QuotaOverLimit_default.png": 0.70
+  },
+  "sync_stuck_watch": {
+    "poll_seconds": 5,
+    "window_seconds": 180
+  },
+  "steps": [
+    {
+      "action": "click",
+      "region": "tray",
+      "comment": "Clica no ícone OneDrive desconectado encontrado na bandeja"
+    },
+    {
+      "action": "wait_click",
+      "templates": [
+        "btn_inserir_credenciais.png",
+        "btn_inserir_credenciais_alt.png",
+        "btn_inserir_credenciais_accent.png"
+      ],
+      "region": "full",
+      "timeout": 15,
+      "confidence": 0.65,
+      "match_mode": "grayscale",
+      "comment": "Clica no botão Inserir credenciais (templates do repositório; grayscale ignora cor de destaque do Windows)"
+    }
+  ]
+}

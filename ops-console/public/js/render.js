@@ -858,6 +858,7 @@
       host: () => OC.navigate("host"),
     });
     OC.refreshHomeHostSummary?.();
+    OC.initConsoleUpdate?.();
   };
 
   function deployingHint(count) {

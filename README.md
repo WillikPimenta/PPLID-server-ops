@@ -61,7 +61,7 @@ Segredos do console (`OPS_SESSION_SECRET`, senha bootstrap) vao em `ops-console/
 | Iniciar ops-console | `C:\PPLID\ops\start_ops_console.ps1` |
 | Deploy manual (3 envs) | `C:\PPLID\ops\deploy_all.ps1` |
 | Sync git (3 envs) | `C:\PPLID\ops\update_all.ps1` |
-| Atualizar ops-console | `git pull` em `C:\PPLID\ops` + reiniciar console |
+| Atualizar ops-console | **Visão geral** → botão **Verificar atualização**, ou manualmente: `git pull` em `C:\PPLID\ops` + `start_ops_console.ps1 -Restart` |
 | Verificar stack | `C:\PPLID\ops\verify_stack.ps1` |
 | Parar tudo | `C:\PPLID\ops\stop_all.ps1` |
 | Validar ciclo completo | `C:\PPLID\ops\validate_ops_cycle.ps1` |

@@ -203,6 +203,73 @@ class BuildMonitoringTests(unittest.TestCase):
         self.assertEqual(result["sampling"]["normalRatePct"], 10)
         self.assertEqual(result["routeStats"][0]["status4xx"], 2)
 
+    @patch.object(sm, "fetch_backend_api_route_samples")
+    def test_build_monitoring_api_route_samples_returns_live_samples(self, mock_fetch) -> None:
+        mock_fetch.return_value = {
+            "window": "6h",
+            "method": "GET",
+            "route": "/api/v1/dashboard/",
+            "since": "2026-08-10T06:00:00Z",
+            "sampleCount": 2,
+            "sampling": {"mode": "priority_sample", "normalRatePct": 10},
+            "samples": [
+                {
+                    "recordedAt": "2026-08-10T12:00:00Z",
+                    "statusCode": 200,
+                    "durationMs": 120,
+                    "requester": "Agente Teste",
+                }
+            ],
+        }
+
+        result = sm.build_monitoring_api_route_samples(
+            self.config,
+            "DEV",
+            window="6h",
+            method="GET",
+            route="/api/v1/dashboard/",
+        )
+
+        self.assertEqual(result["environment"], "DEV")
+        self.assertEqual(result["source"], "live")
+        self.assertEqual(result["sampleCount"], 2)
+        self.assertEqual(result["samples"][0]["requester"], "Agente Teste")
+
+    @patch.object(sm, "fetch_route_samples_from_postgres")
+    @patch.object(sm, "fetch_backend_api_route_samples")
+    def test_build_monitoring_api_route_samples_uses_postgres_on_404(
+        self, mock_fetch, mock_pg
+    ) -> None:
+        mock_fetch.return_value = {"error": "HTTP 404", "detail": "Not Found", "reachable": False}
+        mock_pg.return_value = {
+            "window": "6h",
+            "method": "GET",
+            "route": "/api/v1/dashboard/",
+            "since": "2026-08-10T06:00:00Z",
+            "sampleCount": 1,
+            "sampling": {"mode": "priority_sample"},
+            "samples": [
+                {
+                    "recordedAt": "2026-08-10T12:00:00Z",
+                    "statusCode": 200,
+                    "durationMs": 120,
+                    "requester": "Agente Postgres",
+                }
+            ],
+        }
+
+        result = sm.build_monitoring_api_route_samples(
+            self.config,
+            "DEV",
+            window="6h",
+            method="GET",
+            route="/api/v1/dashboard/",
+        )
+
+        self.assertEqual(result["source"], "postgres_fallback")
+        self.assertEqual(result["samples"][0]["requester"], "Agente Postgres")
+        mock_pg.assert_called_once()
+
     def test_enrich_monitor_event_availability_link(self) -> None:
         event = sm._enrich_monitor_event(
             {

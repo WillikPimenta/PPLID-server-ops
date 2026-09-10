@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sobre o Sistema</title>
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='img/icon_barrasuperior.png') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <section class="panel">
+      <h1>Sobre</h1>
+      <p>Este projeto foi criado do zero com Flask + HTML/CSS/JS e robôs Python executados por subprocessos.</p>
+      <ul>
+        <li>Interface central para controle dos robôs</li>
+        <li>APIs REST para iniciar, parar e consultar status</li>
+        <li>Runner dedicado para cada modo de automação</li>
+        <li>Logs e histórico por robô</li>
+      </ul>
+      <a class="btn" href="{{ url_for('web.index') }}">Voltar ao painel</a>
+    </section>
+  </main>
+</body>
+</html>

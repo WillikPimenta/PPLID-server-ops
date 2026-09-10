@@ -7,6 +7,10 @@
 
   OC.currentRoute = { view: "deploy", env: "DEV" };
 
+  OC.isDeployView = function isDeployView() {
+    return (OC.currentRoute?.view || "deploy") === "deploy";
+  };
+
   OC.parseMonitoringRoute = function parseMonitoringRoute(parts, query) {
     const tabNames = OC.MONITOR_TABS;
     let tab = "summary";
@@ -70,6 +74,9 @@
       const env = (parts[1] || "DEV").toUpperCase();
       return { view: "database", env: OC.ENV_ORDER.includes(env) ? env : "DEV", query: {} };
     }
+    if (parts[0] === "automations" || parts[0] === "automacoes") {
+      return { view: "automations", env: null, query: {} };
+    }
     if (parts[0] === "host") {
       return { view: "host", env: null, query };
     }
@@ -88,6 +95,7 @@
   OC.buildAppPath = function buildAppPath(view, env, opts) {
     if (view === "env") return `/env/${env || "DEV"}`;
     if (view === "database") return `/database/${env || "DEV"}`;
+    if (view === "automations") return "/automations";
     if (view === "host") return "/host";
     if (view === "monitoring") {
       const tab = opts?.tab || OC.monitorState?.activeTab || "summary";
@@ -180,18 +188,22 @@
     const dbView = document.getElementById("view-database");
     const hostView = document.getElementById("view-host");
     const monitorView = document.getElementById("view-monitoring");
+    const automationsView = document.getElementById("view-automations");
 
     deployView?.classList.toggle("hidden", OC.currentRoute.view !== "deploy");
     envView?.classList.toggle("hidden", OC.currentRoute.view !== "env");
     dbView?.classList.toggle("hidden", OC.currentRoute.view !== "database");
     hostView?.classList.toggle("hidden", OC.currentRoute.view !== "host");
     monitorView?.classList.toggle("hidden", OC.currentRoute.view !== "monitoring");
+    automationsView?.classList.toggle("hidden", OC.currentRoute.view !== "automations");
 
     OC.stopMonitoringRefresh?.();
     OC.stopHostRefresh?.();
+    OC.stopAutomationsRefresh?.();
 
     const onMonitoring = OC.currentRoute.view === "monitoring";
     const onHost = OC.currentRoute.view === "host";
+    const onAutomations = OC.currentRoute.view === "automations";
     const wasMonitoring = OC._wasOnMonitoringView === true;
     const wasHost = OC._wasOnHostView === true;
     const monitoringRouteChanged =
@@ -203,7 +215,8 @@
     OC._wasOnMonitoringView = onMonitoring;
     OC._wasOnHostView = onHost;
 
-    if (onMonitoring || onHost) {
+    const onDeploy = OC.isDeployView();
+    if (!onDeploy) {
       OC.stopAutoRefresh?.();
       if (OC._refreshAbort) {
         try {
@@ -214,7 +227,20 @@
       }
       const statusEl = document.getElementById("refresh-status");
       if (statusEl && OC.lastOverview?.generatedAt) {
-        statusEl.textContent = `Última atualização: ${OC.formatDate(OC.lastOverview.generatedAt)} · ${onHost ? "host" : "monitoramento"}`;
+        const viewLabel = onHost
+          ? "host"
+          : onAutomations
+            ? "automações"
+            : onMonitoring
+              ? "monitoramento"
+              : OC.currentRoute.view === "env"
+                ? "configuração"
+                : OC.currentRoute.view === "database"
+                  ? "banco"
+                  : "";
+        statusEl.textContent = viewLabel
+          ? `Última atualização: ${OC.formatDate(OC.lastOverview.generatedAt)} · ${viewLabel}`
+          : `Última atualização: ${OC.formatDate(OC.lastOverview.generatedAt)}`;
       }
     } else if (!OC.authState?.locked && !OC.refreshPaused) {
       OC.startAutoRefresh?.();
@@ -222,6 +248,7 @@
 
     if (OC.currentRoute.view === "deploy" && OC.lastOverview) {
       OC.renderDashboard(OC.lastOverview);
+      OC.initConsoleUpdate?.();
     } else if (OC.currentRoute.view === "env") {
       if (OC.renderEnvConfig) OC.renderEnvConfig(OC.currentRoute.env);
       else OC.ensureFeature?.("env").then(() => {
@@ -232,6 +259,13 @@
       else OC.ensureFeature?.("database").then(() => {
         if (OC.currentRoute?.view === "database") OC.renderDatabaseExplorer?.(OC.currentRoute.env);
       }).catch((err) => OC.setGlobalError?.(err.message));
+    } else if (OC.currentRoute.view === "automations") {
+      const startAutomations = () => {
+        if (OC.currentRoute?.view !== "automations") return;
+        OC.renderAutomations?.();
+      };
+      if (OC.renderAutomations) startAutomations();
+      else OC.ensureFeature?.("automations").then(startAutomations).catch((err) => OC.setGlobalError?.(err.message));
     } else if (onHost) {
       const startHost = () => {
         if (OC.currentRoute?.view !== "host") return;
@@ -263,6 +297,7 @@
     if (p === "/" || p === "/deploy") return true;
     if (p.startsWith("/env/") || p === "/env") return true;
     if (p.startsWith("/database/") || p === "/database") return true;
+    if (p === "/automations" || p === "/automacoes") return true;
     if (p === "/host") return true;
     if (p.startsWith("/monitoring/") || p === "/monitoring") return true;
     return false;

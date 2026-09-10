@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sistematest"
+version = "1.0.0"
+description = "Sistema de automação Flask + robôs Serasa/BRFlow"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "Flask==3.1.0",
+    "selenium==4.25.0",
+    "webdriver-manager==4.0.1",
+    "pandas==2.2.3",
+    "openpyxl==3.1.2",
+    "pymongo>=4.6,<5",
+    "pyarrow==20.0.0",
+    "watchdog==3.0.0",
+    "playwright>=1.49.0",
+    "pywin32>=306",
+    "requests==2.32.3",
+    "pyautogui==0.9.54",
+    "opencv-python-headless==4.10.0.84",
+    "mss==9.0.2",
+    "numpy==2.1.3",
+    "matplotlib>=3.8,<4.0",
+    "Pillow==11.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4.0"]
+
+[project.scripts]
+sistematest-runner = "app.orchestration.robot_runner:main"
+sistematest-web = "run:main"
+sistematest-web-bg = "web_background:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+"app" = ["templates/**/*", "static/**/*"]
+"app.bots" = ["templates/**/*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/config/logging_config.py" = ["E501"]
+"app/config/paths.py" = ["E501", "E402"]
+"app/config/selectors.py" = ["E501"]
+"app/orchestration/robots_wrapper.py" = ["F403", "E501"]
