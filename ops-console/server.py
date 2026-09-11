@@ -29,6 +29,7 @@ import server_db
 import server_host
 import server_monitoring
 import server_automations
+import server_ha
 from health_probe import get_coordinator
 
 OPS_ROOT = Path(__file__).resolve().parent
@@ -52,6 +53,7 @@ PROTECTED_API_PREFIXES = (
     "/api/v1/diagnostics/",
     "/api/v1/monitoring",
     "/api/v1/automations",
+    "/api/v1/ha",
     "/api/v1/console/",
 )
 AUTH_PUBLIC_PATHS = {"/api/v1/auth/status"}
@@ -423,6 +425,7 @@ def fetch_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
                 "database": data.get("database"),
                 "version": data.get("version"),
                 "components": data.get("components") or {},
+                "ha": data.get("ha") or {},
                 "error": None,
                 "checkedAt": datetime.now(timezone.utc).isoformat(),
             }
@@ -434,6 +437,7 @@ def fetch_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
             "status": "unhealthy",
             "database": "error",
             "version": None,
+            "ha": {},
             "error": detail or str(exc),
             "checkedAt": datetime.now(timezone.utc).isoformat(),
         }
@@ -444,6 +448,7 @@ def fetch_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
             "status": "offline",
             "database": None,
             "version": None,
+            "ha": {},
             "error": str(exc),
             "checkedAt": datetime.now(timezone.utc).isoformat(),
         }
@@ -1142,6 +1147,7 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
         }
 
     normalize_overview_text(status, environments)
+    high_availability = server_ha.build_ha_overview(config, runtime_by_env)
 
     duration_ms = int((time.perf_counter() - t0) * 1000)
     probe_metrics = get_coordinator().metrics()
@@ -1156,6 +1162,7 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
         "statusFile": str(status_path),
         "environments": environments,
         "events": status.get("events") or [],
+        "highAvailability": high_availability,
         "diagnostics": {
             "overview_duration_ms": duration_ms,
             "overview_cache_hit": overview_cache_hit,
@@ -1849,6 +1856,11 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/overview":
             overview = build_overview(self.config)
             self._send_json(overview)
+            return
+
+        if path == "/api/v1/ha":
+            runtime_by_env = _fetch_runtime_by_env(self.config)
+            self._send_json(server_ha.build_ha_overview(self.config, runtime_by_env))
             return
 
         if path == "/api/v1/overview-lite":

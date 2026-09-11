@@ -8520,6 +8520,56 @@ body.auto-config-modal-open { overflow: hidden; }
 [data-theme="dark"] #view-automations { --auto-blue: #70a1e0; --auto-green: #55d499; --auto-red: #ff7b83; --auto-amber: #edbb5c; }
 [data-theme="dark"] .auto-hero { background: radial-gradient(circle at 8% 110%, rgba(16, 135, 170, .14), transparent 35%), linear-gradient(125deg, rgba(75, 103, 162, .18), transparent 62%), var(--theme-bg-elevated); }
 
+/* PostgreSQL high-availability summary */
+.ha-panel-block {
+  border-left: 4px solid var(--theme-accent, #2a5595);
+}
+.ha-panel-head {
+  gap: var(--spacing-4);
+}
+.ha-status {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--border-radius-sm);
+  padding: 4px 10px;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+.ha-status-ready { color: #0a7a4a; background: rgba(15, 172, 103, 0.15); }
+.ha-status-manual { color: #805900; background: rgba(255, 174, 0, 0.16); }
+.ha-status-blocked { color: #a02020; background: rgba(200, 40, 40, 0.12); }
+.ha-status-disabled { color: var(--theme-text-secondary); background: var(--theme-bg-muted, #eee); }
+.ha-grid,
+.ha-env-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--spacing-4);
+}
+.ha-env-grid { margin-top: var(--spacing-4); }
+.ha-summary-card,
+.ha-env-row {
+  border: 1px solid var(--theme-border);
+  border-radius: var(--border-radius-md);
+  padding: var(--spacing-3);
+  background: var(--theme-bg-muted, rgba(0, 0, 0, 0.02));
+}
+.ha-env-row {
+  display: grid;
+  gap: var(--spacing-1);
+  font-size: var(--font-size-xs);
+}
+.ha-role,
+.ha-repl { color: var(--theme-text-secondary); }
+.ha-write.is-ok { color: #0a7a4a; }
+.ha-write.is-warn { color: #a02020; }
+.ha-safety-note {
+  margin: var(--spacing-3) 0 0;
+  font-size: var(--font-size-xs);
+}
+.ha-safety-note.is-ok { color: #0a7a4a; }
+.ha-safety-note.is-warn { color: #a02020; }
+
 @media (max-width: 1120px) {
   .auto-hero { grid-template-columns: 1fr; }
   .auto-control-grid { grid-template-columns: 1fr; }

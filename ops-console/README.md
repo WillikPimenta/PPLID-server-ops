@@ -103,6 +103,9 @@ Ordem: tenta bootstrap primeiro; se falhar, tenta Django.
 
 ### APIs protegidas
 
+`GET /api/v1/ha` retorna o estado sanitizado do no local, parceiro, testemunha,
+fencing e papel PostgreSQL. O painel inclui esse resumo na tela principal.
+
 Sem sessão desbloqueada, `GET /api/v1/overview`, commits e logs retornam **401**.
 
 | Rota | Descrição |

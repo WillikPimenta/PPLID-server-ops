@@ -918,6 +918,7 @@
     OC.lastOverview = overview;
     OC.lastDeploymentRows = OC.buildDeploymentRows(overview);
 
+    OC.renderHaPanel?.(overview?.highAvailability);
     OC.renderDeployHomeShell(overview);
     OC.renderSummaryCards(overview, options);
     if (!options.skipAlertRefresh) {
