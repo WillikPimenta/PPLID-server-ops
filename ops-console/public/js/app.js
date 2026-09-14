@@ -28,13 +28,21 @@ OC.fetchJson = async function fetchJson(url, options = {}) {
   const externalSignal = options.signal;
   const controller = new AbortController();
   let timer = null;
-  const onExternalAbort = () => controller.abort();
+  let timedOut = false;
+  let externallyAborted = false;
+  const onExternalAbort = () => {
+    externallyAborted = true;
+    controller.abort();
+  };
   if (externalSignal) {
     if (externalSignal.aborted) controller.abort();
     else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
   }
   if (timeoutMs > 0) {
-    timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
   }
   try {
     const { timeoutMs: _t, signal: _s, ...rest } = options;
@@ -83,8 +91,18 @@ OC.fetchJson = async function fetchJson(url, options = {}) {
     return response.json();
   } catch (err) {
     if (err?.name === "AbortError") {
-      const abortErr = new Error("Requisicao cancelada ou expirou");
+      const seconds = timeoutMs > 0 ? Math.round(timeoutMs / 1000) : 0;
+      const abortErr = new Error(
+        timedOut
+          ? `A requisição expirou após ${seconds}s sem resposta. O servidor pode ainda estar processando a operação.`
+          : externallyAborted
+            ? "A requisição foi cancelada porque uma consulta mais recente assumiu o controle."
+            : "A requisição foi cancelada pelo navegador."
+      );
       abortErr.code = "aborted";
+      abortErr.timedOut = timedOut;
+      abortErr.url = url;
+      abortErr.timeoutMs = timeoutMs;
       throw abortErr;
     }
     throw err;

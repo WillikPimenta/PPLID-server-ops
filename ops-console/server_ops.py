@@ -2503,7 +2503,10 @@ def build_run_logs_zip(base_dir: Path, env_name: str, run_id: str) -> bytes | No
     return buffer.getvalue()
 
 
-_CONSOLE_UPDATE_LOCK_TTL_SEC = 120
+# A verificacao Git pode levar ate 120s e o worker ainda pode instalar
+# dependencias/bootstrap antes de reiniciar. Nao expirar o lock nesse intervalo
+# evita que outra requisicao inicie uma segunda atualizacao concorrente.
+_CONSOLE_UPDATE_LOCK_TTL_SEC = 1800
 
 
 def resolve_ops_repo_dir(config: dict[str, Any]) -> Path:

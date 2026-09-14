@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$env:GIT_TERMINAL_PROMPT = "0"
 . (Join-Path $PSScriptRoot "lib\paths.ps1")
 
 function Write-UpdateJson {

@@ -8,6 +8,10 @@
   const POLL_INTERVAL_MS = 2000;
   const POLL_TIMEOUT_MS = 120000;
   const RESTART_TIMEOUT_MS = 90000;
+  // O endpoint executa a verificacao Git antes de iniciar o worker. Em PCs
+  // com rede/DNS/credencial mais lentos, o timeout global de 8s cancela a
+  // requisicao embora o servidor ainda esteja processando a atualizacao.
+  const APPLY_REQUEST_TIMEOUT_MS = 120000;
 
   OC.consoleUpdateState = {
     status: null,
@@ -113,6 +117,23 @@
       payload.lastResult?.reason ||
       null
     );
+  }
+
+  function explainUpdateError(error, status = null) {
+    const raw = String(error?.message || error || "Falha desconhecida").trim();
+    const phase = String(error?.phase || status?.lastResult?.phase || "");
+
+    if (error?.code === "aborted" || /expirou|cancelada/i.test(raw)) {
+      const phaseText = phase && phase !== "started" ? ` Etapa registrada: ${phase}.` : "";
+      return `${raw}${phaseText}\n\nO que isso indica: o navegador não recebeu a resposta dentro do prazo.\nO que verificar: aguarde alguns segundos e consulte o status novamente; se persistir, verifique a conexão com o GitHub e os logs do Console.`;
+    }
+    if (error?.code === 401 || /nao autorizado|não autorizado|401/i.test(raw)) {
+      return `${raw}\n\nO que isso indica: a sessão do Console expirou ou não tem autorização.\nO que fazer: desbloqueie o Console novamente e repita a atualização.`;
+    }
+    if (/network|failed to fetch|fetch|conex[aã]o|conectar|econn|offline/i.test(raw)) {
+      return `${raw}\n\nO que isso indica: o navegador não conseguiu alcançar o servidor do Console.\nO que verificar: confirme se o serviço está ativo, se a porta do Console está acessível e se não houve reinício durante a atualização.`;
+    }
+    return raw;
   }
 
   function shouldShowDetail(status, uiState, presentation) {
@@ -253,6 +274,7 @@
       "Erro na atualização do Console ops",
       error?.at ? `Horário: ${error.at}` : "",
       error?.message ? `Erro: ${error.message}` : "",
+      error?.detail ? `Detalhe: ${error.detail}` : "",
       status?.currentSha ? `Versão local: ${status.currentSha}` : "",
       status?.remoteSha ? `Versão remota: ${status.remoteSha}` : "",
       status?.branch ? `Branch: ${status.branch}` : "",
@@ -669,9 +691,15 @@
 
       let result;
       try {
-        result = await OC.postAction(APPLY_URL, {});
+        result = await OC.postAction(APPLY_URL, {}, {
+          timeoutMs: APPLY_REQUEST_TIMEOUT_MS,
+        });
       } catch (err) {
-        setLastError(err.message || "Falha ao solicitar atualização.");
+        setLastError(explainUpdateError(err, OC.consoleUpdateState.status), {
+          code: err.code,
+          timedOut: err.timedOut,
+          detail: err.message,
+        });
         endActivity();
         renderConsoleUpdateBar(OC.consoleUpdateState.status, "idle");
         return;
@@ -679,8 +707,11 @@
 
       if (!result?.ok) {
         setLastError(
-          extractErrorMessage(result) || "Falha ao aplicar atualização.",
-          { phase: result?.phase || "failed" }
+          explainUpdateError(
+            { ...result, message: extractErrorMessage(result) || "Falha ao aplicar atualização." },
+            status
+          ),
+          { phase: result?.phase || "failed", detail: extractErrorMessage(result) }
         );
         endActivity();
         renderConsoleUpdateBar({ ...status, ...result, lastResult: result }, "idle");

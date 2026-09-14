@@ -3,8 +3,12 @@
   window.OpsConsole = window.OpsConsole || {};
   const OC = window.OpsConsole;
 
-  OC.postAction = async function postAction(url, body = {}) {
-    return OC.fetchJson(url, { method: "POST", body: JSON.stringify(body) });
+  OC.postAction = async function postAction(url, body = {}, options = {}) {
+    return OC.fetchJson(url, {
+      method: "POST",
+      body: JSON.stringify(body),
+      ...options,
+    });
   };
 
   OC.putJson = async function putJson(url, body = {}) {
