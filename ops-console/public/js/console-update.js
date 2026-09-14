@@ -127,6 +127,14 @@
     const elapsed = formatElapsed(OC.consoleUpdateState.activityStartedAt);
     const elapsedSuffix = elapsed ? ` (${elapsed})` : "";
 
+    const applyPhaseLabels = {
+      pulling: "Baixando código do remoto",
+      dependencies: "Instalando dependências",
+      automation_runtime: "Atualizando runtime das automações",
+      restarting: "Preparando reinício do console",
+    };
+    const applyPhase = applyPhaseLabels[String(status?.lastResult?.phase || "")] || "";
+
     if (uiState === "checking") {
       return {
         label: "Verificando",
@@ -141,7 +149,7 @@
         tone: "running",
         detail:
           OC.consoleUpdateState.activityLabel ||
-          `Baixando a nova versão e aplicando alterações${lock}…${elapsedSuffix}`,
+          `${applyPhase || "Aplicando alterações"}${lock}…${elapsedSuffix}`,
       };
     }
     if (uiState === "reconnecting") {
@@ -219,6 +227,16 @@
     const elapsed = formatElapsed(OC.consoleUpdateState.activityStartedAt);
     if (uiState !== "idle" && elapsed) {
       chips.push({ label: "tempo", value: elapsed, warn: true });
+    }
+    const phaseLabels = {
+      pulling: "baixando código",
+      dependencies: "instalando dependências",
+      automation_runtime: "atualizando automações",
+      restarting: "preparando reinício",
+    };
+    const phaseLabel = phaseLabels[String(status?.lastResult?.phase || "")];
+    if (uiState === "applying" && phaseLabel) {
+      chips.push({ label: "etapa", value: phaseLabel, warn: true });
     }
     const checked =
       uiState === "checking"
@@ -455,7 +473,11 @@
 
       const lockDetail = status.lockDetail ? ` (${status.lockDetail})` : "";
       if (status.inProgress) {
-        OC.consoleUpdateState.activityLabel = `Atualização em andamento${lockDetail}…`;
+        // Quando o worker já gravou uma fase, deixa a apresentação usar esse
+        // progresso em vez de escondê-lo atrás do texto genérico do lock.
+        OC.consoleUpdateState.activityLabel = status.lastResult?.phase && status.lastResult.phase !== "started"
+          ? null
+          : `Atualização em andamento${lockDetail}…`;
         renderConsoleUpdateBar(status, "applying");
         continue;
       }
@@ -748,7 +770,16 @@
       return;
     }
     setBarVisible(true);
-    renderConsoleUpdateBar(OC.consoleUpdateState.status, "idle");
+    // O dashboard é redesenhado a cada auto-refresh. Durante uma atualização
+    // isso não pode resetar o banner para idle com o SHA anterior: o worker
+    // ainda está aplicando o pull/reinício e o polling abaixo é quem deve
+    // finalizar o estado visual.
+    const activeState = OC.consoleUpdateState.busy || OC.consoleUpdateState.uiState !== "idle";
+    renderConsoleUpdateBar(
+      OC.consoleUpdateState.status,
+      activeState ? OC.consoleUpdateState.uiState : "idle"
+    );
+    if (activeState) return;
     bindConsoleUpdateButton();
     OC.refreshConsoleUpdateBar({ silent: true });
   };

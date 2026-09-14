@@ -275,6 +275,8 @@ async function lockConsole() {
 function resetIdleTimer() {
   if (OC.idleTimer) clearTimeout(OC.idleTimer);
   if (OC.authState.locked || !OC.authState.authenticated) return;
+  // A TV panel is a passive display and must remain available without input.
+  if (window.location.pathname === "/monitoring/tv") return;
   const minutes = OC.authState.idleLockMinutes || 15;
   if (minutes <= 0) return;
   OC.idleTimer = setTimeout(() => lockConsole(), minutes * 60 * 1000);

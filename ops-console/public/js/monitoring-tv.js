@@ -6,6 +6,7 @@
   const TRAFFIC_COLORS = { requests: "var(--cyan)", uniqueUsers: "var(--purple)", memory: "var(--green)" };
   const LATENCY_COLOR = "var(--amber)";
   const REFRESH_MS = 30_000;
+  const SESSION_HEARTBEAT_MS = 60_000;
   const THEME_STORAGE_KEY = "ops-monitoring-tv-theme-v3";
   let refreshing = false;
 
@@ -441,6 +442,14 @@
     if (date) date.textContent = now.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
   }
 
+  async function heartbeatSession() {
+    try {
+      await fetchJson("/api/v1/auth/heartbeat");
+    } catch (_) {
+      // The regular dashboard requests will show the connection/auth error.
+    }
+  }
+
   function applyTheme(theme, persist = true) {
     const selected = theme === "dark" ? "dark" : "light";
     const dark = selected === "dark";
@@ -465,6 +474,8 @@
   tickClock();
   window.setInterval(tickClock, 1000);
   window.setInterval(refresh, REFRESH_MS);
+  window.setInterval(heartbeatSession, SESSION_HEARTBEAT_MS);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
   refresh();
+  heartbeatSession();
 }());

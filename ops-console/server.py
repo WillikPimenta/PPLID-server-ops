@@ -54,7 +54,7 @@ PROTECTED_API_PREFIXES = (
     "/api/v1/automations",
     "/api/v1/console/",
 )
-AUTH_PUBLIC_PATHS = {"/api/v1/auth/status"}
+AUTH_PUBLIC_PATHS = {"/api/v1/auth/status", "/api/v1/auth/heartbeat"}
 
 
 def get_ops_console_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -1273,6 +1273,22 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         session = self._current_session()
         self._send_json(auth_status_from_session(session, self.config))
 
+    def _handle_auth_heartbeat(self) -> None:
+        """Renew an unlocked session for passive displays such as the TV panel."""
+        session = self._current_session()
+        if not session or session.get("locked"):
+            self._send_json(auth_status_from_session(session, self.config))
+            return
+
+        payload = build_session_payload(
+            session.get("username", ""),
+            session.get("displayName", ""),
+            session.get("authSource", "django"),
+            locked=False,
+            config=self.config,
+        )
+        self._send_json(auth_status_from_session(payload, self.config), set_session=payload)
+
     def _handle_auth_unlock(self) -> None:
         body = self._read_json_body()
         session = self._current_session()
@@ -1843,6 +1859,9 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/auth/status":
             self._handle_auth_status()
+            return
+        if path == "/api/v1/auth/heartbeat":
+            self._handle_auth_heartbeat()
             return
 
         if is_api_protected(path) and not self._require_unlocked_session():

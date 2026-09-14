@@ -222,6 +222,18 @@ if ($Apply) {
 
     $previousSha = $status.currentSha
     $targetSha = $status.remoteSha
+    $startedAt = (Get-Date).ToUniversalTime().ToString("o")
+    Write-ApplyResult -Payload @{
+        ok = $true
+        accepted = $true
+        applied = $false
+        restarting = $false
+        phase = "pulling"
+        previousSha = $previousSha
+        targetSha = $targetSha
+        branch = $status.branch
+        startedAt = $startedAt
+    }
     $requirements = Join-Path $opsConsoleDir "requirements.txt"
     $nativeBackendReq = Join-Path $opsConsoleDir "automation-native\backend\requirements.txt"
     $nativeBotsReq = Join-Path $opsConsoleDir "automation-native\automacoes\requirements.txt"
@@ -253,6 +265,17 @@ if ($Apply) {
     }
 
     $newStatus = Get-ConsoleUpdateStatus -RepoDir $OpsRepoDir
+    Write-ApplyResult -Payload @{
+        ok = $true
+        accepted = $true
+        applied = $true
+        restarting = $false
+        phase = "dependencies"
+        previousSha = $previousSha
+        targetSha = $newStatus.currentSha
+        branch = $newStatus.branch
+        startedAt = $startedAt
+    }
     $requirementsAfter = $null
     if (Test-Path $requirements) {
         $requirementsAfter = Get-FileHash $requirements -Algorithm SHA256
@@ -287,6 +310,17 @@ if ($Apply) {
     }
 
     if ($automationDepsChanged -or $depsChanged) {
+        Write-ApplyResult -Payload @{
+            ok = $true
+            accepted = $true
+            applied = $true
+            restarting = $false
+            phase = "automation_runtime"
+            previousSha = $previousSha
+            targetSha = $newStatus.currentSha
+            branch = $newStatus.branch
+            startedAt = $startedAt
+        }
         $venvPython = Join-Path $opsConsoleDir ".venv\Scripts\python.exe"
         $bootstrap = Join-Path $opsConsoleDir "tools\bootstrap_automation_runtime.py"
         if ((Test-Path $venvPython) -and (Test-Path $bootstrap)) {
@@ -312,6 +346,17 @@ if ($Apply) {
         }
     }
 
+    Write-ApplyResult -Payload @{
+        ok = $true
+        accepted = $true
+        applied = $true
+        restarting = $true
+        phase = "restarting"
+        previousSha = $previousSha
+        targetSha = $newStatus.currentSha
+        branch = $newStatus.branch
+        startedAt = $startedAt
+    }
     Clear-ConsoleUpdateLock
     Write-ApplyResult -Payload @{
         ok = $true
