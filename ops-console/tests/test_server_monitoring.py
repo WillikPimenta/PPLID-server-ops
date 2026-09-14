@@ -96,6 +96,7 @@ class BuildMonitoringTests(unittest.TestCase):
         self.assertGreater(summary["health"]["p95"], summary["health"]["avg"])
         self.assertIn("dataFresh", summary)
 
+
     def test_build_monitoring_series(self) -> None:
         series = sm.build_monitoring_series(self.config, "DEV", "health_latency_ms", hours=168)
         self.assertGreaterEqual(len(series["points"]), 1)
@@ -565,6 +566,87 @@ class BuildMonitoringTests(unittest.TestCase):
         self.assertEqual(agg["total24h"], 2)
         self.assertEqual(agg["failed24h"], 1)
         self.assertEqual(agg["failuresByStep"]["git_fetch"], 1)
+
+
+class MonitoringDiagnosisTests(unittest.TestCase):
+    def test_storage_is_ranked_as_high_confidence_cause(self) -> None:
+        result = sm.build_monitoring_diagnosis(
+            {},
+            [{"env": "MAIN", "summary": {"dataFresh": True, "latestReachable": True}}],
+            [],
+            host={
+                "generatedAt": "2026-09-14T12:00:00Z",
+                "thresholds": {"diskWarnFreePct": 15, "diskCriticalFreePct": 8},
+                "disks": [{"mount": "C:\\", "freePct": 4.5, "freeBytes": 4 * 1024**3}],
+            },
+        )
+
+        self.assertEqual(result["primary"]["cause"], "storage")
+        self.assertEqual(result["primary"]["confidence"], "high")
+        self.assertIn("C:\\", result["primary"]["detail"])
+
+    def test_api_route_is_exposed_when_route_is_slow(self) -> None:
+        result = sm.build_monitoring_diagnosis(
+            {},
+            [{
+                "env": "MAIN",
+                "summary": {
+                    "dataFresh": True,
+                    "latestReachable": True,
+                    "since": "2026-09-14T11:00:00Z",
+                    "health": {"latestAt": "2026-09-14T12:00:00Z"},
+                    "api": {
+                        "totals": {"requests": 100, "errors5xx": 12},
+                        "routeStats": [{
+                            "method": "GET",
+                            "route": "/api/v1/dashboard/overview/",
+                            "avgMs": 3200,
+                            "maxMs": 5400,
+                            "errors5xx": 12,
+                        }],
+                    },
+                },
+            }],
+            [],
+        )
+
+        self.assertEqual(result["primary"]["cause"], "api")
+        self.assertIn("/api/v1/dashboard/overview/", result["primary"]["detail"])
+        self.assertEqual(result["primary"]["link"], "/monitoring/apis?env=MAIN")
+
+    def test_offline_beats_lower_confidence_signals(self) -> None:
+        result = sm.build_monitoring_diagnosis(
+            {},
+            [{
+                "env": "DEV",
+                "summary": {
+                    "dataFresh": True,
+                    "latestReachable": False,
+                    "health": {"latestAt": "2026-09-14T12:00:00Z"},
+                    "syncFailures24h": 1,
+                },
+            }],
+            [{
+                "environment": "DEV",
+                "category": "sync",
+                "title": "Sync falhou (source/kind)",
+                "lastAt": "2026-09-14T11:59:00Z",
+            }],
+        )
+
+        self.assertEqual(result["primary"]["cause"], "availability")
+        self.assertEqual(result["byEnvironment"]["DEV"]["primary"]["label"], "Backend indisponível")
+
+    def test_stale_collection_is_explicitly_diagnosed(self) -> None:
+        result = sm.build_monitoring_diagnosis(
+            {},
+            [{"env": "HOM", "summary": {"dataFresh": False, "latestReachable": True}}],
+            [],
+            collector_status={"status": "stale", "label": "Coleta atrasada"},
+        )
+
+        self.assertEqual(result["primary"]["cause"], "monitoring")
+        self.assertIn("atrasada", result["primary"]["detail"])
 
 
 class HourlyProductivityStatusTests(unittest.TestCase):

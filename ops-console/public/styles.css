@@ -4615,6 +4615,146 @@ body.is-locked .auth-mode-banner {
   font-weight: var(--font-weight-semibold);
 }
 
+.monitor-diagnosis {
+  position: relative;
+  overflow: hidden;
+}
+
+.monitor-diagnosis::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: var(--color-primary-blue);
+}
+
+.monitor-diagnosis.is-availability::before,
+.monitor-diagnosis.is-storage::before,
+.monitor-diagnosis.is-host::before,
+.monitor-diagnosis.is-postgres::before,
+.monitor-diagnosis.is-deploy::before {
+  background: var(--color-tertiary-red);
+}
+
+.monitor-diagnosis.is-api::before,
+.monitor-diagnosis.is-logs::before,
+.monitor-diagnosis.is-sync::before {
+  background: var(--color-tertiary-orange);
+}
+
+.monitor-diagnosis-layout {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1.1fr) minmax(18rem, 1fr) minmax(14rem, 0.8fr);
+  gap: var(--spacing-5);
+  align-items: start;
+}
+
+.monitor-diagnosis-lead {
+  min-width: 0;
+}
+
+.monitor-diagnosis-kicker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.8rem;
+  margin-bottom: var(--spacing-2);
+  color: var(--theme-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.monitor-diagnosis-kicker span:first-child {
+  color: var(--color-primary-blue);
+  font-weight: var(--font-weight-semibold);
+}
+
+.monitor-diagnosis-lead h4,
+.monitor-diagnosis-evidence h4,
+.monitor-diagnosis-secondary h4 {
+  margin: 0;
+  color: var(--theme-text-primary);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+}
+
+.monitor-diagnosis-lead p {
+  margin: var(--spacing-2) 0;
+  color: var(--theme-text-secondary);
+  line-height: 1.45;
+}
+
+.monitor-diagnosis-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 1rem;
+  margin-bottom: var(--spacing-3);
+  color: var(--theme-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.monitor-diagnosis-evidence,
+.monitor-diagnosis-secondary {
+  min-width: 0;
+  padding-left: var(--spacing-4);
+  border-left: 1px solid var(--theme-border);
+}
+
+.monitor-diagnosis-evidence ul,
+.monitor-diagnosis-secondary ul {
+  display: grid;
+  gap: var(--spacing-2);
+  margin: var(--spacing-3) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--theme-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.monitor-diagnosis-evidence li {
+  display: flex;
+  gap: var(--spacing-2);
+  align-items: flex-start;
+  line-height: 1.4;
+}
+
+.monitor-diagnosis-evidence-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  flex: 0 0 auto;
+  margin-top: 0.35rem;
+  border-radius: 50%;
+  background: var(--color-primary-blue);
+}
+
+.monitor-diagnosis-secondary li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 var(--spacing-2);
+  align-items: baseline;
+}
+
+.monitor-diagnosis-secondary li > span {
+  color: var(--theme-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.monitor-diagnosis-secondary small {
+  grid-column: 2;
+  color: var(--theme-text-muted);
+  line-height: 1.35;
+}
+
+.monitor-diagnosis-empty {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  color: var(--theme-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.monitor-diagnosis-empty span {
+  color: var(--theme-text-muted);
+}
+
 .monitor-timeline {
   list-style: none;
   margin: 0;
@@ -4834,6 +4974,16 @@ body.is-locked .auth-mode-banner {
   .monitor-env-vision-grid {
     grid-template-columns: 1fr;
   }
+  .monitor-diagnosis-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .monitor-diagnosis-secondary {
+    grid-column: 1 / -1;
+    padding-top: var(--spacing-4);
+    padding-left: 0;
+    border-top: 1px solid var(--theme-border);
+    border-left: 0;
+  }
   .monitor-hero-stats {
     grid-template-columns: 1fr 1fr;
     width: 100%;
@@ -4847,6 +4997,17 @@ body.is-locked .auth-mode-banner {
   .monitor-timeline-item {
     grid-template-columns: 1fr;
     padding-left: var(--spacing-6);
+  }
+  .monitor-diagnosis-layout {
+    grid-template-columns: 1fr;
+  }
+  .monitor-diagnosis-evidence,
+  .monitor-diagnosis-secondary {
+    grid-column: auto;
+    padding-top: var(--spacing-4);
+    padding-left: 0;
+    border-top: 1px solid var(--theme-border);
+    border-left: 0;
   }
   .monitor-hero {
     padding: var(--spacing-5);

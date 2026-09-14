@@ -1471,6 +1471,86 @@
     </section>`;
   }
 
+  function diagnosisConfidenceLabel(value) {
+    return {
+      high: "confiança alta",
+      medium: "confiança média",
+      low: "evidência fraca",
+    }[String(value || "").toLowerCase()] || "evidência limitada";
+  }
+
+  function diagnosisCauseLabel(cause) {
+    return {
+      api: "API",
+      availability: "Disponibilidade",
+      storage: "Armazenamento",
+      host: "Recursos do host",
+      postgres: "PostgreSQL",
+      deploy: "Deploy",
+      sync: "Sincronização",
+      logs: "Logs",
+      monitoring: "Monitoramento",
+    }[String(cause || "").toLowerCase()] || "Operação";
+  }
+
+  function renderDiagnosisEvidence(evidence) {
+    return (evidence || []).slice(0, 3).map((item) => {
+      const values = [];
+      if (item.avgMs != null) values.push(`média ${item.avgMs}ms`);
+      if (item.maxMs != null) values.push(`máximo ${item.maxMs}ms`);
+      if (item.errors5xx != null && Number(item.errors5xx) > 0) values.push(`${item.errors5xx} erro(s) 5xx`);
+      if (item.freePct != null) values.push(`${item.freePct}% livre`);
+      if (item.freeBytes != null) {
+        const gb = Number(item.freeBytes) / (1024 * 1024 * 1024);
+        if (Number.isFinite(gb)) values.push(`${gb.toFixed(1)} GB`);
+      }
+      if (item.value != null) values.push(`${item.value}%`);
+      if (item.max != null) values.push(`máximo ${item.max}`);
+      if (item.count != null) values.push(`${item.count} ocorrência(s)`);
+      const detail = item.detail || values.join(" · ");
+      return `<li><span class="monitor-diagnosis-evidence-dot" aria-hidden="true"></span><span><strong>${OC.escapeHtml(item.label || "Sinal detectado")}</strong>${detail ? ` · ${OC.escapeHtml(detail)}` : ""}</span></li>`;
+    }).join("");
+  }
+
+  function renderMonitoringDiagnosis(diagnosis) {
+    const primary = diagnosis?.primary;
+    if (!primary) {
+      return `<section class="monitor-section monitor-diagnosis is-neutral" aria-labelledby="monitor-diagnosis-title">
+        <div class="monitor-section-head">
+          <h3 class="monitor-section-title" id="monitor-diagnosis-title">Diagnóstico operacional</h3>
+          <span class="monitor-meta-muted">Última ocorrência relevante</span>
+        </div>
+        <div class="monitor-diagnosis-empty"><strong>Nenhuma causa provável identificada.</strong><span>Não há sinais suficientes de queda, lentidão ou pressão de recursos no período.</span></div>
+      </section>`;
+    }
+
+    const cause = String(primary.cause || "monitoring").toLowerCase();
+    const evidence = renderDiagnosisEvidence(primary.evidence);
+    const secondary = (diagnosis.secondary || []).slice(0, 3).map((item) => `<li><span>${OC.escapeHtml(item.environment || "")}</span><strong>${OC.escapeHtml(item.label || diagnosisCauseLabel(item.cause))}</strong><small>${OC.escapeHtml(item.detail || "")}</small></li>`).join("");
+    const when = primary.detectedAt ? OC.formatDate(primary.detectedAt) : "horário não disponível";
+    const actionLabel = cause === "api" ? "Investigar APIs" : cause === "storage" || cause === "host" ? "Ver recursos do computador" : "Abrir investigação";
+    return `<section class="monitor-section monitor-diagnosis is-${OC.escapeHtml(cause)}" aria-labelledby="monitor-diagnosis-title">
+      <div class="monitor-section-head">
+        <h3 class="monitor-section-title" id="monitor-diagnosis-title">Diagnóstico operacional</h3>
+        <span class="monitor-meta-muted">Última ocorrência relevante</span>
+      </div>
+      <div class="monitor-diagnosis-layout">
+        <div class="monitor-diagnosis-lead">
+          <div class="monitor-diagnosis-kicker"><span>${OC.escapeHtml(diagnosisCauseLabel(cause))}</span><span>${OC.escapeHtml(diagnosisConfidenceLabel(primary.confidence))}</span></div>
+          <h4>${OC.escapeHtml(primary.label || "Causa não determinada")}</h4>
+          <p>${OC.escapeHtml(primary.detail || "Sinais correlatos detectados no período.")}</p>
+          <div class="monitor-diagnosis-meta"><span>${OC.escapeHtml(primary.environment || "HOST")}</span><span>${OC.escapeHtml(when)}</span></div>
+          <a class="btn btn-secondary btn-sm" href="${OC.escapeHtml(primary.link || "/monitoring/incidents")}">${OC.escapeHtml(actionLabel)}</a>
+        </div>
+        <div class="monitor-diagnosis-evidence">
+          <h4>Evidências que sustentam a hipótese</h4>
+          <ul>${evidence || "<li><span>Evento operacional correlato detectado.</span></li>"}</ul>
+        </div>
+        ${secondary ? `<div class="monitor-diagnosis-secondary"><h4>Outros sinais</h4><ul>${secondary}</ul></div>` : ""}
+      </div>
+    </section>`;
+  }
+
   function renderIncidentTimeline(groups, limit) {
     if (!groups?.length) {
       return `<p class="monitor-empty monitor-empty-ok">Nenhum incidente recente.</p>`;
@@ -2866,6 +2946,8 @@
       syncs: {},
       deploys: {},
       logs: {},
+      host: null,
+      diagnosis: null,
     };
   }
 
@@ -2897,6 +2979,7 @@
         );
         return `${renderKpiRow(kpis)}
           ${renderGlobalStatusBanner(overviews, config)}
+          ${renderMonitoringDiagnosis(payload.diagnosis)}
           ${renderStatusOverview(overviews, uptimeByEnv)}
           ${OC.renderOpsSection({
             title: "Disponibilidade",
@@ -3834,6 +3917,8 @@
     let syncs = { ...emptyPayloadExtras().syncs, ...(prev.syncs || {}) };
     let deploys = { ...emptyPayloadExtras().deploys, ...(prev.deploys || {}) };
     let logs = { ...emptyPayloadExtras().logs, ...(prev.logs || {}) };
+    let host = prev.host || null;
+    let diagnosis = prev.diagnosis || null;
 
     const payloadFields = () => ({
       config,
@@ -3847,6 +3932,8 @@
       syncs,
       deploys,
       logs,
+      host,
+      diagnosis,
       warnings,
     });
 
@@ -3950,6 +4037,8 @@
         if (config?.error) warnings.push(config.error);
         OC.monitorState.config = config;
         envSummaries = dash.envSummaries || envSummaries;
+        host = dash.host || host;
+        diagnosis = dash.diagnosis || diagnosis;
         healthSeries = { ...healthSeries, ...(dash.healthSeries || {}) };
         deploys = { ...deploys, ...(dash.deploys || {}) };
         groupedEvents =

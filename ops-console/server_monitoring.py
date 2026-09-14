@@ -2095,6 +2095,9 @@ def build_monitoring_summary(
     pg_conn = ops_store.aggregate_monitor_samples(
         env_name, "pg_connections_total", since=since, db_path=db_path
     )
+    pg_locks = ops_store.aggregate_monitor_samples(
+        env_name, "pg_blocking_locks", since=since, db_path=db_path
+    )
     log_errors = ops_store.aggregate_monitor_samples(
         env_name, "service_log_errors", since=since, db_path=db_path
     )
@@ -2126,7 +2129,7 @@ def build_monitoring_summary(
         "uptimePct": uptime_pct,
         "latestReachable": latest_reachable >= 1.0,
         "dataFresh": data_fresh,
-        "postgres": {"connections": pg_conn},
+        "postgres": {"connections": pg_conn, "blockingLocks": pg_locks},
         "logErrors": log_errors,
         "api": api_metrics,
         "syncFailures24h": sync_failures_24h,
@@ -3206,6 +3209,9 @@ def build_monitoring_summary_lite(
     pg_conn = ops_store.aggregate_monitor_samples(
         env_name, "pg_connections_total", since=since, db_path=db_path
     )
+    pg_locks = ops_store.aggregate_monitor_samples(
+        env_name, "pg_blocking_locks", since=since, db_path=db_path
+    )
     log_errors = ops_store.aggregate_monitor_samples(
         env_name, "service_log_errors", since=since, db_path=db_path
     )
@@ -3229,7 +3235,7 @@ def build_monitoring_summary_lite(
         "uptimePct": uptime_pct,
         "latestReachable": latest_reachable,
         "dataFresh": _is_data_fresh(config),
-        "postgres": {"connections": pg_conn},
+        "postgres": {"connections": pg_conn, "blockingLocks": pg_locks},
         "logErrors": log_errors,
         "api": api_metrics,
         "syncFailures24h": _count_sync_failure_events_24h(
@@ -3237,6 +3243,468 @@ def build_monitoring_summary_lite(
         ),
         "syncQueryError": None,
         "lite": True,
+    }
+
+
+def _diagnosis_link(env_name: str, cause: str) -> str:
+    env = str(env_name or "").upper()
+    links = {
+        "api": f"/monitoring/apis?env={env}",
+        "availability": f"/monitoring/latency?env={env}",
+        "storage": "/host",
+        "host": "/host",
+        "postgres": f"/database/{env}",
+        "deploy": f"/?env={env}",
+        "sync": f"/monitoring/syncs?env={env}",
+        "logs": f"/monitoring/logs?env={env}",
+        "monitoring": "/monitoring/summary",
+    }
+    return links.get(cause, f"/monitoring/incidents?env={env}")
+
+
+def _diagnosis_event_candidate(event: dict[str, Any]) -> dict[str, Any] | None:
+    title = str(event.get("title") or "").strip()
+    lowered = title.casefold()
+    category = str(event.get("category") or "").lower()
+    env = str(event.get("environment") or "").upper()
+    recorded_at = event.get("lastAt") or event.get("recorded_at") or event.get("firstAt")
+    if not title or "recuperado" in lowered or "recovered" in lowered:
+        return None
+
+    cause = None
+    label = title
+    score = 45
+    confidence = "low"
+    if "offline" in lowered or (category in ("availability", "health") and "falh" in lowered):
+        cause, label, score, confidence = "availability", "Backend indisponível", 100, "high"
+    elif category in ("availability", "health") and any(
+        token in lowered for token in ("latência", "latencia", "pico", "lento")
+    ):
+        cause, label, score, confidence = "availability", "Health lento", 72, "medium"
+    elif category == "host" and any(token in lowered for token in ("disco", "espaço", "espaco")):
+        cause, label, score, confidence = "storage", "Pouco espaço no disco", 96, "high"
+    elif category == "host" and any(token in lowered for token in ("cpu", "processador")):
+        cause, label, score, confidence = "host", "CPU do host sob pressão", 84, "high"
+    elif category == "host" and any(token in lowered for token in ("memória", "memoria", "ram", "commit")):
+        cause, label, score, confidence = "host", "Memória do host sob pressão", 84, "high"
+    elif category == "postgres" or "lock" in lowered or "postgres" in lowered:
+        cause, label, score, confidence = "postgres", "PostgreSQL sob pressão", 78, "medium"
+    elif category == "deploy" or "deploy" in lowered:
+        cause, label, score, confidence = "deploy", "Deploy com falha", 82, "medium"
+    elif category == "sync" or "sync" in lowered:
+        cause, label, score, confidence = "sync", "Falha de sincronização", 58, "low"
+    elif category in ("logs", "log"):
+        cause, label, score, confidence = "logs", "Erros nos logs", 52, "low"
+    else:
+        return None
+
+    sample_event = event.get("sampleEvent") or {}
+    detail = str(event.get("detail") or sample_event.get("detail") or "").strip()
+    event_id = event.get("sampleEventId") or event.get("id") or sample_event.get("id")
+    offline_duration = event.get("offlineDurationLabel") or sample_event.get("offlineDurationLabel")
+    if offline_duration and cause == "availability":
+        detail = f"{detail} · indisponível por {offline_duration}" if detail else f"Indisponível por {offline_duration}"
+    evidence = [{
+        "type": "event",
+        "label": title,
+        "detail": detail[:240] if detail else None,
+        "at": recorded_at,
+    }]
+    return {
+        "cause": cause,
+        "label": label,
+        "score": score,
+        "confidence": confidence,
+        "environment": env,
+        "detectedAt": recorded_at,
+        "detail": detail[:240] if detail else title,
+        "durationLabel": offline_duration,
+        "ongoing": bool(event.get("offlineOngoing") or sample_event.get("offlineOngoing")),
+        "evidence": evidence,
+        "eventId": event_id,
+        "link": _diagnosis_link(env, cause),
+    }
+
+
+def _diagnosis_metric_candidate(
+    *,
+    cause: str,
+    label: str,
+    environment: str,
+    detail: str,
+    score: int,
+    confidence: str,
+    detected_at: str | None,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "cause": cause,
+        "label": label,
+        "score": score,
+        "confidence": confidence,
+        "environment": environment,
+        "detectedAt": detected_at,
+        "detail": detail,
+        "evidence": evidence,
+        "link": _diagnosis_link(environment, cause),
+    }
+
+
+def _diagnosis_candidate_is_active(candidate: dict[str, Any]) -> bool:
+    cause = str(candidate.get("cause") or "").lower()
+    label = str(candidate.get("label") or "").lower()
+    if cause == "availability" and "backend indisponível" in label:
+        return True
+    if cause == "monitoring" and any(token in label for token in ("atrasada", "indisponível", "lento")):
+        return True
+    if cause in ("storage", "host"):
+        evidence = candidate.get("evidence") or []
+        return bool(evidence and evidence[0].get("type") != "event")
+    return False
+
+
+def _diagnosis_candidate_time(candidate: dict[str, Any]) -> float:
+    parsed = _parse_iso_dt(candidate.get("detectedAt"))
+    return parsed.timestamp() if parsed else 0.0
+
+
+def _diagnosis_host_candidates(host: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(host, dict) or host.get("error"):
+        return []
+    thresholds = host.get("thresholds") or {}
+    detected_at = host.get("generatedAt")
+    candidates: list[dict[str, Any]] = []
+
+    def add_pressure(value: Any, warn_key: str, critical_key: str, label: str) -> None:
+        try:
+            current = float(value)
+            warn = float(thresholds.get(warn_key) or 0)
+            critical = float(thresholds.get(critical_key) or 100)
+        except (TypeError, ValueError):
+            return
+        if current < warn:
+            return
+        critical_now = current >= critical
+        candidates.append(
+            _diagnosis_metric_candidate(
+                cause="host",
+                label=label,
+                environment="HOST",
+                detail=f"Uso atual: {current:.1f}%",
+                score=92 if critical_now else 76,
+                confidence="high" if critical_now else "medium",
+                detected_at=detected_at,
+                evidence=[
+                    {"type": "host", "label": label, "value": round(current, 1), "at": detected_at}
+                ],
+            )
+        )
+
+    add_pressure((host.get("cpu") or {}).get("usedPct"), "cpuWarnPct", "cpuCriticalPct", "CPU do host sob pressão")
+    add_pressure((host.get("memory") or {}).get("usedPct"), "memoryWarnPct", "memoryCriticalPct", "Memória do host sob pressão")
+    add_pressure((host.get("commit") or {}).get("usedPct"), "commitWarnPct", "commitCriticalPct", "Memória comprometida sob pressão")
+
+    for disk in host.get("disks") or []:
+        try:
+            free_pct = float(disk.get("freePct"))
+        except (TypeError, ValueError):
+            continue
+        warn = float(thresholds.get("diskWarnFreePct") or 15)
+        critical = float(thresholds.get("diskCriticalFreePct") or 8)
+        if free_pct > warn:
+            continue
+        mount = str(disk.get("mount") or disk.get("device") or "volume")
+        free_bytes = disk.get("freeBytes")
+        free_label = f"{free_pct:.1f}% livre"
+        if free_bytes is not None:
+            try:
+                free_label += f" ({float(free_bytes) / (1024 ** 3):.1f} GB)"
+            except (TypeError, ValueError):
+                pass
+        candidates.append(
+            _diagnosis_metric_candidate(
+                cause="storage",
+                label="Pouco espaço no disco",
+                environment="HOST",
+                detail=f"{mount}: {free_label}",
+                score=98 if free_pct <= critical else 88,
+                confidence="high",
+                detected_at=detected_at,
+                evidence=[
+                    {"type": "disk", "label": mount, "freePct": round(free_pct, 1), "freeBytes": free_bytes, "at": detected_at}
+                ],
+            )
+        )
+    return candidates
+
+
+def _diagnosis_api_candidate(env_name: str, summary: dict[str, Any]) -> dict[str, Any] | None:
+    api = summary.get("api") or {}
+    if api.get("deferred") or api.get("error") or api.get("reachable") is False:
+        return None
+    totals = api.get("totals") or {}
+    requests = int(totals.get("requests") or 0)
+    errors = int(totals.get("errors5xx") or totals.get("status5xx") or 0)
+    routes = list(api.get("routeStats") or api.get("slowRoutes") or [])
+    eligible: list[tuple[float, dict[str, Any]]] = []
+    for route in routes:
+        try:
+            avg_ms = float(route.get("avgMs") or route.get("avg_ms") or 0)
+            max_ms = float(route.get("maxMs") or route.get("max_ms") or 0)
+            route_errors = int(route.get("errors5xx") or route.get("status5xx") or 0)
+        except (TypeError, ValueError):
+            continue
+        if avg_ms >= 2000 or max_ms >= 3000 or route_errors > 0:
+            eligible.append((max(avg_ms, max_ms / 2, route_errors * 250), route))
+    if not eligible and not errors:
+        return None
+    route = max(eligible, key=lambda item: item[0])[1] if eligible else None
+    if route:
+        method = str(route.get("method") or "GET")
+        path = str(route.get("route") or "rota")
+        avg_ms = route.get("avgMs") if route.get("avgMs") is not None else route.get("avg_ms")
+        max_ms = route.get("maxMs") if route.get("maxMs") is not None else route.get("max_ms")
+        route_errors = route.get("errors5xx") if route.get("errors5xx") is not None else route.get("status5xx") or 0
+        detail = f"{method} {path} · média {avg_ms or 0}ms · máximo {max_ms or 0}ms"
+        if route_errors:
+            detail += f" · {route_errors} erro(s) 5xx"
+        strong_signal = float(avg_ms or 0) >= 3000 or int(route_errors or 0) >= 10
+        score = 88 if strong_signal else 74
+        evidence = [{"type": "api", "label": f"{method} {path}", "avgMs": avg_ms, "maxMs": max_ms, "errors5xx": route_errors}]
+    else:
+        rate = round(errors * 100 / requests, 2) if requests else 0
+        detail = f"{errors} erro(s) 5xx em {requests} requisição(ões) ({rate}%)"
+        strong_signal = errors >= 10
+        score = 84 if errors >= 10 else 68
+        evidence = [{"type": "api", "label": "Erros HTTP 5xx", "requests": requests, "errors5xx": errors}]
+    return _diagnosis_metric_candidate(
+        cause="api",
+        label="API/rota lenta ou com erros",
+        environment=env_name,
+        detail=detail,
+        score=score,
+        confidence="high" if strong_signal else "medium",
+        detected_at=((api.get("traffic") or {}).get("until")
+                     or (summary.get("health") or {}).get("latestAt")
+                     or summary.get("since")),
+        evidence=evidence,
+    )
+
+
+def _diagnosis_pg_candidate(env_name: str, summary: dict[str, Any]) -> dict[str, Any] | None:
+    postgres = summary.get("postgres") or {}
+    locks = postgres.get("blockingLocks") or {}
+    max_locks = float(locks.get("max") or 0)
+    if max_locks <= 0:
+        return None
+    return _diagnosis_metric_candidate(
+        cause="postgres",
+        label="PostgreSQL com locks bloqueantes",
+        environment=env_name,
+        detail=f"Até {int(max_locks)} lock(s) bloqueante(s) no período",
+        score=82,
+        confidence="high",
+        detected_at=locks.get("latestAt") or (summary.get("health") or {}).get("latestAt"),
+        evidence=[{"type": "postgres", "label": "Locks bloqueantes", "max": int(max_locks)}],
+    )
+
+
+def _diagnosis_deploy_candidate(env_name: str, deploy: dict[str, Any] | None) -> dict[str, Any] | None:
+    aggregates = (deploy or {}).get("aggregates24h") or {}
+    failed = aggregates.get("lastFailed")
+    if not failed:
+        return None
+    failed_at = failed.get("finished_at") or failed.get("started_at")
+    last_success = aggregates.get("lastSuccess") or {}
+    success_at = last_success.get("finished_at") or last_success.get("started_at")
+    if success_at and failed_at and str(failed_at) <= str(success_at):
+        return None
+    step = failed.get("failed_step") or "etapa desconhecida"
+    return _diagnosis_metric_candidate(
+        cause="deploy",
+        label="Último deploy falhou",
+        environment=env_name,
+        detail=f"Falha na etapa {step}",
+        score=80,
+        confidence="medium",
+        detected_at=failed_at,
+        evidence=[{"type": "deploy", "label": "Deploy", "step": step, "at": failed_at}],
+    )
+
+
+def _diagnosis_for_environment(
+    env_name: str,
+    summary: dict[str, Any],
+    events: list[dict[str, Any]],
+    deploy: dict[str, Any] | None,
+) -> dict[str, Any]:
+    env = env_name.upper()
+    candidates: list[dict[str, Any]] = []
+    data_fresh = summary.get("dataFresh") is not False
+    if not data_fresh:
+        candidates.append(
+            _diagnosis_metric_candidate(
+                cause="monitoring",
+                label="Coleta de monitoramento atrasada",
+                environment=env,
+                detail="Não há dados recentes suficientes para confirmar a causa.",
+                score=94,
+                confidence="high",
+                detected_at=(summary.get("health") or {}).get("latestAt"),
+                evidence=[{"type": "collector", "label": "Dados desatualizados", "at": (summary.get("health") or {}).get("latestAt")}],
+            )
+        )
+    if data_fresh and summary.get("latestReachable") is False:
+        candidates.append(
+            _diagnosis_metric_candidate(
+                cause="availability",
+                label="Backend indisponível",
+                environment=env,
+                detail="O último health check não respondeu.",
+                score=100,
+                confidence="high",
+                detected_at=(summary.get("health") or {}).get("latestAt"),
+                evidence=[{"type": "health", "label": "Health check sem resposta", "at": (summary.get("health") or {}).get("latestAt")}],
+            )
+        )
+    for event in events:
+        candidate = _diagnosis_event_candidate(event)
+        if candidate:
+            candidates.append(candidate)
+    api_candidate = _diagnosis_api_candidate(env, summary)
+    if api_candidate:
+        candidates.append(api_candidate)
+    pg_candidate = _diagnosis_pg_candidate(env, summary)
+    if pg_candidate:
+        candidates.append(pg_candidate)
+    deploy_candidate = _diagnosis_deploy_candidate(env, deploy)
+    if deploy_candidate:
+        candidates.append(deploy_candidate)
+    if int(summary.get("syncFailures24h") or 0) > 0:
+        candidates.append(
+            _diagnosis_metric_candidate(
+                cause="sync",
+                label="Falha de sincronização recente",
+                environment=env,
+                detail=f"{int(summary.get('syncFailures24h'))} falha(s) ativa(s) nas últimas 24h",
+                score=56,
+                confidence="low",
+                detected_at=summary.get("since"),
+                evidence=[{"type": "sync", "label": "Falhas nas sincronizações", "count": int(summary.get("syncFailures24h"))}],
+            )
+        )
+    if float((summary.get("logErrors") or {}).get("max") or 0) > 0:
+        candidates.append(
+            _diagnosis_metric_candidate(
+                cause="logs",
+                label="Erros recentes nos logs",
+                environment=env,
+                detail=f"Pico de {(summary.get('logErrors') or {}).get('max')} erro(s) no período",
+                score=50,
+                confidence="low",
+                detected_at=(summary.get("logErrors") or {}).get("latestAt"),
+                evidence=[{"type": "logs", "label": "Erros de serviço", "max": (summary.get("logErrors") or {}).get("max")}],
+            )
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            _diagnosis_candidate_is_active(item),
+            _diagnosis_candidate_time(item),
+            int(item.get("score") or 0),
+        ),
+        reverse=True,
+    )
+    primary = candidates[0] if candidates else None
+    return {
+        "environment": env,
+        "status": primary.get("cause") if primary else "ok",
+        "primary": primary,
+        "secondary": candidates[1:3],
+        "candidateCount": len(candidates),
+        "dataFresh": data_fresh,
+    }
+
+
+def build_monitoring_diagnosis(
+    config: dict[str, Any],
+    env_summaries: list[dict[str, Any]],
+    grouped_events: list[dict[str, Any]],
+    *,
+    host: dict[str, Any] | None = None,
+    deploys: dict[str, Any] | None = None,
+    collector_status: dict[str, Any] | None = None,
+    dashboard_timing_ms: float | None = None,
+) -> dict[str, Any]:
+    by_env: dict[str, dict[str, Any]] = {}
+    all_candidates: list[dict[str, Any]] = []
+    events_by_env: dict[str, list[dict[str, Any]]] = {}
+    for event in grouped_events or []:
+        env = str(event.get("environment") or "").upper()
+        if env:
+            events_by_env.setdefault(env, []).append(event)
+    for item in env_summaries or []:
+        env = str(item.get("env") or "").upper()
+        if not env:
+            continue
+        diagnosis = _diagnosis_for_environment(
+            env,
+            item.get("summary") or {},
+            events_by_env.get(env, []),
+            (deploys or {}).get(env),
+        )
+        by_env[env] = diagnosis
+        if diagnosis.get("primary"):
+            all_candidates.append(diagnosis["primary"])
+        all_candidates.extend(diagnosis.get("secondary") or [])
+
+    all_candidates.extend(_diagnosis_host_candidates(host))
+    collector = collector_status or {}
+    if collector.get("status") in ("stale", "no_data"):
+        all_candidates.append(
+            _diagnosis_metric_candidate(
+                cause="monitoring",
+                label="Coleta de monitoramento indisponível",
+                environment="HOST",
+                detail=str(collector.get("label") or "O status pode estar desatualizado."),
+                score=96,
+                confidence="high",
+                detected_at=collector.get("lastSampleAt"),
+                evidence=[{"type": "collector", "label": collector.get("label") or "Coleta indisponível", "at": collector.get("lastSampleAt")}],
+            )
+        )
+    if dashboard_timing_ms is not None and dashboard_timing_ms >= 2500:
+        all_candidates.append(
+            _diagnosis_metric_candidate(
+                cause="monitoring",
+                label="Console de monitoramento lento",
+                environment="HOST",
+                detail=f"Agregação do resumo levou {dashboard_timing_ms:.0f}ms",
+                score=70,
+                confidence="medium",
+                detected_at=_utc_now_iso(),
+                evidence=[{"type": "console", "label": "Tempo do dashboard", "durationMs": round(dashboard_timing_ms, 1)}],
+            )
+        )
+
+    all_candidates.sort(
+        key=lambda item: (
+            _diagnosis_candidate_is_active(item),
+            _diagnosis_candidate_time(item),
+            int(item.get("score") or 0),
+        ),
+        reverse=True,
+    )
+    primary = all_candidates[0] if all_candidates else None
+    for candidate in all_candidates:
+        candidate.pop("score", None)
+    return {
+        "generatedAt": _utc_now_iso(),
+        "primary": primary,
+        "secondary": all_candidates[1:4],
+        "byEnvironment": by_env,
+        "hasEvidence": bool(primary),
+        "windowHours": 24,
     }
 
 
@@ -3364,6 +3832,7 @@ def build_monitoring_dashboard(
         "config": build_monitoring_config(config),
         "tab": tab,
         "envSummaries": [],
+        "host": None,
         "healthSeries": {},
         "deploys": {},
         "groupedEvents": [],
@@ -3375,6 +3844,19 @@ def build_monitoring_dashboard(
 
     futures_map: dict[Any, str] = {}
     with ThreadPoolExecutor(max_workers=min(12, max(4, len(env_names) * 3))) as pool:
+        if tab == "summary":
+            def _load_host_summary() -> dict[str, Any]:
+                try:
+                    import server_host
+
+                    return server_host.build_host_summary(config)
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("monitoring host summary failed: %s", exc)
+                    return {"error": str(exc)}
+
+            fut = pool.submit(_load_host_summary)
+            futures_map[fut] = "host"
+
         if tab in ("summary", "latency"):
             for env in env_names:
                 fut = pool.submit(
@@ -3441,6 +3923,8 @@ def build_monitoring_dashboard(
             elif kind.startswith("deploy:"):
                 env = kind.split(":", 1)[1]
                 result["deploys"][env] = data
+            elif kind == "host":
+                result["host"] = data
             elif kind == "grouped":
                 all_groups = data.get("groups") or []
                 result["alertGroups"] = all_groups
@@ -3462,6 +3946,15 @@ def build_monitoring_dashboard(
     )
     result["events"] = result["events"][:200]
     result["timingMs"] = round((time.perf_counter() - t0) * 1000, 1)
+    result["diagnosis"] = build_monitoring_diagnosis(
+        config,
+        result["envSummaries"],
+        result["alertGroups"],
+        host=result.get("host"),
+        deploys=result.get("deploys"),
+        collector_status=(result.get("config") or {}).get("collectorStatus"),
+        dashboard_timing_ms=result["timingMs"],
+    )
 
     _DASHBOARD_CACHE[cache_key] = (now, result)
     return result
