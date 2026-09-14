@@ -6,7 +6,7 @@
   const TRAFFIC_COLORS = { requests: "var(--cyan)", uniqueUsers: "var(--purple)", memory: "var(--green)" };
   const LATENCY_COLOR = "var(--amber)";
   const REFRESH_MS = 30_000;
-  const THEME_STORAGE_KEY = "ops-monitoring-tv-theme";
+  const THEME_STORAGE_KEY = "ops-monitoring-tv-theme-v3";
   let refreshing = false;
 
   const byId = (id) => document.getElementById(id);
@@ -34,6 +34,14 @@
     const number = safeNumber(value);
     if (number == null) return "—";
     return Intl.NumberFormat("pt-BR", { notation: number >= 1000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(number);
+  }
+
+  function formatBytes(value) {
+    const number = safeNumber(value);
+    if (number == null || number <= 0) return "—";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const index = Math.min(units.length - 1, Math.floor(Math.log(number) / Math.log(1024)));
+    return `${(number / (1024 ** index)).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} ${units[index]}`;
   }
 
   function relativeTime(value) {
@@ -123,39 +131,44 @@
 
   function renderProductivity(payload) {
     const statuses = {
-      completed: { label: "Concluído", color: "#16875b" },
-      ok: { label: "Concluído", color: "#16875b" },
-      failed: { label: "Falhou", color: "#c33d50" },
-      error: { label: "Falhou", color: "#c33d50" },
-      running: { label: "Executando", color: "#c77800" },
-      stale: { label: "Atrasado", color: "#c33d50" },
-      pending: { label: "Aguardando", color: "#65758b" },
-    };
-    const statusCell = (value) => {
-      const state = statuses[value?.status] || statuses.pending;
-      return `<span class="system-status" style="--status-color:${state.color}">${state.label}</span>`;
+      completed: { label: "OK", color: "var(--green)", className: "is-ok" },
+      ok: { label: "OK", color: "var(--green)", className: "is-ok" },
+      failed: { label: "Falhou", color: "var(--red)", className: "is-fail" },
+      error: { label: "Falhou", color: "var(--red)", className: "is-fail" },
+      running: { label: "Executando", color: "var(--amber)", className: "is-running" },
+      stale: { label: "Atrasado", color: "var(--red)", className: "is-fail" },
+      pending: { label: "Aguardando", color: "var(--muted)", className: "is-pending" },
     };
     const cycleLabels = { completed: "ciclo concluído", failed: "ciclo com falha", running: "ciclo em execução", stale: "ciclo atrasado", pending: "aguardando ciclo" };
-    const rows = (payload.systems || []).flatMap((system) => {
+    const systems = (payload.systems || []).slice(0, 3).map((system) => {
       const steps = Array.isArray(system.steps) && system.steps.length
         ? system.steps
         : [
             { label: "Produção", ...(system.production || {}) },
             { label: "Monitor", ...(system.monitor || {}) },
           ];
-      return steps
-        .filter((step) => step && (step.status || step.updatedAt))
-        .map((step) => ({ system: system.system, ...step }));
-    });
+      return { name: system.system, steps: steps.filter((step) => step && (step.status || step.updatedAt)).slice(0, 2) };
+    }).filter((system) => system.steps.length);
     byId("productivity-cycle").textContent = payload.cycleStartedAt
       ? `${cycleLabels[payload.cycleStatus] || "ciclo atual"} · ${new Date(payload.cycleStartedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`
       : "aguardando ciclo";
-    byId("productivity-table-body").innerHTML = rows.length ? rows.map((row) => {
-      const updatedLabel = row.updatedAt
-        ? new Date(row.updatedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-        : "—";
-      return `<tr><td><span class="system-name">${escapeHtml(row.system)}</span></td><td>${escapeHtml(row.label)}</td><td>${statusCell(row)}</td><td>${updatedLabel}</td></tr>`;
-    }).join("") : `<tr><td colspan="4"><div class="empty-state">${payload.sourceAvailable === false ? "Log de produtividade indisponível." : "Aguardando dados do ciclo atual."}</div></td></tr>`;
+    byId("productivity-grid").innerHTML = systems.length ? systems.map((system) => {
+      const okCount = system.steps.filter((step) => ["completed", "ok"].includes(step.status)).length;
+      return `<section class="productivity-system">
+        <header class="productivity-system-head"><h3>${escapeHtml(system.name)}</h3><span>${okCount}/${system.steps.length} OK</span></header>
+        <div class="productivity-cards">${system.steps.map((step) => {
+          const state = statuses[step.status] || statuses.pending;
+          const updatedLabel = step.updatedAt
+            ? new Date(step.updatedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })
+            : "—";
+          return `<article class="productivity-card ${state.className}" style="--status-color:${state.color}">
+            <div class="productivity-step-head"><span>${escapeHtml(step.label)}</span><time>${updatedLabel}</time></div>
+            <div class="productivity-state"><i aria-hidden="true"></i><strong>${state.label}</strong><small>${step.updatedAt ? "atualizado" : "sem leitura"}</small></div>
+          </article>`;
+        }).join("")}</div>
+      </section>`;
+    }).join("")
+      : `<div class="empty-state">${payload.sourceAvailable === false ? "Log de produtividade indisponível." : "Aguardando dados do ciclo atual."}</div>`;
   }
 
   function renderIncidents(payload, syncPayload) {
@@ -209,18 +222,20 @@
         : errors4xx > 0 || maxMs >= 2000
           ? { label: "Atenção", color: "#ffc65c" }
           : { label: "OK", color: "#52e39a" };
-      return `<article class="endpoint-item">
+      return `<article class="endpoint-item" style="--endpoint-color:${state.color}">
         <div class="endpoint-route"><code>${escapeHtml(route.method || "GET")} ${escapeHtml(route.route || "/")}</code><small>${formatCount(route.requests)} req · ${errors4xx + errors5xx} erros</small></div>
-        <div class="endpoint-state" style="--endpoint-color:${state.color}"><strong>${Math.round(maxMs)} ms</strong><small>${state.label}</small></div>
+        <div class="endpoint-state"><strong>${Math.round(maxMs)} ms</strong><small>${state.label}</small></div>
       </article>`;
     }).join("") : '<div class="empty-state">Nenhum endpoint instrumentado na última hora.</div>';
   }
 
   function renderHost(host) {
     const disk = (host.disks || []).reduce((worst, row) => safeNumber(row.usedPct) > safeNumber(worst?.usedPct) ? row : worst, null);
+    const commit = host.commit || {};
     const resources = [
       { label: "CPU", value: safeNumber(host.cpu?.usedPct), note: `${host.cpu?.logicalCores || "—"} processadores lógicos`, color: "#4ed8e6" },
       { label: "Memória RAM", value: safeNumber(host.memory?.usedPct), note: "memória utilizada", color: "#a18cff" },
+      { label: "Memória comprometida", value: safeNumber(commit.usedPct), note: `${formatBytes(commit.usedBytes)} de ${formatBytes(commit.limitBytes)}`, color: "#ff7fc8" },
       { label: "Disco", value: safeNumber(disk?.usedPct), note: disk?.mount || "volume principal", color: "#ffc65c" },
     ];
     byId("host-name").textContent = host.hostname || "servidor";
@@ -270,6 +285,15 @@
     }).join("");
   }
 
+  function chartSize(elementId, fallbackWidth, fallbackHeight) {
+    const element = byId(elementId);
+    return {
+      element,
+      width: Math.max(480, Math.round(element?.clientWidth || fallbackWidth)),
+      height: Math.max(110, Math.round(element?.clientHeight || fallbackHeight)),
+    };
+  }
+
   function renderTrafficChart(apiRoutes, memorySeries) {
     const trafficPoints = samplePoints(apiRoutes?.traffic?.points || []);
     const series = [
@@ -285,9 +309,8 @@
       return;
     }
 
-    const width = 920;
-    const height = 260;
-    const pad = { top: 24, right: 48, bottom: 30, left: 48 };
+    const { element: chart, width, height } = chartSize("traffic-chart", 920, 260);
+    const pad = { top: 20, right: 48, bottom: 26, left: 48 };
     const all = series.flatMap((item) => item.points);
     const minT = Math.min(...all.map((p) => p.t));
     const maxT = Math.max(...all.map((p) => p.t));
@@ -319,7 +342,7 @@
       const labels = pointLabels(item.points, xFor, yFor, (value) => item.axis === "memory" ? `${Math.round(value)}%` : formatCount(value), item.color);
       return `<path class="chart-area" d="${area}" fill="${item.color}"/><path class="chart-line" d="${line}" stroke="${item.color}"/>${dots}${labels}`;
     }).join("");
-    byId("traffic-chart").innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">${grid}${paths}${times}</svg>`;
+    chart.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">${grid}${paths}${times}</svg>`;
   }
 
   function renderLatencyChart(seriesPayload, p95Limit) {
@@ -329,9 +352,8 @@
       byId("health-latency-chart").innerHTML = '<div class="empty-state">Ainda não há histórico de latência para exibir.</div>';
       return points;
     }
-    const width = 760;
-    const height = 260;
-    const pad = { top: 24, right: 24, bottom: 30, left: 52 };
+    const { element: chart, width, height } = chartSize("health-latency-chart", 760, 180);
+    const pad = { top: 18, right: 24, bottom: 24, left: 58 };
     const minT = points[0].t;
     const maxT = points.at(-1).t;
     const maxV = Math.max(p95Limit, ...points.map((point) => point.v), 10);
@@ -350,7 +372,7 @@
     const labels = pointLabels(points, xFor, yFor, (value) => `${Math.round(value)} ms`, LATENCY_COLOR);
     const thresholdY = yFor(Math.min(p95Limit, roundedMax));
     const threshold = `<line class="chart-threshold" x1="${pad.left}" y1="${thresholdY}" x2="${width - pad.right}" y2="${thresholdY}"/>`;
-    byId("health-latency-chart").innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">${grid}${threshold}<path class="chart-line" d="${line}" stroke="${LATENCY_COLOR}"/>${dots}${labels}${times}</svg>`;
+    chart.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">${grid}${threshold}<path class="chart-line" d="${line}" stroke="${LATENCY_COLOR}"/>${dots}${labels}${times}</svg>`;
     return points;
   }
 
@@ -415,6 +437,8 @@
     const now = new Date();
     byId("clock").dateTime = now.toISOString();
     byId("clock").textContent = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const date = byId("header-date");
+    if (date) date.textContent = now.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
   }
 
   function applyTheme(theme, persist = true) {
