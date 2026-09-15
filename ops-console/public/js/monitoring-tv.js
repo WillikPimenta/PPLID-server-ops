@@ -93,10 +93,9 @@
     if (overview?.environments?.MAIN) {
       const main = overview.environments.MAIN;
       const services = main.services || [];
-      const collectionFresh = mainSummary.dataFresh !== false && !main.runtime?.stale;
       const failedServices = services.filter((service) => service.status !== "ok");
       const offline = main.runtime?.availabilityClass === "offline" || main.runtime?.reachable === false;
-      const degraded = !collectionFresh || failedServices.length || ["degraded", "saturated", "stale"].includes(main.availabilityAggregate);
+      const degraded = failedServices.length || ["degraded", "saturated", "stale"].includes(main.availabilityAggregate);
       const health = offline
         ? { label: "Indisponível", tone: "red" }
         : degraded
@@ -104,10 +103,10 @@
           : { label: "Saudável", tone: "green" };
       byId("kpi-health").textContent = health.label;
       byId("kpi-health-card").className = `kpi-card health-kpi tone-${health.tone}`;
-      const componentRows = [
-        ...services.map((service) => ({ label: service.name, ok: service.status === "ok" })),
-        { label: "Coleta", ok: collectionFresh },
-      ];
+      const componentRows = services.map((service) => ({
+        label: service.name,
+        ok: service.status === "ok",
+      }));
       byId("health-components").innerHTML = componentRows.map((item) =>
         `<span class="health-chip ${item.ok ? "is-ok" : "is-fail"}">${escapeHtml(item.label)}</span>`
       ).join("");
