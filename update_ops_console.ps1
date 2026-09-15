@@ -163,6 +163,23 @@ if (-not $ConfigPath) {
 $opsConsoleDir = Get-PplidOpsConsoleDir -ScriptRoot $PSScriptRoot
 $lockPath = Join-Path (Get-PplidLogDir) "console-update.lock"
 $resultPath = Join-Path (Get-PplidLogDir) "console-update.result.json"
+$logPath = Join-Path (Get-PplidLogDir) "console-update.log"
+
+function Write-ConsoleUpdateLog {
+    param(
+        [string]$Message,
+        [ValidateSet("INFO", "WARN", "ERROR")]
+        [string]$Level = "INFO",
+        [string]$Phase = ""
+    )
+    try {
+        $phaseText = if ($Phase) { " [$Phase]" } else { "" }
+        $line = "[{0}] [{1}]{2} {3}" -f ((Get-Date).ToUniversalTime().ToString("o")), $Level, $phaseText, $Message
+        Add-Content -Path $logPath -Value $line -Encoding UTF8
+    } catch {
+        # O log e auxiliar e nunca pode interromper o update.
+    }
+}
 
 function Clear-ConsoleUpdateLock {
     if (Test-Path $lockPath) {
@@ -203,13 +220,37 @@ if ($RestartOnly) {
 
 if ($Apply) {
     try {
+    # O servidor grava "started" antes de criar o worker. Registre a entrada
+    # do worker antes da segunda consulta ao Git para que o painel não pareça
+    # congelado caso fetch/status demore na máquina destino.
+    $workerStartedAt = (Get-Date).ToUniversalTime().ToString("o")
+    Write-ConsoleUpdateLog -Message "Worker iniciado; verificando o repositorio Git." -Phase "pulling"
+    $previousResult = $null
+    if (Test-Path $resultPath) {
+        try { $previousResult = Get-Content $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $previousResult = $null }
+    }
+    Write-ApplyResult -Payload @{
+        ok = $true
+        accepted = $true
+        applied = $false
+        restarting = $false
+        phase = "pulling"
+        previousSha = if ($previousResult) { [string]$previousResult.previousSha } else { "" }
+        targetSha = if ($previousResult) { [string]$previousResult.targetSha } else { "" }
+        branch = if ($previousResult) { [string]$previousResult.branch } else { "" }
+        startedAt = if ($previousResult -and $previousResult.startedAt) { [string]$previousResult.startedAt } else { $workerStartedAt }
+        workerStartedAt = $workerStartedAt
+        message = "Worker de atualizacao iniciado; verificando Git."
+    }
     $status = Get-ConsoleUpdateStatus -RepoDir $OpsRepoDir
     if (-not $status.ok) {
+        Write-ConsoleUpdateLog -Message ([string]($status.reason)) -Level "ERROR" -Phase "failed"
         Clear-ConsoleUpdateLock
         Write-ApplyResult -Payload $status
         exit 1
     }
     if (-not $status.updateAvailable) {
+        Write-ConsoleUpdateLog -Message "Nenhuma atualização pendente." -Phase "done"
         Clear-ConsoleUpdateLock
         Write-ApplyResult -Payload (@{
             ok = $true
@@ -250,8 +291,11 @@ if ($Apply) {
     }
 
     try {
+        Write-ConsoleUpdateLog -Message ("Executando git pull de origin/{0}." -f $status.branch) -Phase "pulling"
         Invoke-GitInRepo -RepoDir $OpsRepoDir -GitArgs @("pull", "--ff-only", "origin", $status.branch) | Out-Null
+        Write-ConsoleUpdateLog -Message "git pull concluído." -Phase "dependencies"
     } catch {
+        Write-ConsoleUpdateLog -Message $_.Exception.Message -Level "ERROR" -Phase "failed"
         Clear-ConsoleUpdateLock
         Write-ApplyResult -Payload @{
             ok = $false
@@ -291,10 +335,12 @@ if ($Apply) {
     $automationDepsChanged = ($nativeBefore -join "|") -ne ($nativeAfter -join "|")
 
     if ($depsChanged) {
+        Write-ConsoleUpdateLog -Message "Alteração de dependências detectada; instalando requirements." -Phase "dependencies"
         $venvPython = Join-Path $opsConsoleDir ".venv\Scripts\python.exe"
         if (Test-Path $venvPython) {
             & $venvPython -m pip install --disable-pip-version-check -r $requirements
             if ($LASTEXITCODE -ne 0) {
+                Write-ConsoleUpdateLog -Message "pip install falhou." -Level "ERROR" -Phase "failed"
                 Clear-ConsoleUpdateLock
                 Write-ApplyResult -Payload @{
                     ok = $false
@@ -311,6 +357,7 @@ if ($Apply) {
     }
 
     if ($automationDepsChanged -or $depsChanged) {
+        Write-ConsoleUpdateLog -Message "Atualizando runtime das automações." -Phase "automation_runtime"
         Write-ApplyResult -Payload @{
             ok = $true
             accepted = $true
@@ -332,6 +379,7 @@ if ($Apply) {
                 & $venvPython $bootstrap --force
             }
             if ($LASTEXITCODE -ne 0) {
+                Write-ConsoleUpdateLog -Message "Bootstrap do runtime das automações falhou." -Level "ERROR" -Phase "failed"
                 Clear-ConsoleUpdateLock
                 Write-ApplyResult -Payload @{
                     ok = $false
@@ -370,6 +418,7 @@ if ($Apply) {
         depsChanged = [bool]$depsChanged
         automationDepsChanged = [bool]$automationDepsChanged
     }
+    Write-ConsoleUpdateLog -Message "Código aplicado; solicitando reinício do Console." -Phase "restarting"
 
     $workerArgs = @(
         "-NoProfile",
@@ -386,6 +435,7 @@ if ($Apply) {
     Start-Process -FilePath "powershell.exe" -ArgumentList $workerArgs -WindowStyle Hidden
     exit 0
     } catch {
+        Write-ConsoleUpdateLog -Message $_.Exception.Message -Level "ERROR" -Phase "failed"
         Clear-ConsoleUpdateLock
         Write-ApplyResult -Payload @{
             ok = $false

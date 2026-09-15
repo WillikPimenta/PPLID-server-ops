@@ -5278,6 +5278,48 @@ body.is-locked .auth-mode-banner {
   line-height: 1.35;
 }
 
+.ops-console-update-log-btn {
+  margin-top: 0.35rem;
+  padding: 0.12rem 0.35rem;
+  font-size: 0.7rem;
+}
+
+.ops-console-update-log {
+  margin-top: 0.45rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface-elevated) 75%, #000);
+}
+
+.ops-console-update-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.ops-console-update-log-head strong {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+}
+
+.ops-console-update-log-body {
+  max-height: 12rem;
+  margin: 0;
+  overflow: auto;
+  padding: 0.45rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-surface-elevated) 60%, #000);
+  color: var(--color-text-primary);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .ops-console-update-error {
   margin-top: 0.45rem;
   padding: 0.5rem 0.6rem;

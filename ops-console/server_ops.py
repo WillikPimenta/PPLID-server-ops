@@ -2532,6 +2532,40 @@ def _console_update_result_path(config: dict[str, Any]) -> Path:
     return get_base_dir(config) / "logs" / "console-update.result.json"
 
 
+def _console_update_log_path(config: dict[str, Any]) -> Path:
+    return get_base_dir(config) / "logs" / "console-update.log"
+
+
+def append_console_update_log(
+    config: dict[str, Any], message: str, *, level: str = "INFO", phase: str = ""
+) -> None:
+    path = _console_update_log_path(config)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        phase_part = f" [{phase}]" if phase else ""
+        line = f"[{timestamp}] [{level.upper()}]{phase_part} {message}\n"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError:
+        pass
+
+
+def read_console_update_log(config: dict[str, Any], limit: int = 200) -> dict[str, Any]:
+    path = _console_update_log_path(config)
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    safe_limit = max(1, min(int(limit or 200), 500))
+    return {
+        "ok": True,
+        "lines": lines[-safe_limit:],
+        "total": len(lines),
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _read_console_update_lock(config: dict[str, Any]) -> dict[str, Any] | None:
     path = _console_update_lock_path(config)
     if not path.is_file():
@@ -2899,6 +2933,11 @@ def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
                 "startedAt": started_at,
                 "finishedAt": started_at,
             },
+        )
+        append_console_update_log(
+            config,
+            f"Atualização aceita: {previous_sha} -> {target_sha}.",
+            phase="started",
         )
         repo_dir = resolve_ops_repo_dir(config)
         args = ["-Apply", "-OpsRepoDir", str(repo_dir)]

@@ -1411,6 +1411,14 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         # Sempre 200 com payload estruturado; o campo ok indica sucesso da verificacao remota.
         self._send_json(result, status=200)
 
+    def _handle_console_update_log(self, query: dict[str, list[str]]) -> None:
+        raw_limit = (query.get("limit") or ["200"])[0]
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 200
+        self._send_json(server_ops.read_console_update_log(self.config, limit=limit), status=200)
+
     def _handle_console_update_apply(self) -> None:
         result = server_ops.apply_console_update(self.config)
         server_ops.audit_log(
@@ -1880,6 +1888,9 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/console/update/status":
             self._handle_console_update_status()
+            return
+        if path == "/api/v1/console/update/log":
+            self._handle_console_update_log(parse_qs(parsed.query))
             return
 
         if path.startswith("/api/v1/automations"):

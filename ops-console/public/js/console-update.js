@@ -4,6 +4,7 @@
   const OC = window.OpsConsole;
 
   const STATUS_URL = "/api/v1/console/update/status";
+  const LOG_URL = "/api/v1/console/update/log?limit=200";
   const APPLY_URL = "/api/v1/console/update/apply";
   const POLL_INTERVAL_MS = 2000;
   // Dependencias/bootstrap podem ultrapassar dois minutos em máquinas mais
@@ -26,6 +27,10 @@
     activityLabel: null,
     applyStartedAt: null,
     elapsedTimer: null,
+    logOpen: false,
+    logLoading: false,
+    logLines: [],
+    logError: null,
   };
 
   function getBarRoot() {
@@ -151,6 +156,7 @@
     const elapsedSuffix = elapsed ? ` (${elapsed})` : "";
 
     const applyPhaseLabels = {
+      started: "Iniciando worker de atualização",
       pulling: "Baixando código do remoto",
       dependencies: "Instalando dependências",
       automation_runtime: "Atualizando runtime das automações",
@@ -252,6 +258,7 @@
       chips.push({ label: "tempo", value: elapsed, warn: true });
     }
     const phaseLabels = {
+      started: "iniciando atualização",
       pulling: "baixando código",
       dependencies: "instalando dependências",
       automation_runtime: "atualizando automações",
@@ -307,6 +314,45 @@
     `;
   }
 
+  function buildUpdateLogPanel() {
+    if (!OC.consoleUpdateState.logOpen) return "";
+    const state = OC.consoleUpdateState;
+    let body = "";
+    if (state.logLoading) {
+      body = "Carregando eventos da atualização…";
+    } else if (state.logError) {
+      body = `Não foi possível carregar o log: ${state.logError}`;
+    } else if (state.logLines.length) {
+      body = state.logLines.join("\n");
+    } else {
+      body = "Nenhum evento registrado ainda.";
+    }
+    return `
+      <div class="ops-console-update-log" role="region" aria-label="Eventos da atualização">
+        <div class="ops-console-update-log-head">
+          <strong>Eventos da atualização</strong>
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-console-update-refresh-log">Atualizar log</button>
+        </div>
+        <pre class="ops-console-update-log-body">${OC.escapeHtml(body)}</pre>
+      </div>
+    `;
+  }
+
+  async function loadConsoleUpdateLog() {
+    OC.consoleUpdateState.logLoading = true;
+    OC.consoleUpdateState.logError = null;
+    renderConsoleUpdateBar(OC.consoleUpdateState.status, OC.consoleUpdateState.uiState);
+    try {
+      const payload = await OC.fetchJson(LOG_URL, { timeoutMs: 10000 });
+      OC.consoleUpdateState.logLines = Array.isArray(payload?.lines) ? payload.lines : [];
+    } catch (err) {
+      OC.consoleUpdateState.logError = err.message || "erro desconhecido";
+    } finally {
+      OC.consoleUpdateState.logLoading = false;
+      renderConsoleUpdateBar(OC.consoleUpdateState.status, OC.consoleUpdateState.uiState);
+    }
+  }
+
   async function copyUpdateError(button) {
     const raw = document.getElementById("console-update-error-raw");
     const text = raw?.value || OC.consoleUpdateState.lastError?.message || "";
@@ -346,6 +392,18 @@
         renderConsoleUpdateBar(OC.consoleUpdateState.status, "idle");
         return;
       }
+      if (event.target.closest("#btn-console-update-log")) {
+        event.preventDefault();
+        OC.consoleUpdateState.logOpen = !OC.consoleUpdateState.logOpen;
+        renderConsoleUpdateBar(OC.consoleUpdateState.status, OC.consoleUpdateState.uiState);
+        if (OC.consoleUpdateState.logOpen) loadConsoleUpdateLog();
+        return;
+      }
+      if (event.target.closest("#btn-console-update-refresh-log")) {
+        event.preventDefault();
+        loadConsoleUpdateLog();
+        return;
+      }
       if (event.target.closest("#btn-console-update")) {
         OC.runConsoleUpdateCheck?.();
       }
@@ -364,6 +422,7 @@
     const disabled = uiState !== "idle" || OC.consoleUpdateState.busy || status?.inProgress;
     const hasUpdate = Boolean(status?.updateAvailable);
     const hasError = Boolean(OC.consoleUpdateState.lastError);
+    const hasLog = Boolean(status?.inProgress || status?.lastResult);
     const buttonLabel =
       uiState === "checking"
         ? "Verificando…"
@@ -415,6 +474,8 @@
               ? `<p class="ops-console-update-detail">${OC.escapeHtml(presentation.detail)}</p>`
               : ""
           }
+          ${hasLog ? `<button type="button" class="btn btn-ghost btn-sm ops-console-update-log-btn" id="btn-console-update-log">${OC.consoleUpdateState.logOpen ? "Ocultar eventos" : "Ver eventos"}</button>` : ""}
+          ${buildUpdateLogPanel()}
           ${uiState === "idle" ? buildErrorPanelHtml(status) : ""}
         </div>
         <button
