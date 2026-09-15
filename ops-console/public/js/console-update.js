@@ -6,8 +6,10 @@
   const STATUS_URL = "/api/v1/console/update/status";
   const APPLY_URL = "/api/v1/console/update/apply";
   const POLL_INTERVAL_MS = 2000;
-  const POLL_TIMEOUT_MS = 120000;
-  const RESTART_TIMEOUT_MS = 90000;
+  // Dependencias/bootstrap podem ultrapassar dois minutos em máquinas mais
+  // lentas. Enquanto o lock estiver ativo, não tratar a atualização como erro.
+  const POLL_TIMEOUT_MS = 900000;
+  const RESTART_TIMEOUT_MS = 180000;
   // O endpoint executa a verificacao Git antes de iniciar o worker. Em PCs
   // com rede/DNS/credencial mais lentos, o timeout global de 8s cancela a
   // requisicao embora o servidor ainda esteja processando a atualizacao.
@@ -728,9 +730,18 @@
 
       const wait = await waitForApplyResult(result.startedAt || applyStartedAt, toSha);
       if (wait.timedOut && !isFinalApplyResult(wait.result, applyStartedAt)) {
+        if (wait.status?.inProgress) {
+          OC.consoleUpdateState.activityLabel =
+            "A atualização continua em andamento. Aguarde o console concluir e atualize esta tela…";
+          renderConsoleUpdateBar(wait.status, "applying");
+          return;
+        }
         setLastError(
-          "A atualização demorou demais e não retornou resultado. O console pode continuar atrasado.",
-          { phase: "timeout" }
+          "A atualização não confirmou a conclusão dentro do tempo esperado. Verifique o status antes de tentar novamente.",
+          {
+            phase: "timeout",
+            detail: "O worker não informou um resultado final e não há lock ativo no momento.",
+          }
         );
         endActivity();
         renderConsoleUpdateBar(wait.status || status, "idle");
