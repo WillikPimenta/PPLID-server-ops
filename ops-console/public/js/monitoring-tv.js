@@ -95,7 +95,10 @@
       const services = main.services || [];
       const failedServices = services.filter((service) => service.status !== "ok");
       const offline = main.runtime?.availabilityClass === "offline" || main.runtime?.reachable === false;
-      const degraded = failedServices.length || ["degraded", "saturated", "stale"].includes(main.availabilityAggregate);
+      // A disponibilidade agregada também incorpora a coleta/telemetria e
+      // pode deixar o card em "Atenção" mesmo com os serviços saudáveis.
+      // Para este resumo visual, considerar somente falhas observáveis.
+      const degraded = failedServices.length > 0;
       const health = offline
         ? { label: "Indisponível", tone: "red" }
         : degraded
