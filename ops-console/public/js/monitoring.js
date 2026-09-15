@@ -1512,6 +1512,26 @@
     }).join("");
   }
 
+  function renderDiagnosisTimeline(primary, secondary) {
+    const items = [primary, ...(secondary || [])]
+      .filter((item) => item && (item.detectedAt || item.detail))
+      .slice(0, 4)
+      .sort((a, b) => String(a.detectedAt || "").localeCompare(String(b.detectedAt || "")));
+    if (!items.length) return "";
+    return `<div class="monitor-diagnosis-timeline" aria-label="Sequência de sinais detectados">
+      <div class="monitor-diagnosis-timeline-head"><span>Sequência recente</span><small>mais antigo → mais recente</small></div>
+      <ol>${items.map((item, index) => {
+        const itemCause = String(item.cause || "monitoring").toLowerCase();
+        const itemWhen = item.detectedAt ? OC.formatDate(item.detectedAt) : "horário não disponível";
+        const isPrimary = item === primary;
+        return `<li class="is-${OC.escapeHtml(itemCause)}${isPrimary ? " is-primary" : ""}">
+          <span class="monitor-diagnosis-timeline-marker" aria-hidden="true">${index + 1}</span>
+          <div><strong>${OC.escapeHtml(item.label || diagnosisCauseLabel(itemCause))}</strong><small>${OC.escapeHtml(item.environment || "HOST")} · ${OC.escapeHtml(itemWhen)}</small></div>
+        </li>`;
+      }).join("")}</ol>
+    </div>`;
+  }
+
   function renderMonitoringDiagnosis(diagnosis) {
     const primary = diagnosis?.primary;
     if (!primary) {
@@ -1526,7 +1546,8 @@
 
     const cause = String(primary.cause || "monitoring").toLowerCase();
     const evidence = renderDiagnosisEvidence(primary.evidence);
-    const secondary = (diagnosis.secondary || []).slice(0, 3).map((item) => `<li><span>${OC.escapeHtml(item.environment || "")}</span><strong>${OC.escapeHtml(item.label || diagnosisCauseLabel(item.cause))}</strong><small>${OC.escapeHtml(item.detail || "")}</small></li>`).join("");
+    const secondaryItems = (diagnosis.secondary || []).slice(0, 3);
+    const secondary = secondaryItems.map((item) => `<li><span>${OC.escapeHtml(item.environment || "")}</span><strong>${OC.escapeHtml(item.label || diagnosisCauseLabel(item.cause))}</strong><small>${OC.escapeHtml(item.detail || "")}</small></li>`).join("");
     const when = primary.detectedAt ? OC.formatDate(primary.detectedAt) : "horário não disponível";
     const actionLabel = cause === "api" ? "Investigar APIs" : cause === "storage" || cause === "host" ? "Ver recursos do computador" : "Abrir investigação";
     return `<section class="monitor-section monitor-diagnosis is-${OC.escapeHtml(cause)}" aria-labelledby="monitor-diagnosis-title">
@@ -1534,7 +1555,7 @@
         <h3 class="monitor-section-title" id="monitor-diagnosis-title">Diagnóstico operacional</h3>
         <span class="monitor-meta-muted">Última ocorrência relevante</span>
       </div>
-      <div class="monitor-diagnosis-layout">
+      <div class="monitor-diagnosis-summary">
         <div class="monitor-diagnosis-lead">
           <div class="monitor-diagnosis-kicker"><span>${OC.escapeHtml(diagnosisCauseLabel(cause))}</span><span>${OC.escapeHtml(diagnosisConfidenceLabel(primary.confidence))}</span></div>
           <h4>${OC.escapeHtml(primary.label || "Causa não determinada")}</h4>
@@ -1546,8 +1567,9 @@
           <h4>Evidências que sustentam a hipótese</h4>
           <ul>${evidence || "<li><span>Evento operacional correlato detectado.</span></li>"}</ul>
         </div>
-        ${secondary ? `<div class="monitor-diagnosis-secondary"><h4>Outros sinais</h4><ul>${secondary}</ul></div>` : ""}
       </div>
+      ${renderDiagnosisTimeline(primary, secondaryItems)}
+      ${secondary ? `<div class="monitor-diagnosis-secondary"><h4>Outros sinais para acompanhar</h4><ul>${secondary}</ul></div>` : ""}
     </section>`;
   }
 
