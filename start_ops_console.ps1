@@ -147,6 +147,20 @@ function Resolve-OpsConsolePython {
 $baseDir = Get-PplidBaseDir
 $pythonExe = Resolve-OpsConsolePython -BaseDir $baseDir
 
+function Resolve-OpsConsoleServerPython {
+    param([string]$PythonExe)
+
+    # O servidor nao precisa de console. python.exe e um executavel de
+    # console e pode abrir uma janela quando a task roda em sessao interativa;
+    # pythonw.exe mantem o processo oculto.
+    $pythonDir = Split-Path -Parent $PythonExe
+    $pythonw = Join-Path $pythonDir "pythonw.exe"
+    if (Test-Path $pythonw) {
+        return $pythonw
+    }
+    return $PythonExe
+}
+
 function Ensure-AutomationRuntime {
     param(
         [string]$PythonExe,
@@ -232,14 +246,16 @@ Write-Host "Config: $ConfigPath"
 
 Push-Location $OpsDir
 try {
+    $serverPythonExe = Resolve-OpsConsoleServerPython -PythonExe $pythonExe
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $pythonExe
+    $startInfo.FileName = $serverPythonExe
     $startInfo.Arguments = ($args | ForEach-Object {
         if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
     }) -join ' '
     $startInfo.WorkingDirectory = $OpsDir
     $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
     $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
     if ($Local -and $localMachinePath) {
         $startInfo.EnvironmentVariables["OPS_MACHINE_CONFIG"] = $localMachinePath
         $startInfo.EnvironmentVariables["OPS_HOST"] = "127.0.0.1"

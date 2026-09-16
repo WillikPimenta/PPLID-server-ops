@@ -51,7 +51,7 @@ def test_read_env_git_worktree_status_dirty_mirror(tmp_path: Path):
     assert dirty[0]["changeCount"] == 1
 
 
-def test_read_env_git_worktree_status_dirty_release(tmp_path: Path, monkeypatch):
+def test_read_env_git_worktree_status_dirty_release_does_not_block(tmp_path: Path, monkeypatch):
     base = tmp_path / "pplid"
     logs = base / "logs"
     logs.mkdir(parents=True)
@@ -65,8 +65,9 @@ def test_read_env_git_worktree_status_dirty_release(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(so, "resolve_current_release_dir", lambda _base, _env: release)
 
     status = so.read_env_git_worktree_status(base, "DEV", use_cache=False)
-    assert status["dirty"] is True
-    assert "release ativa" in status["reason"]
+    assert status["dirty"] is False
+    assert status["reason"] == ""
+    assert status["nonBlockingDirtyLocations"][0]["id"] == "release"
 
 
 def test_action_redeploy_blocks_when_worktree_dirty(tmp_path: Path, monkeypatch):

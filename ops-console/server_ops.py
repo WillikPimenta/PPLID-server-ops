@@ -2707,7 +2707,19 @@ def read_env_git_worktree_status(
         status["label"] = _GIT_WORKTREE_LOCATION_LABELS.get(loc_id, loc_id)
         locations.append(status)
 
-    dirty_locations = [loc for loc in locations if loc.get("dirty")]
+    # A release ativa e materializada é um worktree operacional: ela pode
+    # receber arquivos gerados/runtime sem representar alterações do código
+    # que será sincronizado. Portanto, ela deve continuar visível no payload,
+    # mas não pode bloquear redeploy. O bloqueio vale somente para os
+    # worktrees de origem que o operador edita/sincroniza.
+    dirty_locations = [
+        loc for loc in locations
+        if loc.get("dirty") and loc.get("id") != "release"
+    ]
+    non_blocking_dirty_locations = [
+        loc for loc in locations
+        if loc.get("dirty") and loc.get("id") == "release"
+    ]
     supported = any(loc.get("supported") for loc in locations)
     dirty = bool(dirty_locations)
     if dirty:
@@ -2723,6 +2735,7 @@ def read_env_git_worktree_status(
         "supported": supported,
         "dirty": dirty,
         "locations": locations,
+        "nonBlockingDirtyLocations": non_blocking_dirty_locations,
         "reason": reason,
         "checkedAt": datetime.now(timezone.utc).isoformat(),
     }
