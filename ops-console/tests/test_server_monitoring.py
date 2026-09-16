@@ -601,8 +601,10 @@ class MonitoringDiagnosisTests(unittest.TestCase):
                             "method": "GET",
                             "route": "/api/v1/dashboard/overview/",
                             "avgMs": 3200,
+                            "p95Ms": 4700,
                             "maxMs": 5400,
                             "errors5xx": 12,
+                            "sampleCount": 48,
                         }],
                     },
                 },
@@ -612,6 +614,9 @@ class MonitoringDiagnosisTests(unittest.TestCase):
 
         self.assertEqual(result["primary"]["cause"], "api")
         self.assertIn("/api/v1/dashboard/overview/", result["primary"]["detail"])
+        self.assertEqual(result["primary"]["apiRoute"]["route"], "/api/v1/dashboard/overview/")
+        self.assertEqual(result["primary"]["apiRoute"]["p95Ms"], 4700)
+        self.assertEqual(result["primary"]["apiRoute"]["requests"], 48)
         self.assertEqual(result["primary"]["link"], "/monitoring/apis?env=MAIN")
 
     def test_offline_beats_lower_confidence_signals(self) -> None:

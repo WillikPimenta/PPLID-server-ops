@@ -3450,12 +3450,13 @@ def _diagnosis_api_candidate(env_name: str, summary: dict[str, Any]) -> dict[str
     for route in routes:
         try:
             avg_ms = float(route.get("avgMs") or route.get("avg_ms") or 0)
+            p95_ms = float(route.get("p95Ms") or route.get("p95_ms") or 0)
             max_ms = float(route.get("maxMs") or route.get("max_ms") or 0)
             route_errors = int(route.get("errors5xx") or route.get("status5xx") or 0)
         except (TypeError, ValueError):
             continue
-        if avg_ms >= 2000 or max_ms >= 3000 or route_errors > 0:
-            eligible.append((max(avg_ms, max_ms / 2, route_errors * 250), route))
+        if avg_ms >= 2000 or p95_ms >= 2500 or max_ms >= 3000 or route_errors > 0:
+            eligible.append((max(avg_ms, p95_ms, max_ms / 2, route_errors * 250), route))
     if not eligible and not errors:
         return None
     route = max(eligible, key=lambda item: item[0])[1] if eligible else None
@@ -3463,21 +3464,36 @@ def _diagnosis_api_candidate(env_name: str, summary: dict[str, Any]) -> dict[str
         method = str(route.get("method") or "GET")
         path = str(route.get("route") or "rota")
         avg_ms = route.get("avgMs") if route.get("avgMs") is not None else route.get("avg_ms")
+        p95_ms = route.get("p95Ms") if route.get("p95Ms") is not None else route.get("p95_ms")
         max_ms = route.get("maxMs") if route.get("maxMs") is not None else route.get("max_ms")
         route_errors = route.get("errors5xx") if route.get("errors5xx") is not None else route.get("status5xx") or 0
-        detail = f"{method} {path} · média {avg_ms or 0}ms · máximo {max_ms or 0}ms"
+        detail_parts = [f"{method} {path}", f"média {avg_ms or 0}ms"]
+        if p95_ms is not None:
+            detail_parts.append(f"p95 {p95_ms}ms")
+        detail_parts.append(f"máximo {max_ms or 0}ms")
+        detail = " · ".join(detail_parts)
         if route_errors:
             detail += f" · {route_errors} erro(s) 5xx"
-        strong_signal = float(avg_ms or 0) >= 3000 or int(route_errors or 0) >= 10
+        strong_signal = float(avg_ms or 0) >= 3000 or float(p95_ms or 0) >= 3000 or int(route_errors or 0) >= 10
         score = 88 if strong_signal else 74
-        evidence = [{"type": "api", "label": f"{method} {path}", "avgMs": avg_ms, "maxMs": max_ms, "errors5xx": route_errors}]
+        evidence = [{
+            "type": "api",
+            "label": f"{method} {path}",
+            "method": method,
+            "route": path,
+            "avgMs": avg_ms,
+            "p95Ms": p95_ms,
+            "maxMs": max_ms,
+            "errors5xx": route_errors,
+            "requests": route.get("requests") or route.get("count") or route.get("sampleCount"),
+        }]
     else:
         rate = round(errors * 100 / requests, 2) if requests else 0
         detail = f"{errors} erro(s) 5xx em {requests} requisição(ões) ({rate}%)"
         strong_signal = errors >= 10
         score = 84 if errors >= 10 else 68
         evidence = [{"type": "api", "label": "Erros HTTP 5xx", "requests": requests, "errors5xx": errors}]
-    return _diagnosis_metric_candidate(
+    candidate = _diagnosis_metric_candidate(
         cause="api",
         label="API/rota lenta ou com erros",
         environment=env_name,
@@ -3489,6 +3505,17 @@ def _diagnosis_api_candidate(env_name: str, summary: dict[str, Any]) -> dict[str
                      or summary.get("since")),
         evidence=evidence,
     )
+    if route:
+        candidate["apiRoute"] = {
+            "method": method,
+            "route": path,
+            "avgMs": avg_ms,
+            "p95Ms": p95_ms,
+            "maxMs": max_ms,
+            "errors5xx": route_errors,
+            "requests": route.get("requests") or route.get("count") or route.get("sampleCount"),
+        }
+    return candidate
 
 
 def _diagnosis_pg_candidate(env_name: str, summary: dict[str, Any]) -> dict[str, Any] | None:

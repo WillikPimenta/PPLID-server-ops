@@ -95,6 +95,7 @@
     dayDrill: null,
     apiRouteSort: "priority",
     apiRouteModalSort: "timeDesc",
+    diagnosisSelection: null,
   };
 
   const API_ROUTE_SORT_OPTIONS = [
@@ -1493,43 +1494,59 @@
     }[String(cause || "").toLowerCase()] || "Operação";
   }
 
-  function renderDiagnosisEvidence(evidence) {
-    return (evidence || []).slice(0, 3).map((item) => {
+  function diagnosisEvidenceValues(item) {
       const values = [];
-      if (item.avgMs != null) values.push(`média ${item.avgMs}ms`);
-      if (item.maxMs != null) values.push(`máximo ${item.maxMs}ms`);
-      if (item.errors5xx != null && Number(item.errors5xx) > 0) values.push(`${item.errors5xx} erro(s) 5xx`);
-      if (item.freePct != null) values.push(`${item.freePct}% livre`);
+      if (item.durationMs != null) values.push({ label: "Duração", value: `${Math.round(Number(item.durationMs))} ms` });
+      if (item.avgMs != null) values.push({ label: "Média", value: `${item.avgMs} ms` });
+      if (item.p95Ms != null) values.push({ label: "p95", value: `${item.p95Ms} ms` });
+      if (item.maxMs != null) values.push({ label: "Máximo", value: `${item.maxMs} ms` });
+      if (item.errors5xx != null) values.push({ label: "Erros 5xx", value: String(item.errors5xx) });
+      if (item.requests != null) values.push({ label: "Volume", value: String(item.requests) });
+      if (item.freePct != null) values.push({ label: "Espaço livre", value: `${item.freePct}%` });
       if (item.freeBytes != null) {
         const gb = Number(item.freeBytes) / (1024 * 1024 * 1024);
-        if (Number.isFinite(gb)) values.push(`${gb.toFixed(1)} GB`);
+        if (Number.isFinite(gb)) values.push({ label: "Disponível", value: `${gb.toFixed(1)} GB` });
       }
-      if (item.value != null) values.push(`${item.value}%`);
-      if (item.max != null) values.push(`máximo ${item.max}`);
-      if (item.count != null) values.push(`${item.count} ocorrência(s)`);
-      const detail = item.detail || values.join(" · ");
-      return `<li><span class="monitor-diagnosis-evidence-dot" aria-hidden="true"></span><span><strong>${OC.escapeHtml(item.label || "Sinal detectado")}</strong>${detail ? ` · ${OC.escapeHtml(detail)}` : ""}</span></li>`;
+      if (item.value != null) values.push({ label: "Uso", value: `${item.value}%` });
+      if (item.max != null) values.push({ label: "Pico", value: String(item.max) });
+      if (item.count != null) values.push({ label: "Ocorrências", value: String(item.count) });
+      return values;
+  }
+
+  function renderDiagnosisEvidence(evidence) {
+    return (evidence || []).slice(0, 4).map((item) => {
+      const values = diagnosisEvidenceValues(item);
+      return `<li>
+        <div class="monitor-diagnosis-evidence-title"><span class="monitor-diagnosis-evidence-dot" aria-hidden="true"></span><strong>${OC.escapeHtml(item.label || "Sinal detectado")}</strong></div>
+        ${item.detail ? `<p>${OC.escapeHtml(item.detail)}</p>` : ""}
+        ${values.length ? `<dl>${values.map((value) => `<div><dt>${OC.escapeHtml(value.label)}</dt><dd>${OC.escapeHtml(value.value)}</dd></div>`).join("")}</dl>` : ""}
+      </li>`;
     }).join("");
   }
 
-  function renderDiagnosisTimeline(primary, secondary) {
-    const items = [primary, ...(secondary || [])]
+  function diagnosisItems(diagnosis) {
+    return [diagnosis?.primary, ...(diagnosis?.secondary || [])]
       .filter((item) => item && (item.detectedAt || item.detail))
       .slice(0, 4)
       .sort((a, b) => String(a.detectedAt || "").localeCompare(String(b.detectedAt || "")));
+  }
+
+  function renderDiagnosisTimeline(items, selectedIndex) {
     if (!items.length) return "";
-    return `<div class="monitor-diagnosis-timeline" aria-label="Sequência de sinais detectados">
-      <div class="monitor-diagnosis-timeline-head"><span>Sequência recente</span><small>mais antigo → mais recente</small></div>
+    return `<nav class="monitor-diagnosis-timeline" aria-label="Sequência de sinais detectados">
+      <div class="monitor-diagnosis-timeline-head"><span>Sequência recente</span><small>Selecione para investigar</small></div>
       <ol>${items.map((item, index) => {
         const itemCause = String(item.cause || "monitoring").toLowerCase();
         const itemWhen = item.detectedAt ? OC.formatDate(item.detectedAt) : "horário não disponível";
-        const isPrimary = item === primary;
-        return `<li class="is-${OC.escapeHtml(itemCause)}${isPrimary ? " is-primary" : ""}">
-          <span class="monitor-diagnosis-timeline-marker" aria-hidden="true">${index + 1}</span>
-          <div><strong>${OC.escapeHtml(item.label || diagnosisCauseLabel(itemCause))}</strong><small>${OC.escapeHtml(item.environment || "HOST")} · ${OC.escapeHtml(itemWhen)}</small></div>
+        const isSelected = index === selectedIndex;
+        return `<li class="is-${OC.escapeHtml(itemCause)}${isSelected ? " is-selected" : ""}">
+          <button type="button" data-diagnosis-index="${index}" aria-current="${isSelected ? "true" : "false"}" aria-label="Ver diagnóstico: ${OC.escapeHtml(item.label || diagnosisCauseLabel(itemCause))}">
+            <span class="monitor-diagnosis-timeline-marker" aria-hidden="true">${index + 1}</span>
+            <span class="monitor-diagnosis-timeline-copy"><strong>${OC.escapeHtml(item.label || diagnosisCauseLabel(itemCause))}</strong><small>${OC.escapeHtml(item.environment || "HOST")} · ${OC.escapeHtml(itemWhen)}</small></span>
+          </button>
         </li>`;
       }).join("")}</ol>
-    </div>`;
+    </nav>`;
   }
 
   function renderMonitoringDiagnosis(diagnosis) {
@@ -1544,32 +1561,44 @@
       </section>`;
     }
 
-    const cause = String(primary.cause || "monitoring").toLowerCase();
-    const evidence = renderDiagnosisEvidence(primary.evidence);
-    const secondaryItems = (diagnosis.secondary || []).slice(0, 3);
-    const secondary = secondaryItems.map((item) => `<li><span>${OC.escapeHtml(item.environment || "")}</span><strong>${OC.escapeHtml(item.label || diagnosisCauseLabel(item.cause))}</strong><small>${OC.escapeHtml(item.detail || "")}</small></li>`).join("");
-    const when = primary.detectedAt ? OC.formatDate(primary.detectedAt) : "horário não disponível";
-    const actionLabel = cause === "api" ? "Investigar APIs" : cause === "storage" || cause === "host" ? "Ver recursos do computador" : "Abrir investigação";
+    const items = diagnosisItems(diagnosis);
+    const primaryIndex = Math.max(items.indexOf(primary), 0);
+    const requestedIndex = Number.isInteger(OC.monitorState.diagnosisSelection)
+      ? OC.monitorState.diagnosisSelection
+      : primaryIndex;
+    const selectedIndex = Math.min(Math.max(requestedIndex, 0), items.length - 1);
+    const selected = items[selectedIndex] || primary;
+    const cause = String(selected.cause || "monitoring").toLowerCase();
+    const evidence = renderDiagnosisEvidence(selected.evidence);
+    const when = selected.detectedAt ? OC.formatDate(selected.detectedAt) : "horário não disponível";
+    const actionLabel = cause === "api" ? "Analisar APIs" : cause === "storage" || cause === "host" ? "Ver recursos do computador" : "Abrir investigação";
+    const apiEvidence = selected.apiRoute || (selected.evidence || []).find((item) => item.type === "api" && (item.route || item.label));
+    const apiMethod = apiEvidence?.method || String(apiEvidence?.label || "").split(" ")[0];
+    const apiRoute = apiEvidence?.route || String(apiEvidence?.label || "").replace(/^\S+\s+/, "");
+    const routePanel = cause === "api" && apiRoute ? `<div class="monitor-diagnosis-api-route">
+      <span>API que está gerando lentidão</span>
+      <div><b>${OC.escapeHtml(apiMethod || "API")}</b><code>${OC.escapeHtml(apiRoute)}</code></div>
+    </div>` : "";
     return `<section class="monitor-section monitor-diagnosis is-${OC.escapeHtml(cause)}" aria-labelledby="monitor-diagnosis-title">
       <div class="monitor-section-head">
-        <h3 class="monitor-section-title" id="monitor-diagnosis-title">Diagnóstico operacional</h3>
-        <span class="monitor-meta-muted">Última ocorrência relevante</span>
+        <div><h3 class="monitor-section-title" id="monitor-diagnosis-title">Diagnóstico operacional</h3><p class="monitor-diagnosis-intro">Entenda a sequência e selecione um sinal para ver o que aconteceu.</p></div>
+        <span class="monitor-meta-muted">${items.length} sinal(is) correlacionado(s)</span>
       </div>
-      <div class="monitor-diagnosis-summary">
+      <div class="monitor-diagnosis-workbench">
+        ${renderDiagnosisTimeline(items, selectedIndex)}
         <div class="monitor-diagnosis-lead">
-          <div class="monitor-diagnosis-kicker"><span>${OC.escapeHtml(diagnosisCauseLabel(cause))}</span><span>${OC.escapeHtml(diagnosisConfidenceLabel(primary.confidence))}</span></div>
-          <h4>${OC.escapeHtml(primary.label || "Causa não determinada")}</h4>
-          <p>${OC.escapeHtml(primary.detail || "Sinais correlatos detectados no período.")}</p>
-          <div class="monitor-diagnosis-meta"><span>${OC.escapeHtml(primary.environment || "HOST")}</span><span>${OC.escapeHtml(when)}</span></div>
-          <a class="btn btn-secondary btn-sm" href="${OC.escapeHtml(primary.link || "/monitoring/incidents")}">${OC.escapeHtml(actionLabel)}</a>
+          <div class="monitor-diagnosis-kicker"><span>${OC.escapeHtml(diagnosisCauseLabel(cause))}</span><span>${OC.escapeHtml(diagnosisConfidenceLabel(selected.confidence))}</span></div>
+          <h4>${OC.escapeHtml(selected.label || "Causa não determinada")}</h4>
+          <p>${OC.escapeHtml(selected.detail || "Sinais correlatos detectados no período.")}</p>
+          ${routePanel}
+          <div class="monitor-diagnosis-meta"><span><b>Origem</b>${OC.escapeHtml(selected.environment || "HOST")}</span><span><b>Detectado em</b>${OC.escapeHtml(when)}</span>${selected.durationLabel ? `<span><b>Duração</b>${OC.escapeHtml(selected.durationLabel)}</span>` : ""}</div>
+          <div class="monitor-diagnosis-actions"><a class="btn btn-secondary btn-sm" href="${OC.escapeHtml(selected.link || "/monitoring/incidents")}">${OC.escapeHtml(actionLabel)}</a>${selected.eventId ? `<button type="button" class="btn btn-ghost btn-sm monitor-open-event" data-event-id="${OC.escapeHtml(selected.eventId)}" data-event-env="${OC.escapeHtml(selected.environment || "")}">Ver evento original</button>` : ""}</div>
         </div>
         <div class="monitor-diagnosis-evidence">
-          <h4>Evidências que sustentam a hipótese</h4>
+          <h4>Evidências deste sinal</h4>
           <ul>${evidence || "<li><span>Evento operacional correlato detectado.</span></li>"}</ul>
         </div>
       </div>
-      ${renderDiagnosisTimeline(primary, secondaryItems)}
-      ${secondary ? `<div class="monitor-diagnosis-secondary"><h4>Outros sinais para acompanhar</h4><ul>${secondary}</ul></div>` : ""}
     </section>`;
   }
 
@@ -3419,6 +3448,14 @@
         const id = el.getAttribute("data-event-id");
         const env = el.getAttribute("data-event-env");
         if (id && env && OC.openMonitorIncidentDrawer) OC.openMonitorIncidentDrawer(env, id);
+      });
+    });
+    root.querySelectorAll("[data-diagnosis-index]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const index = Number(el.getAttribute("data-diagnosis-index"));
+        if (!Number.isInteger(index) || index === OC.monitorState.diagnosisSelection) return;
+        OC.monitorState.diagnosisSelection = index;
+        if (OC.monitorState.payload) OC.renderMonitoringView(OC.monitorState.payload, { partial: true });
       });
     });
     root.querySelectorAll(".monitor-group-row").forEach((el) => {

@@ -4863,6 +4863,249 @@ body.is-locked .auth-mode-banner {
   color: var(--theme-text-muted);
 }
 
+/* Investigation workbench: timeline selection drives the detail and evidence panes. */
+.monitor-diagnosis-intro {
+  margin: 0.35rem 0 0;
+  color: var(--theme-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.monitor-diagnosis-workbench {
+  display: grid;
+  grid-template-columns: minmax(15rem, 0.72fr) minmax(20rem, 1.15fr) minmax(18rem, 0.9fr);
+  margin-top: var(--spacing-4);
+  overflow: hidden;
+  border: 1px solid var(--theme-border);
+  border-radius: var(--border-radius-xl);
+  background: var(--theme-bg-elevated);
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-timeline {
+  min-width: 0;
+  margin: 0;
+  padding: var(--spacing-4);
+  border: 0;
+  background: var(--theme-bg-page);
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-timeline ol {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--spacing-1);
+  margin: var(--spacing-3) 0 0;
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-timeline li {
+  min-width: 0;
+  padding: 0;
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-timeline li::after {
+  display: none;
+}
+
+.monitor-diagnosis-timeline button {
+  display: grid;
+  grid-template-columns: 1.65rem minmax(0, 1fr);
+  gap: var(--spacing-2);
+  width: 100%;
+  padding: var(--spacing-2);
+  border: 1px solid transparent;
+  border-radius: var(--border-radius-lg);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.monitor-diagnosis-timeline button:hover {
+  background: var(--theme-bg-muted);
+}
+
+.monitor-diagnosis-timeline button:focus-visible {
+  outline: 2px solid var(--color-primary-blue);
+  outline-offset: 2px;
+}
+
+.monitor-diagnosis-timeline li.is-selected button {
+  border-color: color-mix(in srgb, var(--color-primary-blue) 34%, var(--theme-border));
+  background: color-mix(in srgb, var(--theme-bg-elevated) 88%, var(--color-primary-blue) 12%);
+}
+
+.monitor-diagnosis-timeline button .monitor-diagnosis-timeline-marker {
+  margin: 0;
+}
+
+.monitor-diagnosis-timeline li.is-selected .monitor-diagnosis-timeline-marker {
+  border-color: var(--color-primary-blue);
+  background: var(--color-primary-blue);
+  color: #fff;
+}
+
+.monitor-diagnosis-timeline-copy {
+  min-width: 0;
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-lead {
+  min-width: 0;
+  padding: var(--spacing-5);
+  border-left: 1px solid var(--theme-border);
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-lead h4 {
+  max-width: 34rem;
+  font-size: 1.2rem;
+  line-height: 1.25;
+}
+
+.monitor-diagnosis-api-route {
+  margin: var(--spacing-4) 0;
+  padding: var(--spacing-3) var(--spacing-4);
+  border: 1px solid color-mix(in srgb, var(--color-tertiary-orange) 36%, var(--theme-border));
+  border-radius: var(--border-radius-lg);
+  background: color-mix(in srgb, var(--theme-bg-page) 88%, var(--color-tertiary-orange) 12%);
+}
+
+.monitor-diagnosis-api-route > span {
+  display: block;
+  margin-bottom: 0.45rem;
+  color: var(--theme-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.monitor-diagnosis-api-route > div {
+  display: flex;
+  gap: var(--spacing-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.monitor-diagnosis-api-route b {
+  padding: 0.22rem 0.45rem;
+  border-radius: var(--border-radius-sm);
+  background: var(--color-tertiary-orange);
+  color: #fff;
+  font-size: 0.68rem;
+}
+
+.monitor-diagnosis-api-route code {
+  overflow: hidden;
+  color: var(--theme-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-meta {
+  gap: var(--spacing-3);
+  margin: var(--spacing-4) 0;
+}
+
+.monitor-diagnosis-meta span {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.monitor-diagnosis-meta b {
+  color: var(--theme-text-secondary);
+  font-size: 0.68rem;
+  font-weight: var(--font-weight-medium);
+}
+
+.monitor-diagnosis-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-evidence {
+  min-width: 0;
+  padding: var(--spacing-5);
+  border: 0;
+  border-left: 1px solid var(--theme-border);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--theme-bg-page) 90%, var(--color-primary-blue) 10%);
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-evidence li {
+  display: block;
+  padding-bottom: var(--spacing-3);
+  border-bottom: 1px solid var(--theme-border);
+}
+
+.monitor-diagnosis-workbench .monitor-diagnosis-evidence li:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.monitor-diagnosis-evidence-title {
+  display: flex;
+  gap: var(--spacing-2);
+  align-items: center;
+}
+
+.monitor-diagnosis-evidence li p {
+  margin: var(--spacing-1) 0 0 1rem;
+  color: var(--theme-text-muted);
+}
+
+.monitor-diagnosis-evidence dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-2);
+  margin: var(--spacing-3) 0 0;
+}
+
+.monitor-diagnosis-evidence dl div {
+  min-width: 0;
+  padding: var(--spacing-2);
+  border-radius: var(--border-radius-md);
+  background: var(--theme-bg-elevated);
+}
+
+.monitor-diagnosis-evidence dt {
+  color: var(--theme-text-muted);
+  font-size: 0.68rem;
+}
+
+.monitor-diagnosis-evidence dd {
+  margin: 0.12rem 0 0;
+  color: var(--theme-text-primary);
+  font-weight: var(--font-weight-semibold);
+}
+
+@media (max-width: 1080px) {
+  .monitor-diagnosis-workbench {
+    grid-template-columns: minmax(14rem, 0.75fr) minmax(20rem, 1.25fr);
+  }
+
+  .monitor-diagnosis-workbench .monitor-diagnosis-evidence {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--theme-border);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 700px) {
+  .monitor-diagnosis-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .monitor-diagnosis-workbench .monitor-diagnosis-lead,
+  .monitor-diagnosis-workbench .monitor-diagnosis-evidence {
+    grid-column: auto;
+    border-top: 1px solid var(--theme-border);
+    border-left: 0;
+  }
+
+  .monitor-diagnosis-workbench .monitor-diagnosis-timeline-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--spacing-1);
+  }
+}
+
 .monitor-timeline {
   list-style: none;
   margin: 0;
