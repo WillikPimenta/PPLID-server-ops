@@ -27,6 +27,13 @@ NATIVE_BUNDLE_ID = "ops-native"
 _RUNTIME_ENSURE_LOCK = threading.Lock()
 _RUNTIME_READINESS: dict[str, Any] | None = None
 _RUNTIME_BOOTSTRAP_STARTED = False
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _run_hidden(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    """Run child console processes without flashing windows on Windows."""
+    kwargs.setdefault("creationflags", _CREATE_NO_WINDOW)
+    return subprocess.run(*args, **kwargs)
 
 
 class AutomationRuntimeNotReady(Exception):
@@ -621,7 +628,7 @@ def overview(config: dict[str, Any]) -> dict[str, Any]:
         source_root = Path(str(config.get("automationSourceDir") or ""))
         if not sha and (source_root / ".git").exists():
             try:
-                result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(source_root), capture_output=True, text=True, timeout=10)
+                result = _run_hidden(["git", "rev-parse", "--short", "HEAD"], cwd=str(source_root), capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     sha = result.stdout.strip() or None
             except (OSError, subprocess.SubprocessError):
@@ -659,7 +666,7 @@ def _release_sha(current: Path) -> tuple[str, str]:
     full = str(meta.get("shaFull") or meta.get("sha") or "").strip()
     if not full and (current / ".git").exists():
         try:
-            result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(current), capture_output=True, text=True, timeout=10)
+            result = _run_hidden(["git", "rev-parse", "HEAD"], cwd=str(current), capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 full = result.stdout.strip()
         except (OSError, subprocess.SubprocessError):
@@ -679,7 +686,7 @@ def _ignore_runtime_copy(_directory: str, names: list[str]) -> set[str]:
 
 
 def _run_checked(args: list[str], *, cwd: Path | None = None, timeout: int = 1800) -> None:
-    result = subprocess.run(args, cwd=str(cwd) if cwd else None, capture_output=True, text=True, timeout=timeout)
+    result = _run_hidden(args, cwd=str(cwd) if cwd else None, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         tail = "\n".join(((result.stdout or "") + "\n" + (result.stderr or "")).splitlines()[-20:])
         raise RuntimeError(tail or f"Comando falhou com código {result.returncode}")
@@ -729,7 +736,7 @@ def _smoke_test_bundle_python(python: Path, bundle_dir: Path) -> tuple[bool, str
     if not python.is_file():
         return False, f"Python do runtime ausente: {python}"
     try:
-        result = subprocess.run(
+        result = _run_hidden(
             [
                 str(python),
                 "-c",
@@ -1245,7 +1252,7 @@ def validate_credentials(config: dict[str, Any], body: dict[str, Any], username:
         }
     )
     try:
-        result = subprocess.run(
+        result = _run_hidden(
             [str(python), str(helper), "--bundle", str(bundle_dir)],
             cwd=str(bundle_dir / "automacoes"), env=env, capture_output=True, text=True, timeout=210,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

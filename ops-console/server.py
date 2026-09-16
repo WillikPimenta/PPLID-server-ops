@@ -37,6 +37,7 @@ PUBLIC_DIR = OPS_ROOT / "public"
 DEFAULT_CONFIG = OPS_REPO_ROOT / "config" / "env.config.json"
 ENV_ORDER = ("MAIN", "DEV", "HOM")
 DEFAULT_BASE_DIR = Path("C:/PPLID")
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 SESSION_COOKIE_NAME = "ops_session"
 PROTECTED_API_PREFIXES = (
     "/api/v1/overview",
@@ -723,6 +724,7 @@ def run_git(repo_dir: Path, *args: str, timeout: float = 5.0) -> str | None:
             timeout=timeout,
             check=False,
             env=env,
+            creationflags=_CREATE_NO_WINDOW,
         )
         if result.returncode != 0:
             return None
@@ -1177,7 +1179,15 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
     config: dict[str, Any] = {}
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
-        sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
+        # pythonw.exe nao fornece stderr. Falhar aqui interrompe send_response()
+        # antes dos cabecalhos e resulta em ERR_EMPTY_RESPONSE no navegador.
+        stream = sys.stderr
+        if stream is None:
+            return
+        try:
+            stream.write("%s - %s\n" % (self.address_string(), format % args))
+        except (AttributeError, OSError, ValueError):
+            return
 
     def _get_cookie(self, name: str) -> str | None:
         cookie_header = self.headers.get("Cookie", "")

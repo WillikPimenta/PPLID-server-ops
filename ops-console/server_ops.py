@@ -65,6 +65,13 @@ _MIGRATIONS_INFLIGHT: dict[str, bool] = {}
 _DEPLOY_PROGRESS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _DEPLOY_PROGRESS_CACHE_TTL_SEC = 2
 _ORPHAN_BOT_LOCK = threading.Lock()
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _run_hidden(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    """Run child console processes without flashing windows on Windows."""
+    kwargs.setdefault("creationflags", _CREATE_NO_WINDOW)
+    return subprocess.run(*args, **kwargs)
 
 
 def fix_mojibake(text: str | None) -> str:
@@ -91,13 +98,13 @@ def _resolve_origin_branch_sha(base_dir: Path, env_name: str) -> tuple[str, str]
         return "", ""
     ref = f"origin/{branch}"
     try:
-        subprocess.run(
+        _run_hidden(
             ["git", "-C", str(mirror), "fetch", "origin"],
             capture_output=True,
             text=True,
             timeout=60,
         )
-        proc_full = subprocess.run(
+        proc_full = _run_hidden(
             ["git", "-C", str(mirror), "rev-parse", ref],
             capture_output=True,
             text=True,
@@ -106,7 +113,7 @@ def _resolve_origin_branch_sha(base_dir: Path, env_name: str) -> tuple[str, str]
         if proc_full.returncode != 0:
             return "", ""
         full = proc_full.stdout.strip()
-        proc_short = subprocess.run(
+        proc_short = _run_hidden(
             ["git", "-C", str(mirror), "rev-parse", "--short", full],
             capture_output=True,
             text=True,
@@ -150,13 +157,13 @@ def _resolve_sha_in_mirror(
         return sha, sha if len(sha) >= 40 else sha
     try:
         if fetch:
-            subprocess.run(
+            _run_hidden(
                 ["git", "-C", str(mirror), "fetch", "origin"],
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
-        proc = subprocess.run(
+        proc = _run_hidden(
             ["git", "-C", str(mirror), "rev-parse", sha],
             capture_output=True,
             text=True,
@@ -165,7 +172,7 @@ def _resolve_sha_in_mirror(
         if proc.returncode != 0:
             return sha, sha if len(sha) >= 40 else sha
         full = proc.stdout.strip()
-        short_proc = subprocess.run(
+        short_proc = _run_hidden(
             ["git", "-C", str(mirror), "rev-parse", "--short", full],
             capture_output=True,
             text=True,
@@ -275,7 +282,7 @@ def run_powershell(
     if extra_env:
         env = {**dict(__import__("os").environ), **extra_env}
     try:
-        result = subprocess.run(
+        result = _run_hidden(
             cmd,
             capture_output=True,
             text=True,
@@ -541,7 +548,7 @@ def action_redeploy(
             mirror = base_dir / "deploy" / env_name / "mirror"
             if mirror.is_dir():
                 try:
-                    proc = subprocess.run(
+                    proc = _run_hidden(
                         ["git", "-C", str(mirror), "rev-parse", "--short", "HEAD"],
                         capture_output=True,
                         text=True,
@@ -549,7 +556,7 @@ def action_redeploy(
                     )
                     if proc.returncode == 0:
                         sha = proc.stdout.strip()
-                        proc_full = subprocess.run(
+                        proc_full = _run_hidden(
                             ["git", "-C", str(mirror), "rev-parse", "HEAD"],
                             capture_output=True,
                             text=True,
@@ -897,7 +904,7 @@ def action_restart_service(
         f"$p={port}; Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | "
         f"ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}"
     )
-    subprocess.run(
+    _run_hidden(
         ["powershell", "-NoProfile", "-Command", ps_kill],
         capture_output=True,
         timeout=30,
@@ -1404,7 +1411,7 @@ def apply_infra_ports(
             f"$p={port}; Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | "
             f"ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}"
         )
-        subprocess.run(
+        _run_hidden(
             ["powershell", "-NoProfile", "-Command", ps_kill],
             capture_output=True,
             timeout=30,
@@ -1526,7 +1533,7 @@ def fetch_migrations_status(
             return result
 
         try:
-            proc = subprocess.run(
+            proc = _run_hidden(
                 [str(venv_python), "manage.py", "showmigrations", "--plan"],
                 cwd=str(current),
                 capture_output=True,
@@ -2627,7 +2634,7 @@ def _write_console_update_result(config: dict[str, Any], payload: dict[str, Any]
 
 def _git_in_repo(repo_dir: Path, args: list[str], *, timeout: int = 15) -> str | None:
     try:
-        proc = subprocess.run(
+        proc = _run_hidden(
             ["git", "-C", str(repo_dir), *args],
             capture_output=True,
             text=True,
