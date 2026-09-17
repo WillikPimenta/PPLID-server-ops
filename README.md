@@ -1,4 +1,4 @@
-# PPLID Server Ops
+# PPLID Server Ops 
 
 Scripts de automacao do servidor PPLID (sync Git, deploy, ops-console, Task Scheduler).
 Usa `C:\PPLID\` como base da maquina.
