@@ -1416,8 +1416,11 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
         status = 200 if result.get("ok") else 500
         self._send_json(result, status=status)
 
-    def _handle_console_update_status(self) -> None:
-        result = server_ops.check_console_update(self.config)
+    def _handle_console_update_status(self, query: dict[str, list[str]] | None = None) -> None:
+        query = query or {}
+        raw = (query.get("progress") or ["0"])[0]
+        progress_only = str(raw).strip().lower() in {"1", "true", "yes"}
+        result = server_ops.check_console_update(self.config, progress_only=progress_only)
         # Sempre 200 com payload estruturado; o campo ok indica sucesso da verificacao remota.
         self._send_json(result, status=200)
 
@@ -1897,7 +1900,7 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/v1/console/update/status":
-            self._handle_console_update_status()
+            self._handle_console_update_status(parse_qs(parsed.query))
             return
         if path == "/api/v1/console/update/log":
             self._handle_console_update_log(parse_qs(parsed.query))
@@ -2332,8 +2335,12 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 return
             if sub == "api-routes":
                 window = (query.get("window") or ["24h"])[0]
+                since = (query.get("since") or [None])[0]
+                until = (query.get("until") or [None])[0]
                 self._send_json(
-                    server_monitoring.build_monitoring_api_routes(self.config, env_name, window=window)
+                    server_monitoring.build_monitoring_api_routes(
+                        self.config, env_name, window=window, since=since, until=until
+                    )
                 )
                 return
             if sub == "api-samples":
@@ -2341,6 +2348,8 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 route = (query.get("route") or [""])[0].strip()
                 if method and route:
                     window = (query.get("window") or ["24h"])[0]
+                    since = (query.get("since") or [None])[0]
+                    until = (query.get("until") or [None])[0]
                     try:
                         limit = int((query.get("limit") or ["50"])[0])
                     except ValueError:
@@ -2352,6 +2361,8 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                             window=window,
                             method=method,
                             route=route,
+                            since=since,
+                            until=until,
                             limit=limit,
                         )
                     )
@@ -2380,6 +2391,8 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 return
             if sub == "api-route-samples":
                 window = (query.get("window") or ["24h"])[0]
+                since = (query.get("since") or [None])[0]
+                until = (query.get("until") or [None])[0]
                 method = (query.get("method") or [""])[0].strip().upper()
                 route = (query.get("route") or [""])[0].strip()
                 if not method or not route:
@@ -2396,9 +2409,33 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                         window=window,
                         method=method,
                         route=route,
+                        since=since,
+                        until=until,
                         limit=limit,
                     )
                 )
+                return
+            if sub == "api-recent":
+                window = (query.get("window") or ["24h"])[0]
+                since = (query.get("since") or [None])[0]
+                until = (query.get("until") or [None])[0]
+                try:
+                    limit = int((query.get("limit") or ["50"])[0])
+                except ValueError:
+                    limit = 50
+                self._send_json(
+                    server_monitoring.build_monitoring_api_recent(
+                        self.config,
+                        env_name,
+                        window=window,
+                        since=since,
+                        until=until,
+                        limit=limit,
+                    )
+                )
+                return
+            if sub == "api-inflight":
+                self._send_json(server_monitoring.build_monitoring_api_inflight(self.config, env_name))
                 return
             if sub == "deploy":
                 self._send_json(server_monitoring.build_monitoring_deploy_stats(self.config, env_name))

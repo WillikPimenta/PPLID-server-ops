@@ -9,7 +9,7 @@
     database: ["/js/database-explorer.js"],
     automations: ["/js/automations-config.js?v=20260910b", "/js/automations.js?v=20260910b"],
     host: ["/js/ops-perf.js", "/js/host.js"],
-    monitoring: ["/js/ops-perf.js", "/js/monitoring.js", "/js/monitor-drawer.js"],
+    monitoring: ["/js/ops-perf.js", "/js/monitoring.js?v=20260923-monitoring", "/js/monitor-drawer.js"],
     deployDetails: ["/js/deploy-drawer.js", "/js/filters.js", "/js/drawer.js"],
     deployProgress: [
       "/js/deploy-progress.js",
@@ -45,7 +45,19 @@
     if (features.has(name)) return features.get(name);
     const sources = definitions[name];
     if (!sources) return Promise.reject(new Error(`Funcionalidade desconhecida: ${name}`));
-    const promise = sources.reduce((chain, src) => chain.then(() => loadScript(src)), Promise.resolve());
+    const promise = sources.reduce((chain, src) => chain.then(() => loadScript(src)), Promise.resolve()).then(() => {
+      const requiredExports = {
+        monitoring: "refreshMonitoring",
+        host: "refreshHost",
+        env: "renderEnvConfig",
+        database: "renderDatabaseExplorer",
+        automations: "renderAutomations",
+      };
+      const required = requiredExports[name];
+      if (required && typeof OC[required] !== "function") {
+        throw new Error(`A funcionalidade ${name} foi carregada, mas nao foi inicializada corretamente.`);
+      }
+    });
     features.set(name, promise);
     return promise;
   };

@@ -9,6 +9,7 @@ class ApiRequestMetric(models.Model):
     duration_ms = models.PositiveIntegerField()
     user_id = models.IntegerField(null=True, blank=True)
     request_params = models.JSONField(null=True, blank=True)
+    error_reason = models.CharField(max_length=500, null=True, blank=True)
 
     class Meta:
         db_table = "ops_api_request_metric"

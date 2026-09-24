@@ -4,6 +4,7 @@ param(
     [switch]$RestartOnly,
     [string]$OpsRepoDir = "",
     [string]$ConfigPath = "",
+    [string]$LogDir = "",
     [int]$DelaySeconds = 2
 )
 
@@ -33,6 +34,14 @@ function Write-ConsoleUpdateResult {
         Set-Content -Path $ResultPath -Value $json -Encoding UTF8
     }
     Write-Output $json
+}
+
+function Resolve-ConsoleUpdateLogDir {
+    param([string]$ExplicitLogDir)
+    if ($ExplicitLogDir) {
+        return $ExplicitLogDir
+    }
+    return (Get-PplidLogDir)
 }
 
 function Invoke-GitInRepo {
@@ -151,19 +160,43 @@ function Get-ConsoleUpdateStatus {
     }
 }
 
-if (-not $OpsRepoDir) {
-    $OpsRepoDir = Get-PplidOpsDir -ScriptRoot $PSScriptRoot
+# Resolve the shared log directory before any work so the Python server and
+# this worker always read/write the same lock/result/log files. Passing -LogDir
+# (or OPS_MACHINE_CONFIG for -Local) avoids the hang where the UI stays on
+# "iniciando atualização" while the worker advances a different folder.
+$resolvedLogDir = Resolve-ConsoleUpdateLogDir -ExplicitLogDir $LogDir
+if (-not (Test-Path $resolvedLogDir)) {
+    New-Item -ItemType Directory -Path $resolvedLogDir -Force | Out-Null
 }
-$OpsRepoDir = (Resolve-Path $OpsRepoDir).Path
+$lockPath = Join-Path $resolvedLogDir "console-update.lock"
+$resultPath = Join-Path $resolvedLogDir "console-update.result.json"
+$logPath = Join-Path $resolvedLogDir "console-update.log"
+
+try {
+    if (-not $OpsRepoDir) {
+        $OpsRepoDir = Get-PplidOpsDir -ScriptRoot $PSScriptRoot
+    }
+    $OpsRepoDir = (Resolve-Path $OpsRepoDir).Path
+} catch {
+    if ($Apply) {
+        Write-ConsoleUpdateResult -Payload @{
+            ok = $false
+            applied = $false
+            restarting = $false
+            phase = "failed"
+            error = "OpsRepoDir invalido: $($_.Exception.Message)"
+        } -ResultPath $resultPath
+        if (Test-Path $lockPath) { Remove-Item $lockPath -Force -ErrorAction SilentlyContinue }
+        exit 1
+    }
+    throw
+}
 
 if (-not $ConfigPath) {
     $ConfigPath = Get-PplidEnvConfigPath -ScriptRoot $PSScriptRoot
 }
 
 $opsConsoleDir = Get-PplidOpsConsoleDir -ScriptRoot $PSScriptRoot
-$lockPath = Join-Path (Get-PplidLogDir) "console-update.lock"
-$resultPath = Join-Path (Get-PplidLogDir) "console-update.result.json"
-$logPath = Join-Path (Get-PplidLogDir) "console-update.log"
 
 function Write-ConsoleUpdateLog {
     param(
@@ -246,7 +279,15 @@ if ($Apply) {
     if (-not $status.ok) {
         Write-ConsoleUpdateLog -Message ([string]($status.reason)) -Level "ERROR" -Phase "failed"
         Clear-ConsoleUpdateLock
-        Write-ApplyResult -Payload $status
+        $failPayload = @{}
+        foreach ($key in $status.Keys) { $failPayload[$key] = $status[$key] }
+        $failPayload["phase"] = "failed"
+        $failPayload["applied"] = $false
+        $failPayload["restarting"] = $false
+        if (-not $failPayload.ContainsKey("error") -or -not $failPayload["error"]) {
+            $failPayload["error"] = [string]$status.reason
+        }
+        Write-ApplyResult -Payload $failPayload
         exit 1
     }
     if (-not $status.updateAvailable) {
@@ -426,7 +467,8 @@ if ($Apply) {
         "-File", (Join-Path $PSScriptRoot "update_ops_console.ps1"),
         "-RestartOnly",
         "-OpsRepoDir", $OpsRepoDir,
-        "-DelaySeconds", "2"
+        "-DelaySeconds", "2",
+        "-LogDir", $resolvedLogDir
     )
     if ($ConfigPath -and (Test-Path $ConfigPath)) {
         $workerArgs += @("-ConfigPath", $ConfigPath)

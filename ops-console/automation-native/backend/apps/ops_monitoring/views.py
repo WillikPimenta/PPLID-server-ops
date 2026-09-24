@@ -37,6 +37,33 @@ def _window_delta(window: str) -> timedelta:
     return _WINDOW_MAP.get(window, _WINDOW_MAP["24h"])
 
 
+def _parse_custom_range(request) -> tuple[datetime, datetime] | None:
+    since_raw = (request.GET.get("since") or "").strip()
+    until_raw = (request.GET.get("until") or "").strip()
+    if not since_raw and not until_raw:
+        return None
+    if not since_raw or not until_raw:
+        raise ValueError("Parametros since e until devem ser informados juntos")
+    try:
+        values = []
+        for raw in (since_raw, until_raw):
+            value = parse_datetime(raw.replace("Z", "+00:00"))
+            if value is None:
+                value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if timezone.is_naive(value):
+                value = timezone.make_aware(value, timezone.utc)
+            values.append(value)
+        since, until = values
+    except (TypeError, ValueError):
+        raise ValueError("Parametros since e until invalidos")
+    if until <= since:
+        raise ValueError("O fim do periodo deve ser posterior ao inicio")
+    now = timezone.now()
+    if since < now - _WINDOW_MAP["7d"] or until > now + timedelta(minutes=1):
+        raise ValueError("O periodo deve estar dentro dos ultimos 7 dias")
+    return since, until
+
+
 _SAMPLING_POLICY = {
     "mode": "priority_sample",
     "normalRatePct": 10,
@@ -45,6 +72,17 @@ _SAMPLING_POLICY = {
     "capturesAllSlow": True,
     "slowRequestMs": 2000,
 }
+
+
+def _sampling_payload() -> dict:
+    from .middleware import get_metrics_backpressure_status
+
+    backpressure = get_metrics_backpressure_status()
+    return {
+        **_SAMPLING_POLICY,
+        "degraded": bool(backpressure.get("active")),
+        "backpressure": backpressure,
+    }
 
 
 def _build_requester_map() -> dict[int, str]:
@@ -204,10 +242,10 @@ def _floor_bucket(value: datetime, minutes: int) -> datetime:
     return value.replace(minute=minute, second=0, microsecond=0)
 
 
-def _build_api_traffic(window: str, since: datetime) -> dict:
-    now = timezone.now()
+def _build_api_traffic(window: str, since: datetime, until: datetime | None = None) -> dict:
+    now = until or timezone.now()
     resolution = _TRAFFIC_RESOLUTION_MINUTES.get(window, 15)
-    traffic_qs = ApiTrafficBucket.objects.filter(bucket_start__gte=since)
+    traffic_qs = ApiTrafficBucket.objects.filter(bucket_start__gte=since, bucket_start__lt=now)
 
     totals = traffic_qs.aggregate(
         requests=Sum("request_count"),
@@ -259,7 +297,7 @@ def _build_api_traffic(window: str, since: datetime) -> dict:
             target[key] += int(row[key] or 0)
 
     users_by_slot: dict[datetime, set[int]] = {}
-    user_rows = ApiTrafficUserBucket.objects.filter(bucket_start__gte=since).values(
+    user_rows = ApiTrafficUserBucket.objects.filter(bucket_start__gte=since, bucket_start__lt=now).values(
         "bucket_start", "user_id"
     )
     for row in user_rows.iterator():
@@ -328,7 +366,7 @@ def _build_api_traffic(window: str, since: datetime) -> dict:
         )
 
     unique_users = (
-        ApiTrafficUserBucket.objects.filter(bucket_start__gte=since)
+        ApiTrafficUserBucket.objects.filter(bucket_start__gte=since, bucket_start__lt=now)
         .values("user_id")
         .distinct()
         .count()
@@ -386,8 +424,17 @@ def ops_metrics_summary(request):
         return JsonResponse({"error": "Acesso restrito a localhost"}, status=403)
 
     window = (request.GET.get("window") or "24h").lower()
-    since = timezone.now() - _window_delta(window)
-    qs = ApiRequestMetric.objects.filter(recorded_at__gte=since)
+    try:
+        custom_range = _parse_custom_range(request)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    if custom_range:
+        window = "custom"
+        since, until = custom_range
+    else:
+        until = timezone.now()
+        since = until - _window_delta(window)
+    qs = ApiRequestMetric.objects.filter(recorded_at__gte=since, recorded_at__lt=until)
 
     # A consulta interna também força o flush para manter o painel atualizado
     # mesmo se o thread periódico ainda não tiver executado neste processo.
@@ -399,7 +446,7 @@ def ops_metrics_summary(request):
         logger.exception("Falha ao sincronizar metricas pendentes antes do resumo")
 
     try:
-        traffic = _build_api_traffic(window, since)
+        traffic = _build_api_traffic(window, since, until)
     except DatabaseError as exc:
         report_internal_error(exc, operation="ops_monitoring.api_traffic")
         traffic = {
@@ -424,7 +471,8 @@ def ops_metrics_summary(request):
         {
             "window": window,
             "since": since.isoformat(),
-            "sampling": dict(_SAMPLING_POLICY),
+            "until": until.isoformat(),
+            "sampling": _sampling_payload(),
             "totals": totals_payload,
             "routeStats": route_stats,
             "slowRoutes": route_stats[:20],
@@ -491,7 +539,7 @@ def ops_metrics_around(request):
             "since": since.isoformat(),
             "until": until.isoformat(),
             "minMs": min_ms,
-            "sampling": dict(_SAMPLING_POLICY),
+            "sampling": _sampling_payload(),
             "totals": totals_payload,
             "routeStats": route_stats,
             "slowRoutes": route_stats,
@@ -527,7 +575,16 @@ def ops_metrics_route_samples(request):
     except (TypeError, ValueError):
         limit = 50
 
-    since = timezone.now() - _window_delta(window)
+    try:
+        custom_range = _parse_custom_range(request)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    if custom_range:
+        window = "custom"
+        since, until = custom_range
+    else:
+        until = timezone.now()
+        since = until - _window_delta(window)
 
     try:
         from .middleware import flush_metrics_buffer
@@ -538,6 +595,7 @@ def ops_metrics_route_samples(request):
 
     qs = ApiRequestMetric.objects.filter(
         recorded_at__gte=since,
+        recorded_at__lt=until,
         method=method,
         route=route,
     )
@@ -545,7 +603,7 @@ def ops_metrics_route_samples(request):
     requester_map = _build_requester_map()
     rows = list(
         qs.order_by("-recorded_at").values(
-            "recorded_at", "status_code", "duration_ms", "user_id", "request_params"
+            "recorded_at", "status_code", "duration_ms", "user_id", "request_params", "error_reason"
         )[:limit]
     )
 
@@ -555,8 +613,9 @@ def ops_metrics_route_samples(request):
             "method": method,
             "route": route,
             "since": since.isoformat(),
+            "until": until.isoformat(),
             "sampleCount": sample_count,
-            "sampling": dict(_SAMPLING_POLICY),
+            "sampling": _sampling_payload(),
             "samples": [
                 {
                     "recordedAt": row["recorded_at"].isoformat(),
@@ -564,6 +623,107 @@ def ops_metrics_route_samples(request):
                     "durationMs": row["duration_ms"],
                     "requester": _resolve_requester(row["user_id"], requester_map),
                     "requestParams": row["request_params"],
+                    "errorReason": row["error_reason"],
+                }
+                for row in rows
+            ],
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def ops_metrics_recent_samples(request):
+    """Últimas amostras de requisição (todas as rotas) dentro da janela."""
+    if not _is_local_request(request):
+        return JsonResponse({"error": "Acesso restrito a localhost"}, status=403)
+
+    window = (request.GET.get("window") or "24h").lower()
+    try:
+        limit = max(1, min(100, int(request.GET.get("limit") or 50)))
+    except (TypeError, ValueError):
+        limit = 50
+
+    try:
+        custom_range = _parse_custom_range(request)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    if custom_range:
+        window = "custom"
+        since, until = custom_range
+    else:
+        until = timezone.now()
+        since = until - _window_delta(window)
+
+    try:
+        from .middleware import flush_metrics_buffer
+
+        flush_metrics_buffer()
+    except Exception:
+        logger.exception("Falha ao sincronizar metricas pendentes antes das amostras recentes")
+
+    qs = ApiRequestMetric.objects.filter(recorded_at__gte=since, recorded_at__lt=until)
+    sample_count = qs.count()
+    requester_map = _build_requester_map()
+    rows = list(
+        qs.order_by("-recorded_at").values(
+            "recorded_at",
+            "method",
+            "route",
+            "status_code",
+            "duration_ms",
+            "user_id",
+            "error_reason",
+        )[:limit]
+    )
+
+    return JsonResponse(
+        {
+            "window": window,
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+            "sampleCount": sample_count,
+            "limit": limit,
+            "sampling": _sampling_payload(),
+            "samples": [
+                {
+                    "recordedAt": row["recorded_at"].isoformat(),
+                    "method": row["method"],
+                    "route": row["route"],
+                    "statusCode": row["status_code"],
+                    "durationMs": row["duration_ms"],
+                    "requester": _resolve_requester(row["user_id"], requester_map),
+                    "errorReason": row["error_reason"],
+                }
+                for row in rows
+            ],
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def ops_metrics_in_flight(request):
+    """Requisições ainda em execução neste processo Django."""
+    if not _is_local_request(request):
+        return JsonResponse({"error": "Acesso restrito a localhost"}, status=403)
+
+    from .middleware import list_inflight_requests
+
+    requester_map = _build_requester_map()
+    rows = list_inflight_requests()
+    return JsonResponse(
+        {
+            "count": len(rows),
+            "sampling": _sampling_payload(),
+            "requests": [
+                {
+                    "id": row.get("id"),
+                    "startedAt": row.get("startedAt"),
+                    "elapsedMs": row.get("elapsedMs"),
+                    "method": row.get("method"),
+                    "route": row.get("route"),
+                    "requester": _resolve_requester(row.get("user_id"), requester_map),
                 }
                 for row in rows
             ],

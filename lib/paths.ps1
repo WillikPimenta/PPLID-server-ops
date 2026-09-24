@@ -8,6 +8,11 @@ function Get-PplidMachineConfigCandidates {
 }
 
 function Get-PplidMachineConfigPath {
+    # Prefer the explicit override used by start_ops_console.ps1 -Local so
+    # detached workers share the same baseDir/logDir as the Python server.
+    if ($env:OPS_MACHINE_CONFIG -and (Test-Path $env:OPS_MACHINE_CONFIG)) {
+        return $env:OPS_MACHINE_CONFIG
+    }
     foreach ($path in (Get-PplidMachineConfigCandidates)) {
         if (Test-Path $path) {
             return $path

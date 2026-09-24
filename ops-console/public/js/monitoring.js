@@ -8,8 +8,10 @@
   const STORAGE_FILTERS = "pplid-monitor-filters";
   const MONITOR_REFRESH_MS = 30000;
   const MONITOR_APIS_REFRESH_MS = 15000;
+  const MONITOR_APIS_LIVE_REFRESH_MS = 5000;
   const MONITOR_LOGS_REFRESH_MS = 15000;
   const STORAGE_API_WINDOW = "pplid-monitor-api-window";
+  const STORAGE_API_SUBTAB = "pplid-monitor-api-subtab";
   const STORAGE_LATENCY_WINDOW = "pplid-monitor-latency-window";
   const STORAGE_LOGS_PATTERN = "pplid-monitor-logs-pattern";
   const STORAGE_LOGS_FILTERS = "pplid-monitor-logs-filters-v2";
@@ -84,6 +86,10 @@
     lastRefreshedAt: null,
     payload: null,
     apiWindow: "6h",
+    apiSubTab: "overview",
+    apiSince: "",
+    apiUntil: "",
+    apiRouteFilter: "",
     latencyWindow: "24h",
     logsPattern: "",
     logFilters: { ...DEFAULT_LOG_FILTERS },
@@ -93,10 +99,38 @@
     logNewCount: 0,
     logHistoryMode: false,
     dayDrill: null,
+    apiSpikeDrill: null,
     apiRouteSort: "priority",
     apiRouteModalSort: "timeDesc",
     diagnosisSelection: null,
   };
+
+  const API_SUBTAB_LABELS = {
+    overview: "Visão geral",
+    live: "Ao vivo",
+  };
+  const API_SUBTABS = ["overview", "live"];
+
+  function normalizeApiSubTab(value) {
+    const key = String(value || "").toLowerCase();
+    return API_SUBTABS.includes(key) ? key : "overview";
+  }
+
+  function currentApiSubTab() {
+    return normalizeApiSubTab(OC.monitorState.apiSubTab || "overview");
+  }
+
+  function syncApiSubTabFromRoute() {
+    const section = OC.currentRoute?.query?.section;
+    if (section) {
+      OC.monitorState.apiSubTab = normalizeApiSubTab(section);
+      return;
+    }
+    if (OC.currentRoute?.tab === "apis") {
+      // Keep persisted preference when URL has no section.
+      OC.monitorState.apiSubTab = currentApiSubTab();
+    }
+  }
 
   const API_ROUTE_SORT_OPTIONS = [
     { value: "priority", label: "Prioridade" },
@@ -260,7 +294,15 @@
     }
     try {
       const win = localStorage.getItem(STORAGE_API_WINDOW);
-      if (win && ["1h", "6h", "24h", "7d"].includes(win)) OC.monitorState.apiWindow = win;
+      if (win && ["1h", "6h", "24h", "7d", "custom"].includes(win)) OC.monitorState.apiWindow = win;
+      const range = JSON.parse(localStorage.getItem("pplid-monitor-api-range") || "null");
+      if (range && typeof range === "object") {
+        OC.monitorState.apiSince = range.since || "";
+        OC.monitorState.apiUntil = range.until || "";
+      }
+      OC.monitorState.apiRouteFilter = localStorage.getItem("pplid-monitor-api-route") || "";
+      const sub = localStorage.getItem(STORAGE_API_SUBTAB);
+      if (sub) OC.monitorState.apiSubTab = normalizeApiSubTab(sub);
     } catch {
       /* ignore */
     }
@@ -298,6 +340,7 @@
       /* ignore */
     }
     if (OC.currentRoute?.tab) OC.monitorState.activeTab = OC.currentRoute.tab;
+    syncApiSubTabFromRoute();
     applyLogRoutePrefs();
   }
 
@@ -306,6 +349,9 @@
     localStorage.setItem(STORAGE_CATS, JSON.stringify(OC.monitorState.categories));
     localStorage.setItem(STORAGE_FILTERS, JSON.stringify(OC.monitorState.eventFilters));
     localStorage.setItem(STORAGE_API_WINDOW, OC.monitorState.apiWindow || "6h");
+    localStorage.setItem(STORAGE_API_SUBTAB, currentApiSubTab());
+    localStorage.setItem("pplid-monitor-api-range", JSON.stringify({ since: OC.monitorState.apiSince || "", until: OC.monitorState.apiUntil || "" }));
+    localStorage.setItem("pplid-monitor-api-route", OC.monitorState.apiRouteFilter || "");
     localStorage.setItem(STORAGE_LATENCY_WINDOW, OC.monitorState.latencyWindow || "24h");
     localStorage.setItem(STORAGE_LOGS_PATTERN, OC.monitorState.logFilters?.q ?? "");
     localStorage.setItem(STORAGE_LOGS_FILTERS, JSON.stringify(OC.monitorState.logFilters || DEFAULT_LOG_FILTERS));
@@ -1296,7 +1342,9 @@
     const tab = OC.monitorState.activeTab || "summary";
     const refreshSec = Math.round(
       (tab === "apis"
-        ? MONITOR_APIS_REFRESH_MS
+        ? currentApiSubTab() === "live"
+          ? MONITOR_APIS_LIVE_REFRESH_MS
+          : MONITOR_APIS_REFRESH_MS
         : tab === "logs"
           ? MONITOR_LOGS_REFRESH_MS
           : MONITOR_REFRESH_MS) / 1000
@@ -1920,7 +1968,7 @@
       note.hidden = false;
       note.innerHTML = `Filtrado pelo clique no gráfico · ${hits} rota(s) · <button type="button" class="btn btn-ghost btn-sm" id="monitor-api-clear-route-filter">Limpar filtro</button>`;
       note.querySelector("#monitor-api-clear-route-filter")?.addEventListener("click", () => {
-        applyApiRouteFilter([]);
+        clearApiSpikeDrill();
       });
     }
   }
@@ -1995,10 +2043,11 @@
                 <td class="monitor-api-route-modal-time">${OC.escapeHtml(OC.formatDate(sample.recordedAt))}</td>
                 <td class="monitor-api-route-modal-requester">${OC.escapeHtml(sample.requester || "—")}</td>
                 <td class="monitor-api-route-modal-status-cell">${renderApiRouteSampleStatusBadge(sample.statusCode)}</td>
+                <td class="monitor-api-route-modal-reason">${sample.statusCode >= 400 ? OC.escapeHtml(sample.errorReason || "Motivo não disponível") : "—"}</td>
                 <td class="monitor-api-route-modal-ms">${formatLatencyMs(sample.durationMs)}</td>
               </tr>
               <tr class="monitor-api-route-modal-detail hidden" data-sample-detail="${OC.escapeHtml(key)}" hidden>
-                <td colspan="4">${renderApiRouteSampleParams(sample.requestParams)}</td>
+                <td colspan="5">${renderApiRouteSampleParams(sample.requestParams)}</td>
               </tr>`;
       })
       .join("");
@@ -2034,6 +2083,7 @@
             <th>Horário</th>
             <th>Quem requisitou</th>
             <th class="is-numeric">Status</th>
+            <th>Motivo do erro</th>
             <th class="is-numeric">ms</th>
           </tr></thead>
           <tbody id="monitor-api-route-modal-tbody">${renderApiRouteModalSamplesTable(samples, sortKey)}</tbody>
@@ -2051,25 +2101,11 @@
     );
   }
 
-  function closeApiRouteSampleDetails(tableWrap, exceptRow = null) {
-    tableWrap.querySelectorAll(".monitor-api-route-modal-row.is-expanded").forEach((row) => {
-      if (exceptRow && row === exceptRow) return;
-      row.classList.remove("is-expanded");
-      row.setAttribute("aria-expanded", "false");
-      const detail = findApiRouteSampleDetail(tableWrap, row.getAttribute("data-sample-key") || "");
-      if (detail) {
-        detail.hidden = true;
-        detail.classList.add("hidden");
-      }
-    });
-  }
-
   function toggleApiRouteSampleDetail(tableWrap, row) {
     const key = row.getAttribute("data-sample-key") || "";
     const detail = findApiRouteSampleDetail(tableWrap, key);
     if (!detail) return;
     const open = !row.classList.contains("is-expanded");
-    closeApiRouteSampleDetails(tableWrap, open ? row : null);
     row.classList.toggle("is-expanded", open);
     row.setAttribute("aria-expanded", open ? "true" : "false");
     detail.hidden = !open;
@@ -2144,9 +2180,13 @@
     document.addEventListener("keydown", onKeyDown);
 
     try {
+      const params = apiRangeParams(win);
+      params.set("method", method);
+      params.set("route", route);
       const data = await OC.fetchMonitoringJson(
-        `/api/v1/monitoring/${encodeURIComponent(env)}/api-samples?window=${encodeURIComponent(win)}&method=${encodeURIComponent(method)}&route=${encodeURIComponent(route)}`,
-        { samples: [], sampleCount: 0 }
+        `/api/v1/monitoring/${encodeURIComponent(env)}/api-samples?${params.toString()}`,
+        { samples: [], sampleCount: 0 },
+        { timeoutMs: 30000, perfLabel: `api-samples:${env}` }
       );
       if (body) {
         const meta = { env, method, route, window: win };
@@ -2211,6 +2251,35 @@
     if (window === "24h") return 24;
     if (window === "7d") return 168;
     return 6;
+  }
+
+  function apiRangeParams(window) {
+    const params = new URLSearchParams({ window: window || "6h" });
+    if (window === "custom" && OC.monitorState.apiSince && OC.monitorState.apiUntil) {
+      params.set("since", OC.monitorState.apiSince);
+      params.set("until", OC.monitorState.apiUntil);
+    }
+    return params;
+  }
+
+  function apiInputValue(iso) {
+    if (!iso) return "";
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "";
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  function apiFilterOptions(apiRoutes, envs) {
+    const options = new Map();
+    envs.forEach((env) => {
+      [...(apiRoutes?.[env]?.routeStats || []), ...(apiRoutes?.[env]?.traffic?.topRoutes || [])].forEach((row) => {
+        const method = String(row.method || "").toUpperCase();
+        const route = String(row.route || "");
+        if (method && route) options.set(`${method} ${route}`, { method, route });
+      });
+    });
+    return [...options.entries()].sort((a, b) => a[0].localeCompare(b[0], "pt-BR"));
   }
 
   function formatAccessNumber(value) {
@@ -2290,31 +2359,122 @@
     </div>`;
   }
 
-  function renderApiTrafficRoutes(apiRoutes, envs) {
+  function renderApiInflightFeed(apiInflight, envs) {
     const rows = [];
     envs.forEach((env) => {
-      const total = Number(apiRoutes?.[env]?.traffic?.totals?.requests || 0);
-      (apiRoutes?.[env]?.traffic?.topRoutes || []).forEach((route) => {
-        const requests = Number(route.requests || 0);
-        rows.push({ env, total, requests, ...route });
+      const payload = apiInflight?.[env];
+      if (!payload || payload.error) return;
+      (payload.requests || []).forEach((req) => {
+        rows.push({
+          env,
+          id: req.id,
+          startedAt: req.startedAt,
+          elapsedMs: req.elapsedMs,
+          method: req.method,
+          route: req.route,
+          requester: req.requester,
+        });
       });
     });
-    rows.sort((a, b) => b.requests - a.requests);
+    rows.sort((a, b) => Number(b.elapsedMs || 0) - Number(a.elapsedMs || 0));
     if (!rows.length) {
-      return `<p class="monitor-empty monitor-empty-neutral">As rotas mais acessadas aparecerão após os primeiros minutos de coleta.</p>`;
+      const anyError = envs.some((env) => apiInflight?.[env]?.error);
+      if (anyError) {
+        const missing = envs.every((env) =>
+          /HTTP 404|Sub-rota|in-flight|nao encontrad|não encontrad/i.test(
+            String(apiInflight?.[env]?.error || "")
+          )
+        );
+        if (missing) {
+          return `<p class="monitor-empty monitor-empty-neutral">Em andamento indisponível. Reinicie o backend para carregar /ops-metrics/in-flight/.</p>`;
+        }
+        return `<p class="monitor-empty monitor-empty-neutral">Nenhuma requisição em andamento nos ambientes selecionados.</p>`;
+      }
+      return `<p class="monitor-empty monitor-empty-neutral">Nenhuma requisição em andamento agora.</p>`;
     }
-    return `<div class="monitor-table-wrap ops-table-wrap"><table class="monitor-table monitor-access-routes-table">
-      <thead><tr><th>Ambiente</th><th>Rota</th><th>Acessos</th><th>Participação</th><th>Média ms</th><th>4xx</th><th>5xx</th></tr></thead>
-      <tbody>${rows.slice(0, 15).map((row) => `<tr>
+    return `<div class="monitor-table-wrap ops-table-wrap"><table class="monitor-table monitor-access-inflight-table">
+      <thead><tr><th></th><th>Há quanto tempo</th><th>Ambiente</th><th>Rota</th><th>Quem requisitou</th><th>Início</th></tr></thead>
+      <tbody>${rows
+        .slice(0, 50)
+        .map((row) => {
+          const method = String(row.method || "").toUpperCase();
+          const route = String(row.route || "");
+          return `<tr class="monitor-api-route-row monitor-api-inflight-row is-clickable" data-env="${OC.escapeHtml(row.env)}" data-method="${OC.escapeHtml(method)}" data-route="${OC.escapeHtml(route)}" role="button" tabindex="0" aria-label="Ver detalhes de ${OC.escapeHtml(method)} ${OC.escapeHtml(route)}">
+        <td class="monitor-api-inflight-pulse-cell"><span class="monitor-api-inflight-pulse" title="Em andamento" aria-hidden="true"></span></td>
+        <td><strong>${formatLatencyMs(row.elapsedMs)}</strong> ms</td>
         <td>${OC.escapeHtml(row.env)}</td>
-        <td><code>${OC.escapeHtml(row.method || "")} ${OC.escapeHtml(row.route || "")}</code></td>
-        <td><strong>${formatAccessNumber(row.requests)}</strong></td>
-        <td>${row.total ? ((row.requests / row.total) * 100).toFixed(1) : "0.0"}%</td>
-        <td>${formatLatencyMs(row.avgMs)}</td>
-        <td>${formatAccessNumber(row.errors4xx)}</td>
-        <td>${formatAccessNumber(row.errors5xx)}</td>
-      </tr>`).join("")}</tbody>
-    </table></div>`;
+        <td><code>${OC.escapeHtml(method)} ${OC.escapeHtml(route)}</code></td>
+        <td>${OC.escapeHtml(row.requester || "—")}</td>
+        <td>${OC.escapeHtml(OC.formatDate(row.startedAt))}</td>
+      </tr>`;
+        })
+        .join("")}</tbody>
+    </table></div>
+    <p class="monitor-meta-muted">Snapshot do processo Django atual. Clique para abrir o histórico amostrado da rota.</p>`;
+  }
+
+  function renderApiRecentFeed(apiRecent, envs) {
+    const rows = [];
+    envs.forEach((env) => {
+      const payload = apiRecent?.[env];
+      if (!payload || payload.error) return;
+      (payload.samples || []).forEach((sample) => {
+        rows.push({
+          env,
+          recordedAt: sample.recordedAt,
+          method: sample.method,
+          route: sample.route,
+          requester: sample.requester,
+          statusCode: sample.statusCode,
+          errorReason: sample.errorReason,
+          durationMs: sample.durationMs,
+        });
+      });
+    });
+    rows.sort((a, b) => {
+      const ta = new Date(a.recordedAt).getTime();
+      const tb = new Date(b.recordedAt).getTime();
+      return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+    });
+    if (!rows.length) {
+      const errors = envs
+        .map((env) => ({ env, error: String(apiRecent?.[env]?.error || "") }))
+        .filter((row) => row.error);
+      if (errors.length) {
+        const missingRoute = errors.every(
+          (row) =>
+            /HTTP 404|Sub-rota|recent-samples|nao encontrad|não encontrad/i.test(row.error)
+        );
+        if (missingRoute) {
+          return `<p class="monitor-empty monitor-empty-neutral">Não foi possível carregar as requisições ao vivo. Confira se o backend expõe /ops-metrics/recent-samples/.</p>`;
+        }
+        const offline = errors.map((row) => row.env).join(", ");
+        return `<p class="monitor-empty monitor-empty-neutral">Sem amostras ao vivo nos ambientes selecionados (${OC.escapeHtml(offline)}).</p>`;
+      }
+      return `<p class="monitor-empty monitor-empty-neutral">As requisições ao vivo aparecerão após as primeiras amostras na janela.</p>`;
+    }
+    return `<div class="monitor-table-wrap ops-table-wrap"><table class="monitor-table monitor-access-recent-table">
+      <thead><tr><th>Horário</th><th>Ambiente</th><th>Rota</th><th>Quem requisitou</th><th>Status</th><th>Motivo</th><th class="is-numeric">ms</th></tr></thead>
+      <tbody>${rows
+        .slice(0, 50)
+        .map((row) => {
+          const method = String(row.method || "").toUpperCase();
+          const route = String(row.route || "");
+          const status = Number(row.statusCode);
+          const reason = status >= 400 ? row.errorReason || "Motivo não disponível" : "—";
+          return `<tr class="monitor-api-route-row monitor-api-recent-row is-clickable" data-env="${OC.escapeHtml(row.env)}" data-method="${OC.escapeHtml(method)}" data-route="${OC.escapeHtml(route)}" role="button" tabindex="0" aria-label="Ver detalhes de ${OC.escapeHtml(method)} ${OC.escapeHtml(route)}">
+        <td class="monitor-api-recent-time">${OC.escapeHtml(OC.formatDate(row.recordedAt))}</td>
+        <td>${OC.escapeHtml(row.env)}</td>
+        <td><code>${OC.escapeHtml(method)} ${OC.escapeHtml(route)}</code></td>
+        <td>${OC.escapeHtml(row.requester || "—")}</td>
+        <td class="monitor-api-route-modal-status-cell">${renderApiRouteSampleStatusBadge(status)}</td>
+        <td class="monitor-api-recent-reason">${OC.escapeHtml(reason)}</td>
+        <td class="is-numeric">${formatLatencyMs(row.durationMs)}</td>
+      </tr>`;
+        })
+        .join("")}</tbody>
+    </table></div>
+    <p class="monitor-meta-muted">Erros HTTP e requisições lentas são registrados integralmente; respostas normais usam amostragem. Clique em uma linha para detalhar a API.</p>`;
   }
 
   function renderApiTrafficOverview(apiRoutes, envs, win, hours) {
@@ -2376,18 +2536,42 @@
       </div>
       <div class="monitor-access-chart">${graph}</div>
       ${renderApiTrafficStatus(totals)}
-      <div class="monitor-access-routes">
-        <div class="monitor-access-subhead"><h5>Rotas mais acessadas</h5><span>contagem real no período</span></div>
-        ${renderApiTrafficRoutes(apiRoutes, envs)}
-      </div>
     </section>`;
   }
 
-  function renderApisSection(apiRoutes, apiSeries, slos) {
+  function renderApiSubTabBar(activeSubTab) {
+    const tabs = API_SUBTABS.map((key) => {
+      const active = key === activeSubTab;
+      return `<button type="button" role="tab" class="monitor-api-subtab ${active ? "is-active" : ""}" data-monitor-api-subtab="${key}" aria-selected="${active ? "true" : "false"}">${OC.escapeHtml(API_SUBTAB_LABELS[key])}</button>`;
+    }).join("");
+    return `<nav class="monitor-api-subtabs" role="tablist" aria-label="Visões de APIs">${tabs}</nav>`;
+  }
+
+  function renderApisOverviewSection(apiRoutes, apiSeries, slos) {
     const win = OC.monitorState.apiWindow || "6h";
     const hours = apiWindowHours(win);
     const sloMs = slos?.healthP95WarnMs ?? 2000;
     const focus = selectedApiEnvs();
+    const routeOptions = apiFilterOptions(apiRoutes, focus);
+    const selectedRoute = OC.monitorState.apiRouteFilter || "";
+    const selectedRange =
+      win === "custom"
+        ? `
+      <div class="monitor-api-custom-range" role="group" aria-label="Período personalizado">
+        <label>De <input type="datetime-local" id="monitor-api-since" value="${OC.escapeHtml(apiInputValue(OC.monitorState.apiSince))}"></label>
+        <label>Até <input type="datetime-local" id="monitor-api-until" value="${OC.escapeHtml(apiInputValue(OC.monitorState.apiUntil))}"></label>
+        <button type="button" class="btn btn-primary btn-sm" id="monitor-api-apply-range">Aplicar período</button>
+      </div>`
+        : "";
+    const routeFilter = `<div class="monitor-api-filter-line">
+      <label for="monitor-api-route-filter">API específica</label>
+      <select id="monitor-api-route-filter" title="${selectedRoute ? "Filtro aplicado ao diagnóstico e aos detalhes." : "Escolha método e rota para investigar uma API."}"><option value="">Todas as APIs</option>${routeOptions
+        .map(
+          ([key]) =>
+            `<option value="${OC.escapeHtml(key)}"${key === selectedRoute ? " selected" : ""}>${OC.escapeHtml(key)}</option>`
+        )
+        .join("")}</select>
+    </div>`;
     const charts = focus
       .map((env) => {
         const series = apiSeries?.[env];
@@ -2428,26 +2612,77 @@
     focus.forEach((env) => {
       if (apiRoutes?.[env]) routesFocus[env] = apiRoutes[env];
     });
-    return `${OC.renderOpsChipToolbar({
-      id: "api-window",
-      label: "Janela",
-      attr: "data-monitor-chip",
-      value: win,
-      options: [
-        { value: "1h", label: "1h" },
-        { value: "6h", label: "6h" },
-        { value: "24h", label: "24h" },
-        { value: "7d", label: "7d" },
-      ],
-      extra: `<span class="monitor-meta-muted">Atualização a cada 15s · ${OC.escapeHtml(focus.join(", "))} · SLO ${sloMs} ms</span>`,
-    })}
+    const selectedRouteRows = selectedRoute
+      ? [{ method: selectedRoute.split(" ", 1)[0], route: selectedRoute.slice(selectedRoute.indexOf(" ") + 1) }]
+      : [];
+    return `<div class="monitor-api-controls">
+      ${OC.renderOpsChipToolbar({
+        id: "api-window",
+        label: "Janela",
+        attr: "data-monitor-chip",
+        value: win,
+        options: [
+          { value: "1h", label: "1h" },
+          { value: "6h", label: "6h" },
+          { value: "24h", label: "24h" },
+          { value: "7d", label: "7d" },
+          { value: "custom", label: "Personalizado" },
+        ],
+        extra: `<span class="monitor-meta-muted">Atualização a cada 15s · ${OC.escapeHtml(focus.join(", "))} · SLO ${sloMs} ms</span>`,
+      })}${routeFilter}
+    </div>${selectedRange}
     ${renderApiTrafficOverview(apiRoutes, focus, win, hours)}
     <div class="monitor-access-subhead monitor-access-subhead--latency"><h4>Desempenho das APIs</h4><span>latência média e picos acima do SLO</span></div>
     <div class="monitor-latency-env-grid">${charts}</div>
     <div class="monitor-access-subhead monitor-access-subhead--diagnostics"><h4>Diagnóstico por rota</h4><span>latência de sucesso separada de respostas 4xx e 5xx</span></div>
     <p class="monitor-section-hint" id="monitor-api-routes-filter-note" hidden></p>
-    <div id="monitor-api-routes-wrap">${renderApiRoutesTable(routesFocus)}</div>
+    <div id="monitor-api-routes-wrap">${renderApiRoutesTable(routesFocus, selectedRouteRows)}</div>
     <p class="monitor-meta-muted">Dica: clique em uma rota para ver amostras individuais, ou em um ponto do gráfico para filtrar por instante.</p>`;
+  }
+
+  function renderApisLiveSection(apiRecent, apiInflight) {
+    const focus = selectedApiEnvs();
+    const inflightCount = focus.reduce(
+      (sum, env) => sum + Number(apiInflight?.[env]?.count || (apiInflight?.[env]?.requests || []).length || 0),
+      0
+    );
+    const degradedEnvs = focus.filter((env) => {
+      const sampling = apiRecent?.[env]?.sampling || apiInflight?.[env]?.sampling;
+      return sampling?.degraded === true || sampling?.backpressure?.active === true;
+    });
+    const degradedBanner = degradedEnvs.length
+      ? `<div class="monitor-section-hint is-warning" role="status">Telemetria em modo degradado em ${OC.escapeHtml(degradedEnvs.join(", "))}: novas amostras não entram na fila enquanto o banco/processo estiver sob pressão.</div>`
+      : "";
+    return `<div class="monitor-api-controls monitor-api-controls--live">
+      <span class="monitor-meta-muted">Atualização a cada 5s · em andamento + últimas 50 · ${OC.escapeHtml(focus.join(", "))}</span>
+    </div>${degradedBanner}
+    <section class="monitor-access-live" aria-labelledby="monitor-api-inflight-title">
+      <header class="monitor-access-head">
+        <div>
+          <h4 id="monitor-api-inflight-title">Em andamento</h4>
+          <p>Requisições que ainda não responderam · ${formatAccessNumber(inflightCount)} agora</p>
+        </div>
+      </header>
+      <div class="monitor-access-routes">${renderApiInflightFeed(apiInflight, focus)}</div>
+    </section>
+    <section class="monitor-access-live" aria-labelledby="monitor-api-live-title">
+      <header class="monitor-access-head">
+        <div>
+          <h4 id="monitor-api-live-title">Últimas concluídas</h4>
+          <p>Amostras recentes · quem pediu · status · clique para detalhar a API</p>
+        </div>
+      </header>
+      <div class="monitor-access-routes">${renderApiRecentFeed(apiRecent, focus)}</div>
+    </section>`;
+  }
+
+  function renderApisSection(apiRoutes, apiSeries, apiRecent, apiInflight, slos) {
+    const subTab = currentApiSubTab();
+    const body =
+      subTab === "live"
+        ? renderApisLiveSection(apiRecent, apiInflight)
+        : renderApisOverviewSection(apiRoutes, apiSeries, slos);
+    return `${renderApiSubTabBar(subTab)}${body}`;
   }
 
   function renderSyncTimeline(syncsByEnv, highlight) {
@@ -2943,6 +3178,8 @@
       grouped: false,
       apiRoutes: false,
       apiSeries: false,
+      apiRecent: false,
+      apiInflight: false,
       uptime: false,
       syncs: false,
       deploys: false,
@@ -2970,8 +3207,13 @@
         break;
       case "apis":
         plan.summaries = true;
-        plan.apiRoutes = true;
-        plan.apiSeries = true;
+        if (currentApiSubTab() === "live") {
+          plan.apiRecent = true;
+          plan.apiInflight = true;
+        } else {
+          plan.apiRoutes = true;
+          plan.apiSeries = true;
+        }
         break;
       case "logs":
         plan.logs = true;
@@ -2993,6 +3235,8 @@
       groupedEvents: [],
       apiRoutes: {},
       apiSeries: {},
+      apiRecent: {},
+      apiInflight: {},
       uptimeByEnv: {},
       syncs: {},
       deploys: {},
@@ -3009,6 +3253,8 @@
       events,
       apiRoutes,
       apiSeries,
+      apiRecent,
+      apiInflight,
       uptimeByEnv,
       syncs,
       deploys,
@@ -3103,14 +3349,23 @@
               hint: "Últimas execuções",
               body: renderSyncTimeline(syncs, highlight),
             });
-      case "apis":
-        return loading?.apiRoutes || loading?.apiSeries
+      case "apis": {
+        const subTab = currentApiSubTab();
+        const apisLoading =
+          subTab === "live"
+            ? loading?.apiRecent || loading?.apiInflight
+            : loading?.apiRoutes || loading?.apiSeries;
+        return apisLoading
           ? renderLoadingSection("Monitoramento de APIs")
-            : OC.renderOpsSection({
+          : OC.renderOpsSection({
               title: "APIs e acessos",
-              hint: "Volume real, usuários, status HTTP, latência e rotas",
-              body: renderApisSection(apiRoutes, apiSeries, slos),
+              hint:
+                subTab === "live"
+                  ? "Em andamento agora · últimas concluídas amostradas"
+                  : "Volume real, usuários, status HTTP, latência e rotas",
+              body: renderApisSection(apiRoutes, apiSeries, apiRecent, apiInflight, slos),
             });
+      }
       case "logs":
         return loading?.logs
           ? renderLoadingSection("Logs de serviço")
@@ -3142,47 +3397,40 @@
     return best;
   }
 
-  async function showSpikeContext(env, iso, ms) {
-    const panel = document.querySelector(`[data-spike-context="${env}"]`);
-    if (!panel) return;
-    panel.hidden = false;
-    panel.innerHTML = `<div class="loading-inline"><div class="loading-spinner loading-spinner-sm"></div> Buscando APIs e contexto em ${OC.escapeHtml(OC.formatDate(iso))}…</div>`;
+  function clearApiSpikeDrill() {
+    OC.monitorState.apiSpikeDrill = null;
+    document.querySelectorAll("[data-spike-context]").forEach((panel) => {
+      panel.hidden = true;
+      panel.innerHTML = "";
+    });
+    applyApiRouteFilter([]);
+    document.querySelectorAll(".monitor-chart-cursor").forEach((cursor) => cursor.classList.add("hidden"));
+  }
 
+  function highlightSpikeCursor(env, iso) {
     const center = new Date(iso).getTime();
-    const winMs = 15 * 60 * 1000;
-    let events = [];
-    let apiDrill = null;
-    try {
-      const [eventsData, samplesData] = await Promise.all([
-        OC.fetchMonitoringJson(`/api/v1/monitoring/${env}/events?hours=24&limit=100`, {
-          events: [],
-        }),
-        OC.fetchMonitoringJson(
-          `/api/v1/monitoring/${env}/api-samples?at=${encodeURIComponent(iso)}&radiusMinutes=5&minMs=0`,
-          { samples: [], slowRoutes: [] }
-        ),
-      ]);
-      events = (eventsData.events || []).filter((e) => {
-        const t = new Date(e.recorded_at).getTime();
-        return !Number.isNaN(t) && Math.abs(t - center) <= winMs;
-      });
-      apiDrill = samplesData;
-    } catch {
-      events = [];
+    for (const chartId of [`api-${env}`, "api-access-volume"]) {
+      const svg = document.querySelector(`[data-chart-svg="${chartId}"]`);
+      const cursor = svg?.querySelector(".monitor-chart-cursor");
+      const pts = (OC._chartHoverData?.[chartId] || []).filter((p) => !p.env || p.env === env);
+      const match =
+        pts.find((p) => p.iso === iso) ||
+        pts.reduce((best, p) => {
+          if (!best) return p;
+          return Math.abs(p.t - center) < Math.abs(best.t - center) ? p : best;
+        }, null);
+      if (cursor && match) {
+        cursor.setAttribute("x1", String(match.x));
+        cursor.setAttribute("x2", String(match.x));
+        cursor.classList.remove("hidden");
+      }
     }
+  }
 
-    // Fallback: labels do ponto do gráfico (topRoutes do collector)
-    const hoverMatch = (OC._chartHoverData?.[`api-${env}`] || []).find((p) => p.iso === iso);
-    const labelRoutes = hoverMatch?.labels?.topRoutes || [];
-    const slowRoutes =
-      (apiDrill?.slowRoutes && apiDrill.slowRoutes.length
-        ? apiDrill.slowRoutes
-        : apiDrill?.collectorTopRoutes && apiDrill.collectorTopRoutes.length
-          ? apiDrill.collectorTopRoutes
-          : labelRoutes) || [];
-    const samples = apiDrill?.samples || [];
-    const totals = apiDrill?.totals || {};
-    const source = apiDrill?.source || (labelRoutes.length ? "collector_labels" : "unavailable");
+  function paintSpikeContext(drill) {
+    const { env, iso, ms, slowRoutes = [], samples = [], totals = {}, source, events = [], liveError } = drill;
+    const panel = document.querySelector(`[data-spike-context="${env}"]`);
+    if (!panel) return false;
 
     applyApiRouteFilter(slowRoutes);
 
@@ -3209,8 +3457,8 @@
           </table></div>
         </div>`
       : `<p class="monitor-empty monitor-empty-neutral">${
-          apiDrill?.liveError
-            ? `Não foi possível consultar amostras ao vivo (${OC.escapeHtml(apiDrill.liveError)}). Deploy do endpoint /ops-metrics/around/ pode estar pendente.`
+          liveError
+            ? `Não foi possível consultar amostras ao vivo (${OC.escapeHtml(liveError)}). Deploy do endpoint /ops-metrics/around/ pode estar pendente.`
             : "Nenhuma rota registrada neste instante."
         }</p>`;
 
@@ -3249,6 +3497,7 @@
       : `<p class="monitor-empty monitor-empty-neutral">Nenhum evento de monitoramento ±15 min deste instante.</p>`;
 
     const sinceParam = encodeURIComponent(iso);
+    panel.hidden = false;
     panel.innerHTML = `<div class="monitor-spike-context-head">
         <strong>APIs em ${OC.escapeHtml(OC.formatDate(iso))}</strong>
         ${ms != null ? `<span>· média ${formatLatencyMs(Number(ms))} ms</span>` : ""}
@@ -3271,27 +3520,90 @@
       });
     });
     panel.querySelector(`#monitor-api-clear-drill-${env}`)?.addEventListener("click", () => {
-      panel.hidden = true;
-      panel.innerHTML = "";
-      applyApiRouteFilter([]);
+      clearApiSpikeDrill();
     });
 
-    // Highlight cursor on matching chart
-    const chartId = `api-${env}`;
-    const svg = document.querySelector(`[data-chart-svg="${chartId}"]`);
-    const cursor = svg?.querySelector(".monitor-chart-cursor");
-    const pts = OC._chartHoverData?.[chartId] || [];
-    const match =
-      pts.find((p) => p.iso === iso) ||
-      pts.reduce((best, p) => {
-        if (!best) return p;
-        return Math.abs(p.t - center) < Math.abs(best.t - center) ? p : best;
-      }, null);
-    if (cursor && match) {
-      cursor.setAttribute("x1", String(match.x));
-      cursor.setAttribute("x2", String(match.x));
-      cursor.classList.remove("hidden");
+    highlightSpikeCursor(env, iso);
+    return true;
+  }
+
+  async function showSpikeContext(env, iso, ms) {
+    const panel = document.querySelector(`[data-spike-context="${env}"]`);
+    if (!panel) return;
+    const normalizedMs = ms == null || ms === "" ? null : Number(ms);
+    const existing = OC.monitorState.apiSpikeDrill;
+    if (existing?.ready && existing.env === env && existing.iso === iso) {
+      existing.ms = normalizedMs ?? existing.ms;
+      paintSpikeContext(existing);
+      return;
     }
+
+    OC.monitorState.apiSpikeDrill = { env, iso, ms: normalizedMs, ready: false };
+    panel.hidden = false;
+    panel.innerHTML = `<div class="loading-inline"><div class="loading-spinner loading-spinner-sm"></div> Buscando APIs e contexto em ${OC.escapeHtml(OC.formatDate(iso))}…</div>`;
+
+    const center = new Date(iso).getTime();
+    const winMs = 15 * 60 * 1000;
+    let events = [];
+    let apiDrill = null;
+    try {
+      const [eventsData, samplesData] = await Promise.all([
+        OC.fetchMonitoringJson(`/api/v1/monitoring/${env}/events?hours=24&limit=100`, {
+          events: [],
+        }),
+        OC.fetchMonitoringJson(
+          `/api/v1/monitoring/${env}/api-samples?at=${encodeURIComponent(iso)}&radiusMinutes=5&minMs=0`,
+          { samples: [], slowRoutes: [] }
+        ),
+      ]);
+      events = (eventsData.events || []).filter((e) => {
+        const t = new Date(e.recorded_at).getTime();
+        return !Number.isNaN(t) && Math.abs(t - center) <= winMs;
+      });
+      apiDrill = samplesData;
+    } catch {
+      events = [];
+    }
+
+    // Se o usuário limpou ou trocou o drill enquanto a busca rodava, não sobrescreve.
+    const currentDrill = OC.monitorState.apiSpikeDrill;
+    if (!currentDrill || currentDrill.env !== env || currentDrill.iso !== iso) {
+      return;
+    }
+
+    // Fallback: labels do ponto do gráfico (topRoutes do collector)
+    const hoverMatch = (OC._chartHoverData?.[`api-${env}`] || []).find((p) => p.iso === iso);
+    const labelRoutes = hoverMatch?.labels?.topRoutes || [];
+    const slowRoutes =
+      (apiDrill?.slowRoutes && apiDrill.slowRoutes.length
+        ? apiDrill.slowRoutes
+        : apiDrill?.collectorTopRoutes && apiDrill.collectorTopRoutes.length
+          ? apiDrill.collectorTopRoutes
+          : labelRoutes) || [];
+
+    const drill = {
+      env,
+      iso,
+      ms: normalizedMs,
+      ready: true,
+      slowRoutes,
+      samples: apiDrill?.samples || [],
+      totals: apiDrill?.totals || {},
+      source: apiDrill?.source || (labelRoutes.length ? "collector_labels" : "unavailable"),
+      events,
+      liveError: apiDrill?.liveError || null,
+    };
+    OC.monitorState.apiSpikeDrill = drill;
+    paintSpikeContext(drill);
+  }
+
+  function restoreApiSpikeDrill() {
+    const drill = OC.monitorState.apiSpikeDrill;
+    if (!drill?.env || !drill?.iso) return;
+    if (OC.monitorState.activeTab !== "apis") return;
+    if (currentApiSubTab() !== "overview") return;
+    if (!drill.ready) return;
+    paintSpikeContext(drill);
   }
 
   function bindChartInteractions(root) {
@@ -3388,6 +3700,11 @@
       OC.monitorState.eventFilters = { severity: "", category: "", hours: 24 };
       OC.monitorState.latencyWindow = "24h";
       OC.monitorState.apiWindow = "6h";
+      OC.monitorState.apiSubTab = "overview";
+      OC.monitorState.apiSince = "";
+      OC.monitorState.apiUntil = "";
+      OC.monitorState.apiRouteFilter = "";
+      OC.monitorState.apiSpikeDrill = null;
       OC.monitorState.logsPattern = "";
       OC.monitorState.logFilters = { ...DEFAULT_LOG_FILTERS };
       OC.monitorState.logNewCount = 0;
@@ -3434,7 +3751,27 @@
         delete query.env; // visão multi-ambiente; ?env= só via foco explícito
         // since/filtro de horário só permanece se o usuário ficou em Logs e veio de drill-down
         if (tab !== "logs") delete query.since;
+        if (tab === "apis") {
+          const section = currentApiSubTab();
+          if (section === "live") query.section = "live";
+          else delete query.section;
+        } else {
+          delete query.section;
+        }
         OC.navigate("monitoring", null, { tab, query });
+      });
+    });
+    root.querySelectorAll("[data-monitor-api-subtab]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const next = normalizeApiSubTab(el.getAttribute("data-monitor-api-subtab"));
+        if (next === currentApiSubTab()) return;
+        OC.monitorState.apiSubTab = next;
+        savePrefs();
+        const query = { ...(OC.currentRoute.query || {}) };
+        if (next === "live") query.section = "live";
+        else delete query.section;
+        setMonitoringBusy(true, `Carregando ${API_SUBTAB_LABELS[next]}…`);
+        OC.navigate("monitoring", null, { tab: "apis", query });
       });
     });
     root.querySelectorAll(".monitor-env-drill").forEach((el) => {
@@ -3670,6 +4007,26 @@
         root.querySelector("#monitor-log-show-new")?.remove();
       }
     });
+    root.querySelector("#monitor-api-apply-range")?.addEventListener("click", () => {
+      const sinceRaw = root.querySelector("#monitor-api-since")?.value || "";
+      const untilRaw = root.querySelector("#monitor-api-until")?.value || "";
+      const since = sinceRaw ? new Date(sinceRaw).toISOString() : "";
+      const until = untilRaw ? new Date(untilRaw).toISOString() : "";
+      if (!since || !until || new Date(until) <= new Date(since)) {
+        OC.toast?.("Informe um período válido, com o fim depois do início.", "warning");
+        return;
+      }
+      OC.monitorState.apiSince = since;
+      OC.monitorState.apiUntil = until;
+      OC.monitorState.apiWindow = "custom";
+      savePrefs();
+      refreshFromMonitoringControl("Aplicando período das APIs…");
+    });
+    root.querySelector("#monitor-api-route-filter")?.addEventListener("change", (event) => {
+      OC.monitorState.apiRouteFilter = event.currentTarget.value || "";
+      savePrefs();
+      if (OC.monitorState.payload) OC.renderMonitoringView(OC.monitorState.payload, { partial: true });
+    });
     root.querySelector("#monitor-clear-events")?.addEventListener("click", async () => {
       if (
         !window.confirm(
@@ -3867,6 +4224,7 @@
       if (filters) filters.outerHTML = OC.renderMonitoringFilters();
       panel.innerHTML = renderTabContent(activeTab, payload, overviews, slos);
       bindMonitoringInteractions(root);
+      restoreApiSpikeDrill();
       const ms = (typeof performance !== "undefined" ? performance.now() : Date.now()) - tRender0;
       OC.perfRecord?.({ name: "render:monitoring:partial", ms: Math.round(ms * 10) / 10, tab: activeTab });
       OC._monitorRenderCount = (OC._monitorRenderCount || 0) + 1;
@@ -3886,6 +4244,7 @@
     <div class="monitor-tab-panel" id="monitor-tab-panel" role="tabpanel">${renderTabContent(activeTab, payload, overviews, slos)}</div>`;
 
     bindMonitoringInteractions(root);
+    restoreApiSpikeDrill();
     const ms = (typeof performance !== "undefined" ? performance.now() : Date.now()) - tRender0;
     OC.perfRecord?.({ name: "render:monitoring:full", ms: Math.round(ms * 10) / 10, tab: activeTab });
     OC._monitorRenderCount = (OC._monitorRenderCount || 0) + 1;
@@ -3960,6 +4319,8 @@
     if (plan.events) loading.events = true;
     if (plan.apiRoutes) loading.apiRoutes = true;
     if (plan.apiSeries) loading.apiSeries = true;
+    if (plan.apiRecent) loading.apiRecent = true;
+    if (plan.apiInflight) loading.apiInflight = true;
     if (plan.uptime) loading.uptime = true;
     if (plan.syncs) loading.syncs = true;
     if (plan.deploys) loading.deploys = true;
@@ -3972,6 +4333,8 @@
     let groupedEvents = prev.groupedEvents || [];
     let apiRoutes = { ...emptyPayloadExtras().apiRoutes, ...(prev.apiRoutes || {}) };
     let apiSeries = { ...emptyPayloadExtras().apiSeries, ...(prev.apiSeries || {}) };
+    let apiRecent = { ...emptyPayloadExtras().apiRecent, ...(prev.apiRecent || {}) };
+    let apiInflight = { ...emptyPayloadExtras().apiInflight, ...(prev.apiInflight || {}) };
     let uptimeByEnv = { ...emptyPayloadExtras().uptimeByEnv, ...(prev.uptimeByEnv || {}) };
     let syncs = { ...emptyPayloadExtras().syncs, ...(prev.syncs || {}) };
     let deploys = { ...emptyPayloadExtras().deploys, ...(prev.deploys || {}) };
@@ -3987,6 +4350,8 @@
       groupedEvents,
       apiRoutes,
       apiSeries,
+      apiRecent,
+      apiInflight,
       uptimeByEnv,
       syncs,
       deploys,
@@ -4217,11 +4582,12 @@
 
       if (plan.apiRoutes) {
         const win = OC.monitorState.apiWindow || "6h";
+        const apiParams = apiRangeParams(win);
         phase2.push(
           Promise.all(
             envs.map(async (env) => {
               apiRoutes[env] = await OC.fetchMonitoringJson(
-                `/api/v1/monitoring/${env}/api-routes?window=${encodeURIComponent(win)}`,
+                `/api/v1/monitoring/${env}/api-routes?${apiParams.toString()}`,
                 { environment: env, slowRoutes: [] },
                 fetchOpts(`api-routes:${env}`)
               );
@@ -4245,6 +4611,41 @@
             })
           ).then(() => {
             delete loading.apiSeries;
+          })
+        );
+      }
+
+      if (plan.apiRecent) {
+        const win = OC.monitorState.apiWindow || "6h";
+        const apiParams = apiRangeParams(win);
+        apiParams.set("limit", "50");
+        phase2.push(
+          Promise.all(
+            envs.map(async (env) => {
+              apiRecent[env] = await OC.fetchMonitoringJson(
+                `/api/v1/monitoring/${env}/api-recent?${apiParams.toString()}`,
+                { environment: env, samples: [] },
+                fetchOpts(`api-recent:${env}`)
+              );
+            })
+          ).then(() => {
+            delete loading.apiRecent;
+          })
+        );
+      }
+
+      if (plan.apiInflight) {
+        phase2.push(
+          Promise.all(
+            envs.map(async (env) => {
+              apiInflight[env] = await OC.fetchMonitoringJson(
+                `/api/v1/monitoring/${env}/api-inflight`,
+                { environment: env, requests: [], count: 0 },
+                fetchOpts(`api-inflight:${env}`)
+              );
+            })
+          ).then(() => {
+            delete loading.apiInflight;
           })
         );
       }
@@ -4359,8 +4760,9 @@
     const tab = OC.monitorState.activeTab || "summary";
     if (tab === "logs" && OC.monitorState.logsPaused) return;
     let ms = MONITOR_REFRESH_MS;
-    if (tab === "apis") ms = MONITOR_APIS_REFRESH_MS;
-    else if (tab === "logs") ms = MONITOR_LOGS_REFRESH_MS;
+    if (tab === "apis") {
+      ms = currentApiSubTab() === "live" ? MONITOR_APIS_LIVE_REFRESH_MS : MONITOR_APIS_REFRESH_MS;
+    } else if (tab === "logs") ms = MONITOR_LOGS_REFRESH_MS;
     OC.monitorTimer = setInterval(() => {
       if (!OC._monitorRefreshInFlight) OC.refreshMonitoring({ incremental: tab === "logs" });
     }, ms);

@@ -202,3 +202,100 @@ class ApiRouteSamplesViewTests(TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("method", response.json()["error"])
+
+
+class ApiRecentSamplesViewTests(TestCase):
+    def setUp(self):
+        ApiRequestMetric.objects.all().delete()
+        ApiTrafficBucket.objects.all().delete()
+        ApiTrafficUserBucket.objects.all().delete()
+
+    def test_recent_samples_orders_by_time_and_resolves_requester(self):
+        User = get_user_model()
+        user = User.objects.create_user(
+            username="654321",
+            email="654321@test.local",
+            password="test-pass",
+        )
+        metric_user_id = _metric_user_id(user)
+        now = timezone.now()
+        ApiRequestMetric.objects.bulk_create(
+            [
+                ApiRequestMetric(
+                    recorded_at=now - timedelta(minutes=2),
+                    method="GET",
+                    route="/api/v1/older/",
+                    status_code=200,
+                    duration_ms=50,
+                    user_id=None,
+                ),
+                ApiRequestMetric(
+                    recorded_at=now,
+                    method="POST",
+                    route="/api/v1/newer/",
+                    status_code=403,
+                    duration_ms=12,
+                    user_id=metric_user_id,
+                    error_reason="Acesso negado",
+                ),
+                ApiRequestMetric(
+                    recorded_at=now - timedelta(minutes=1),
+                    method="GET",
+                    route="/api/v1/mid/",
+                    status_code=500,
+                    duration_ms=900,
+                    user_id=None,
+                    error_reason="Erro interno",
+                ),
+            ]
+        )
+
+        response = self.client.get(
+            "/api/v1/ops-metrics/recent-samples/",
+            {"window": "1h", "limit": 2},
+            REMOTE_ADDR="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["sampleCount"], 3)
+        self.assertEqual(payload["limit"], 2)
+        self.assertEqual(len(payload["samples"]), 2)
+        self.assertEqual(payload["samples"][0]["route"], "/api/v1/newer/")
+        self.assertEqual(payload["samples"][0]["method"], "POST")
+        self.assertEqual(payload["samples"][0]["statusCode"], 403)
+        self.assertEqual(payload["samples"][0]["errorReason"], "Acesso negado")
+        self.assertNotEqual(payload["samples"][0]["requester"], "Anônimo")
+        self.assertEqual(payload["samples"][1]["route"], "/api/v1/mid/")
+
+    def test_recent_samples_respects_window(self):
+        now = timezone.now()
+        ApiRequestMetric.objects.bulk_create(
+            [
+                ApiRequestMetric(
+                    recorded_at=now - timedelta(hours=2),
+                    method="GET",
+                    route="/api/v1/old/",
+                    status_code=200,
+                    duration_ms=10,
+                ),
+                ApiRequestMetric(
+                    recorded_at=now - timedelta(minutes=10),
+                    method="GET",
+                    route="/api/v1/fresh/",
+                    status_code=200,
+                    duration_ms=20,
+                ),
+            ]
+        )
+
+        response = self.client.get(
+            "/api/v1/ops-metrics/recent-samples/",
+            {"window": "1h", "limit": 40},
+            REMOTE_ADDR="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["sampleCount"], 1)
+        self.assertEqual(payload["samples"][0]["route"], "/api/v1/fresh/")

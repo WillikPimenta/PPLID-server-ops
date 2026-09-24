@@ -171,6 +171,14 @@
     if (OC.currentRoute.view === "monitoring") {
       OC.monitorState = OC.monitorState || {};
       OC.monitorState.activeTab = OC.currentRoute.tab || "summary";
+      if (OC.currentRoute.tab === "apis") {
+        const section = OC.currentRoute.query?.section;
+        if (section) {
+          OC.monitorState.apiSubTab = ["overview", "live"].includes(String(section).toLowerCase())
+            ? String(section).toLowerCase()
+            : "overview";
+        }
+      }
       if (OC.currentRoute.query?.env && OC.ENV_ORDER.includes(OC.currentRoute.query.env.toUpperCase())) {
         const focus = OC.currentRoute.query.env.toUpperCase();
         if (!OC.monitorState.selectedEnvs.includes(focus)) {

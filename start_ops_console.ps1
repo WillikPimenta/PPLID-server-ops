@@ -256,10 +256,6 @@ try {
     $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
-    if ($Local -and $localMachinePath) {
-        $startInfo.EnvironmentVariables["OPS_MACHINE_CONFIG"] = $localMachinePath
-        $startInfo.EnvironmentVariables["OPS_HOST"] = "127.0.0.1"
-    }
     [System.Diagnostics.Process]::Start($startInfo) | Out-Null
     Start-Sleep -Seconds 2
 

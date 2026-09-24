@@ -4,6 +4,7 @@ Helpers operacionais do ops-console (actions, database, env vars).
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import socket
@@ -2820,20 +2821,43 @@ def _parse_powershell_json(stdout: str) -> dict[str, Any]:
     return {"ok": False, "error": "JSON invalido do script de atualizacao.", "stdout": text[-500:]}
 
 
-def check_console_update(config: dict[str, Any]) -> dict[str, Any]:
+def check_console_update(
+    config: dict[str, Any], *, progress_only: bool = False
+) -> dict[str, Any]:
     local = read_local_console_git_info(config)
     last_result = _read_console_update_result(config)
     lock = _read_console_update_lock(config)
     if lock:
+        # Worker never advanced past Python's "started" acceptance: treat as
+        # failed so the UI can recover instead of spinning forever.
+        stuck = _maybe_fail_stuck_console_update(config, lock, last_result)
+        if stuck is not None:
+            last_result = stuck
+            lock = None
+        else:
+            return _merge_console_update_payload(
+                {
+                    "ok": False,
+                    "supported": local.get("supported", True),
+                    "error": "Atualizacao do console ja em andamento.",
+                    "lockDetail": lock.get("detail") or "",
+                    "progressOnly": bool(progress_only),
+                },
+                local,
+                in_progress=True,
+                last_result=last_result,
+            )
+
+    # Polling during apply only needs lock/result/local SHA — never git fetch.
+    if progress_only:
         return _merge_console_update_payload(
             {
-                "ok": False,
+                "ok": True,
                 "supported": local.get("supported", True),
-                "error": "Atualizacao do console ja em andamento.",
-                "lockDetail": lock.get("detail") or "",
+                "progressOnly": True,
+                "updateAvailable": None,
             },
             local,
-            in_progress=True,
             last_result=last_result,
         )
 
@@ -2849,26 +2873,93 @@ def check_console_update(config: dict[str, Any]) -> dict[str, Any]:
             last_result=last_result,
         )
 
+    # Share one remote check across overlapping HTTP callers (dashboard refresh
+    # + manual button) so we do not spawn concurrent git fetch workers.
     repo_dir = resolve_ops_repo_dir(config)
-    args = ["-CheckOnly", "-OpsRepoDir", str(repo_dir)]
-    config_path = config.get("_configPath") or config.get("configPath")
-    if config_path:
-        args.extend(["-ConfigPath", str(config_path)])
+    cache_key = str(repo_dir)
+    now = time.time()
+    with _CONSOLE_UPDATE_CHECK_LOCK:
+        cached = _CONSOLE_UPDATE_REMOTE_CACHE.get(cache_key)
+        if (
+            cached
+            and (now - float(cached.get("at") or 0)) < _CONSOLE_UPDATE_REMOTE_CACHE_TTL_SEC
+            and isinstance(cached.get("payload"), dict)
+        ):
+            payload = dict(cached["payload"])
+            return _merge_console_update_payload(payload, local, last_result=last_result)
 
-    result = run_powershell(script, args, timeout=120)
-    stdout = str(result.get("stdout") or "").strip()
-    if stdout:
-        payload = _parse_powershell_json(stdout)
-    else:
-        payload = {
-            "ok": False,
-            "supported": True,
-            "reason": (result.get("error") or "Script de atualizacao nao retornou dados.")[:500],
-        }
-    if not payload.get("ok") and result.get("error"):
-        payload.setdefault("error", result.get("error"))
-    payload.setdefault("supported", bool(payload.get("supported", True)))
-    return _merge_console_update_payload(payload, local, last_result=last_result)
+        args = ["-CheckOnly", "-OpsRepoDir", str(repo_dir)]
+        config_path = config.get("_configPath") or config.get("configPath")
+        if config_path:
+            args.extend(["-ConfigPath", str(config_path)])
+        log_dir = config.get("logDir")
+        if log_dir:
+            args.extend(["-LogDir", str(log_dir)])
+
+        result = run_powershell(script, args, timeout=120)
+        stdout = str(result.get("stdout") or "").strip()
+        if stdout:
+            payload = _parse_powershell_json(stdout)
+        else:
+            payload = {
+                "ok": False,
+                "supported": True,
+                "reason": (result.get("error") or "Script de atualizacao nao retornou dados.")[:500],
+            }
+        if not payload.get("ok") and result.get("error"):
+            payload.setdefault("error", result.get("error"))
+        payload.setdefault("supported", bool(payload.get("supported", True)))
+        if payload.get("ok"):
+            _CONSOLE_UPDATE_REMOTE_CACHE[cache_key] = {"at": time.time(), "payload": dict(payload)}
+        return _merge_console_update_payload(payload, local, last_result=last_result)
+
+
+# Cache successful remote checks briefly so overlapping status polls (dashboard
+# auto-refresh) do not each spawn a git fetch.
+_CONSOLE_UPDATE_CHECK_LOCK = threading.Lock()
+_CONSOLE_UPDATE_REMOTE_CACHE: dict[str, dict[str, Any]] = {}
+_CONSOLE_UPDATE_REMOTE_CACHE_TTL_SEC = 20
+
+
+# If the detached worker never heartbeats past "started", the lock would
+# otherwise sit until the 30-minute TTL and the UI would stay on "Aplicando…".
+_CONSOLE_UPDATE_STARTED_STUCK_SEC = 120
+
+
+def _maybe_fail_stuck_console_update(
+    config: dict[str, Any],
+    lock: dict[str, Any] | None,
+    last_result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not lock or not last_result:
+        return None
+    if str(last_result.get("phase") or "") != "started":
+        return None
+    started = float(lock.get("startedAt") or 0)
+    if not started or (time.time() - started) < _CONSOLE_UPDATE_STARTED_STUCK_SEC:
+        return None
+    log_dir = str(config.get("logDir") or "")
+    error = (
+        "Worker de atualizacao nao iniciou (fase 'started' sem progresso). "
+        "Verifique se o PowerShell consegue gravar em "
+        f"{log_dir or 'logDir'} e se update_ops_console.ps1 -Apply sobe."
+    )
+    failed = {
+        "ok": False,
+        "phase": "failed",
+        "accepted": True,
+        "applied": False,
+        "restarting": False,
+        "error": error,
+        "previousSha": last_result.get("previousSha"),
+        "targetSha": last_result.get("targetSha"),
+        "branch": last_result.get("branch"),
+        "startedAt": last_result.get("startedAt"),
+    }
+    _clear_console_update_lock(config)
+    _write_console_update_result(config, failed)
+    append_console_update_log(config, error, level="ERROR", phase="failed")
+    return failed
 
 
 def _spawn_detached_powershell(script: Path, args: list[str]) -> None:
@@ -2886,12 +2977,17 @@ def _spawn_detached_powershell(script: Path, args: list[str]) -> None:
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
             subprocess, "DETACHED_PROCESS", 0
         )
+    # Preserve OPS_MACHINE_CONFIG so Get-PplidLogDir in the worker matches
+    # the Python server's local/prod baseDir (especially -Local mode).
+    env = os.environ.copy()
     subprocess.Popen(
         cmd,
         creationflags=creationflags,
         close_fds=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=env,
+        cwd=str(script.parent),
     )
 
 
@@ -2908,13 +3004,17 @@ def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
 
     lock = _read_console_update_lock(config)
     if lock:
-        return {
-            "ok": False,
-            "inProgress": True,
-            "error": "Atualizacao do console ja em andamento.",
-            "lockDetail": lock.get("detail") or "",
-            "lastResult": _read_console_update_result(config),
-        }
+        stuck = _maybe_fail_stuck_console_update(
+            config, lock, _read_console_update_result(config)
+        )
+        if stuck is None:
+            return {
+                "ok": False,
+                "inProgress": True,
+                "error": "Atualizacao do console ja em andamento.",
+                "lockDetail": lock.get("detail") or "",
+                "lastResult": _read_console_update_result(config),
+            }
 
     status = check_console_update(config)
     if not status.get("ok"):
@@ -2959,11 +3059,16 @@ def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
             f"Atualização aceita: {previous_sha} -> {target_sha}.",
             phase="started",
         )
+        # Force the next status check to re-fetch after we kick off apply.
+        _CONSOLE_UPDATE_REMOTE_CACHE.clear()
         repo_dir = resolve_ops_repo_dir(config)
         args = ["-Apply", "-OpsRepoDir", str(repo_dir)]
         config_path = config.get("_configPath") or config.get("configPath")
         if config_path:
             args.extend(["-ConfigPath", str(config_path)])
+        log_dir = config.get("logDir")
+        if log_dir:
+            args.extend(["-LogDir", str(log_dir)])
         _spawn_detached_powershell(script, args)
     except OSError as exc:
         _clear_console_update_lock(config)

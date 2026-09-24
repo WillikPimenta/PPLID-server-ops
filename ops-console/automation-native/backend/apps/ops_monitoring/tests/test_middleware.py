@@ -90,3 +90,44 @@ class RequestMetricsMiddlewareTests(TestCase):
         self.middleware(request)
         flush_metrics_buffer()
         self.assertEqual(ApiRequestMetric.objects.count(), before)
+
+    def test_tracks_inflight_until_response(self):
+        from apps.ops_monitoring.middleware import list_inflight_requests, track_inflight_end
+
+        request = self.factory.get("/api/v1/dashboard/overview/")
+        self.middleware.process_request(request)
+        inflight = list_inflight_requests()
+        self.assertEqual(len(inflight), 1)
+        self.assertEqual(inflight[0]["method"], "GET")
+        self.assertEqual(inflight[0]["route"], "/api/v1/dashboard/overview/")
+
+        response = HttpResponse("ok", status=200)
+        self.middleware.process_response(request, response)
+        self.assertEqual(list_inflight_requests(), [])
+        track_inflight_end(request)  # idempotent
+        self.assertEqual(list_inflight_requests(), [])
+
+    def test_backpressure_blocks_sample_enqueue(self):
+        from apps.ops_monitoring import middleware as mw
+
+        mw.clear_metrics_buffers_for_tests()
+        mw._LAST_FLUSH_FAILED = True
+        before = ApiRequestMetric.objects.count()
+        dropped_before = mw._BACKPRESSURE_DROPPED
+
+        mw._enqueue_metric(
+            method="GET",
+            route="/api/v1/dashboard/overview/",
+            status_code=200,
+            duration_ms=10,
+            user_id=None,
+        )
+        flush_metrics_buffer()
+
+        self.assertEqual(ApiRequestMetric.objects.count(), before)
+        self.assertGreater(mw._BACKPRESSURE_DROPPED, dropped_before)
+        status = mw.get_metrics_backpressure_status()
+        self.assertTrue(status["active"])
+        self.assertIn("flush_failed", status["reason"] or "")
+
+        mw.clear_metrics_buffers_for_tests()

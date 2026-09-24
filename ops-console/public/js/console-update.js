@@ -31,7 +31,11 @@
     logLoading: false,
     logLines: [],
     logError: null,
+    statusInFlight: null,
+    progressInFlight: null,
   };
+
+  const SILENT_STATUS_MIN_INTERVAL_MS = 15000;
 
   function getBarRoot() {
     return document.getElementById("deploy-console-update");
@@ -529,11 +533,50 @@
     return Boolean(result.error || result.restarting || result.applied);
   }
 
-  OC.fetchConsoleUpdateStatus = async function fetchConsoleUpdateStatus() {
-    const data = await OC.fetchJson(STATUS_URL, { timeoutMs: 120000 });
-    OC.consoleUpdateState.status = data;
-    OC.consoleUpdateState.lastCheckedAt = data.checkedAt || new Date().toISOString();
-    return data;
+  OC.fetchConsoleUpdateStatus = async function fetchConsoleUpdateStatus(options = {}) {
+    const progressOnly = options.progressOnly === true;
+    const inflightKey = progressOnly ? "progressInFlight" : "statusInFlight";
+    const existing = OC.consoleUpdateState[inflightKey];
+    if (existing) {
+      return existing;
+    }
+
+    const url = progressOnly ? `${STATUS_URL}?progress=1` : STATUS_URL;
+    const timeoutMs = progressOnly ? 15000 : 120000;
+    const request = OC.fetchJson(url, { timeoutMs })
+      .then((data) => {
+        // Progress polls must not wipe updateAvailable from a prior full check.
+        if (progressOnly && OC.consoleUpdateState.status) {
+          const merged = {
+            ...OC.consoleUpdateState.status,
+            ...data,
+            updateAvailable:
+              data.updateAvailable == null
+                ? OC.consoleUpdateState.status.updateAvailable
+                : data.updateAvailable,
+            remoteSha: data.remoteSha || OC.consoleUpdateState.status.remoteSha,
+            commitsBehind:
+              data.commitsBehind == null
+                ? OC.consoleUpdateState.status.commitsBehind
+                : data.commitsBehind,
+          };
+          OC.consoleUpdateState.status = merged;
+          OC.consoleUpdateState.lastCheckedAt =
+            data.checkedAt || OC.consoleUpdateState.lastCheckedAt || new Date().toISOString();
+          return merged;
+        }
+        OC.consoleUpdateState.status = data;
+        OC.consoleUpdateState.lastCheckedAt = data.checkedAt || new Date().toISOString();
+        return data;
+      })
+      .finally(() => {
+        if (OC.consoleUpdateState[inflightKey] === request) {
+          OC.consoleUpdateState[inflightKey] = null;
+        }
+      });
+
+    OC.consoleUpdateState[inflightKey] = request;
+    return request;
   };
 
   async function waitForApplyResult(applyStartedAt, targetSha) {
@@ -547,7 +590,9 @@
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
       let status = null;
       try {
-        status = await OC.fetchConsoleUpdateStatus();
+        // Progress-only: lock/result/local SHA, no git fetch — keeps polls serial
+        // and avoids stacking pending /status calls while apply runs.
+        status = await OC.fetchConsoleUpdateStatus({ progressOnly: true });
       } catch (err) {
         // Servidor pode já ter caído para reinício — continuar até ter resultado ou timeout.
         OC.consoleUpdateState.activityLabel =
@@ -579,7 +624,7 @@
 
     let status = OC.consoleUpdateState.status;
     try {
-      status = await OC.fetchConsoleUpdateStatus();
+      status = await OC.fetchConsoleUpdateStatus({ progressOnly: true });
     } catch {
       /* keep last */
     }
@@ -640,6 +685,24 @@
     }
 
     setBarVisible(true);
+    if (silent) {
+      // Dashboard auto-refresh must not stack full git-fetch status calls.
+      if (OC.consoleUpdateState.statusInFlight) {
+        return OC.consoleUpdateState.statusInFlight;
+      }
+      const lastMs = Date.parse(OC.consoleUpdateState.lastCheckedAt || "");
+      if (
+        Number.isFinite(lastMs) &&
+        Date.now() - lastMs < SILENT_STATUS_MIN_INTERVAL_MS &&
+        OC.consoleUpdateState.status
+      ) {
+        if (!OC.consoleUpdateState.busy) {
+          renderConsoleUpdateBar(OC.consoleUpdateState.status, "idle");
+        }
+        return OC.consoleUpdateState.status;
+      }
+    }
+
     if (!silent) {
       clearLastError();
       beginActivity("checking", "Consultando o repositório remoto…");

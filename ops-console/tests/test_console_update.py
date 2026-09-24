@@ -49,7 +49,7 @@ def test_console_update_lock_expires(tmp_path: Path):
     config = {"logDir": str(logs)}
     lock_path = so._console_update_lock_path(config)
     lock_path.write_text(
-        json.dumps({"startedAt": time.time() - 200}),
+        json.dumps({"startedAt": time.time() - (so._CONSOLE_UPDATE_LOCK_TTL_SEC + 10)}),
         encoding="utf-8",
     )
     assert so._read_console_update_lock(config) is None
@@ -159,6 +159,11 @@ def test_apply_console_update_spawns_worker(tmp_path: Path):
     assert result["ok"] is True
     assert result["restarting"] is True
     spawn.assert_called_once()
+    script_arg, args = spawn.call_args[0]
+    assert Path(script_arg).name == "update_ops_console.ps1"
+    assert "-Apply" in args
+    assert "-LogDir" in args
+    assert str(logs) in args
     saved = so._read_console_update_result(config)
     assert saved is not None
     assert saved.get("phase") == "started"
@@ -184,6 +189,68 @@ def test_console_update_result_roundtrip(tmp_path: Path):
     assert saved["ok"] is False
     assert "divergent" in saved["error"]
     assert saved.get("finishedAt")
+
+
+def test_stuck_started_phase_is_failed(tmp_path: Path):
+    base = tmp_path / "pplid"
+    logs = base / "logs"
+    logs.mkdir(parents=True)
+    config = {"logDir": str(logs)}
+    so._write_console_update_lock(config, detail="abc->def")
+    lock_path = so._console_update_lock_path(config)
+    lock_path.write_text(
+        json.dumps({"startedAt": time.time() - 200, "detail": "abc->def"}),
+        encoding="utf-8",
+    )
+    so._write_console_update_result(
+        config,
+        {
+            "ok": True,
+            "phase": "started",
+            "accepted": True,
+            "previousSha": "abc1234",
+            "targetSha": "def5678",
+        },
+    )
+    with patch.object(
+        so,
+        "read_local_console_git_info",
+        return_value={"ok": True, "supported": True, "currentSha": "abc1234", "branch": "main"},
+    ):
+        with patch.object(so, "resolve_ops_repo_dir", return_value=base / "ops"):
+            (base / "ops").mkdir(exist_ok=True)
+            result = so.check_console_update(config)
+    assert result.get("inProgress") is not True
+    last = so._read_console_update_result(config)
+    assert last is not None
+    assert last.get("phase") == "failed"
+    assert "Worker" in (last.get("error") or "")
+    assert so._read_console_update_lock(config) is None
+
+
+def test_check_console_update_progress_only_skips_powershell(tmp_path: Path, monkeypatch):
+    base = tmp_path / "pplid"
+    logs = base / "logs"
+    logs.mkdir(parents=True)
+    config = {"logDir": str(logs)}
+    so._write_console_update_result(
+        config,
+        {"ok": True, "phase": "pulling", "targetSha": "def5678"},
+    )
+
+    def boom(*_a, **_k):
+        raise AssertionError("run_powershell should not be called for progress_only")
+
+    monkeypatch.setattr(so, "run_powershell", boom)
+    monkeypatch.setattr(
+        so,
+        "read_local_console_git_info",
+        lambda _c: {"ok": True, "supported": True, "currentSha": "abc1234", "branch": "main"},
+    )
+    result = so.check_console_update(config, progress_only=True)
+    assert result.get("progressOnly") is True
+    assert result["lastResult"]["phase"] == "pulling"
+    assert result.get("inProgress") is not True
 
 
 def test_check_console_update_includes_last_result_when_locked(tmp_path: Path):
