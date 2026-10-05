@@ -1,5 +1,3 @@
-https://cursor.com/loginDeepControl?challenge=ufQyc9t1SkIz-nXmVfLhcisRWLLoz5iEb00Kkngf0tg&uuid=41af511d-0758-4d16-8ec1-f590b4d72da6&mode=login&redirectTarget=cli&supportsSelectedTeamLogin=true
-
 # PPLID Server Ops 
 
 Scripts de automacao do servidor PPLID (sync Git, deploy, ops-console, Task Scheduler).
