@@ -162,7 +162,9 @@ if (-not $oldActive) {
 }
 
 Start-DeployStep -Environment $Environment -RunId $RunId -StepId "restart_services"
-$promoteServicesStopped = $false
+$promoteStopAttempted = $false
+$promoteCurrentSwitched = $false
+$promoteStartAttempted = $false
 try {
     if ($oldActive) {
         $previousRelease = Get-PplidReleaseDir -Environment $Environment -Sha $oldActive.Trim()
@@ -172,17 +174,13 @@ try {
         }
     }
 
-    Set-DirectoryJunction -LinkPath $paths.Current -TargetPath $releaseDir
-    LogInfo "current -> $releaseDir"
-
-    $env:PPLID_APP_ROOT = $paths.Current
     LogInfo "Instalando env/media persistentes (shared)..."
     Install-PplidSharedRuntime -Environment $Environment -AppRoot $releaseDir -RepoDir $spec.RepoDir
     LogInfo "shared env/media instalados."
-    Assert-PostgresAvailableForPromote -BackendDir (Join-Path $paths.Current "backend")
-    Invoke-EnsureDatabaseSafe -DeployScript $deployScript -AppRoot $paths.Current
+    Assert-PostgresAvailableForPromote -BackendDir (Join-Path $releaseDir "backend")
+    Invoke-EnsureDatabaseSafe -DeployScript $deployScript -AppRoot $releaseDir
 
-    $backendDir = Join-Path $paths.Current "backend"
+    $backendDir = Join-Path $releaseDir "backend"
     $venvPython = Join-Path $backendDir ".venv\Scripts\python.exe"
     Push-Location $backendDir
     try {
@@ -196,9 +194,15 @@ try {
         Pop-Location
     }
 
+    $promoteStopAttempted = $true
     Invoke-PplidDeployScript -ScriptPath (Join-Path $deployScript "stop_env.ps1") -Arguments @{ Environment = $Environment }
-    $promoteServicesStopped = $true
     Start-Sleep -Seconds 3
+    Set-DirectoryJunction -LinkPath $paths.Current -TargetPath $releaseDir
+    $promoteCurrentSwitched = $true
+    $env:PPLID_APP_ROOT = $paths.Current
+    LogInfo "current -> $releaseDir"
+
+    $promoteStartAttempted = $true
     try {
         Invoke-PplidDeployScript -ScriptPath (Join-Path $deployScript "start_env.ps1") -Arguments @{ Environment = $Environment }
     } catch {
@@ -218,8 +222,20 @@ try {
     LogOk "Servicos reiniciados"
     Complete-DeployStep -Environment $Environment -RunId $RunId -StepId "restart_services" -Status "success"
 } catch {
-    if (-not $promoteServicesStopped) {
-        Restore-PplidPromoteJunctionIfNeeded -OldActive $oldActive -Reason "promote_failed_before_restart"
+    if ($promoteStopAttempted -and -not $promoteStartAttempted) {
+        if ($promoteCurrentSwitched) {
+            try {
+                Restore-PplidPromoteJunctionIfNeeded -OldActive $oldActive -Reason "promote_failed_before_start"
+            } catch {
+                LogErr "Falha ao restaurar junction anterior: $($_.Exception.Message)"
+            }
+        }
+        try {
+            LogInfo "Tentando iniciar os servicos na release ativa apos falha na promocao..."
+            Invoke-PplidDeployScript -ScriptPath (Join-Path $deployScript "start_env.ps1") -Arguments @{ Environment = $Environment }
+        } catch {
+            LogErr "Falha ao recuperar servicos apos erro na promocao: $($_.Exception.Message)"
+        }
     }
     if ((Get-DeploySteps -Environment $Environment -RunId $RunId | Where-Object { $_.id -eq "restart_services" }).status -ne "error") {
         Complete-DeployStep -Environment $Environment -RunId $RunId -StepId "restart_services" -Status "error" -ErrorMessage $_.Exception.Message
