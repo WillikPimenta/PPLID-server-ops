@@ -114,10 +114,10 @@ function Invoke-PplidBackendMigrate {
     # Mesmo padrao do waitress: injeta .env no processo para nao cair em DB/user default.
     Import-PplidBackendDotEnv -BackendDir $BackendDir -Log $Log | Out-Null
 
-    if ($Log) { & $Log "migrate..." }
+    if ($Log) { & $Log "migrate_preserving_rbac..." }
 
     $migrateOut = Invoke-PplidPython -Python $VenvPython -Args @(
-        "manage.py", "migrate", "--noinput", "--skip-checks"
+        "manage.py", "migrate_preserving_rbac", "--noinput", "--skip-checks"
     ) -WorkingDirectory $BackendDir -FailMessage "migrate falhou."
 
     $applied = @($migrateOut | Where-Object { $_ -match "Applying " })

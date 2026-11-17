@@ -203,7 +203,7 @@ Invoke-EnsureDatabaseSafe -DeployScript $deployScript -AppRoot $releaseDir
 Push-Location $backendDir
 try {
     Log "migrate..."
-    Invoke-PplidPython -Python $venvPython -Args @("manage.py", "migrate", "--noinput", "--skip-checks") -FailMessage "migrate falhou."
+    Invoke-PplidPython -Python $venvPython -Args @("manage.py", "migrate_preserving_rbac", "--noinput", "--skip-checks") -FailMessage "migrate falhou."
     Log "collectstatic..."
     Invoke-PplidPython -Python $venvPython -Args @("manage.py", "collectstatic", "--noinput", "--skip-checks") -FailMessage "collectstatic falhou."
 } finally {
