@@ -75,6 +75,12 @@ def _run_hidden(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
     return subprocess.run(*args, **kwargs)
 
 
+def _git_command(repo_dir: Path, *args: str) -> list[str]:
+    """Run Git safely when deployment checkouts belong to another Windows user."""
+    repo_path = str(repo_dir.resolve())
+    return ["git", "-c", f"safe.directory={repo_path}", "-C", repo_path, *args]
+
+
 def fix_mojibake(text: str | None) -> str:
     if not text or not isinstance(text, str):
         return text or ""
@@ -100,13 +106,13 @@ def _resolve_origin_branch_sha(base_dir: Path, env_name: str) -> tuple[str, str]
     ref = f"origin/{branch}"
     try:
         _run_hidden(
-            ["git", "-C", str(mirror), "fetch", "origin"],
+            _git_command(mirror, "fetch", "origin"),
             capture_output=True,
             text=True,
             timeout=60,
         )
         proc_full = _run_hidden(
-            ["git", "-C", str(mirror), "rev-parse", ref],
+            _git_command(mirror, "rev-parse", ref),
             capture_output=True,
             text=True,
             timeout=15,
@@ -115,7 +121,7 @@ def _resolve_origin_branch_sha(base_dir: Path, env_name: str) -> tuple[str, str]
             return "", ""
         full = proc_full.stdout.strip()
         proc_short = _run_hidden(
-            ["git", "-C", str(mirror), "rev-parse", "--short", full],
+            _git_command(mirror, "rev-parse", "--short", full),
             capture_output=True,
             text=True,
             timeout=15,
@@ -159,13 +165,13 @@ def _resolve_sha_in_mirror(
     try:
         if fetch:
             _run_hidden(
-                ["git", "-C", str(mirror), "fetch", "origin"],
+                _git_command(mirror, "fetch", "origin"),
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
         proc = _run_hidden(
-            ["git", "-C", str(mirror), "rev-parse", sha],
+            _git_command(mirror, "rev-parse", sha),
             capture_output=True,
             text=True,
             timeout=15,
@@ -174,7 +180,7 @@ def _resolve_sha_in_mirror(
             return sha, sha if len(sha) >= 40 else sha
         full = proc.stdout.strip()
         short_proc = _run_hidden(
-            ["git", "-C", str(mirror), "rev-parse", "--short", full],
+            _git_command(mirror, "rev-parse", "--short", full),
             capture_output=True,
             text=True,
             timeout=15,
@@ -546,31 +552,10 @@ def action_redeploy(
     if not sha:
         sha, sha_full = _resolve_origin_branch_sha(base_dir, env_name)
         if not sha:
-            mirror = base_dir / "deploy" / env_name / "mirror"
-            if mirror.is_dir():
-                try:
-                    proc = _run_hidden(
-                        ["git", "-C", str(mirror), "rev-parse", "--short", "HEAD"],
-                        capture_output=True,
-                        text=True,
-                        timeout=15,
-                    )
-                    if proc.returncode == 0:
-                        sha = proc.stdout.strip()
-                        proc_full = _run_hidden(
-                            ["git", "-C", str(mirror), "rev-parse", "HEAD"],
-                            capture_output=True,
-                            text=True,
-                            timeout=15,
-                        )
-                        if proc_full.returncode == 0:
-                            sha_full = proc_full.stdout.strip()
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-        if not sha:
-            state = load_deploy_state(base_dir, env_name)
-            sha = str(state.get("activeSha") or "").strip()
-            sha_full = sha
+            return {
+                "ok": False,
+                "error": f"Nao foi possivel obter o commit remoto de origin/{ENV_BRANCH.get(env_name, 'dev')} no mirror de {env_name}.",
+            }
 
     if sha:
         resolved_short, resolved_full = _resolve_sha_in_mirror(base_dir, env_name, sha)
@@ -2636,7 +2621,7 @@ def _write_console_update_result(config: dict[str, Any], payload: dict[str, Any]
 def _git_in_repo(repo_dir: Path, args: list[str], *, timeout: int = 15) -> str | None:
     try:
         proc = _run_hidden(
-            ["git", "-C", str(repo_dir), *args],
+            _git_command(repo_dir, *args),
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -2720,13 +2705,16 @@ def read_env_git_worktree_status(
     # que será sincronizado. Portanto, ela deve continuar visível no payload,
     # mas não pode bloquear redeploy. O bloqueio vale somente para os
     # worktrees de origem que o operador edita/sincroniza.
+    # The deploy pipeline builds from the fetched mirror SHA, not from the
+    # operator checkout or active release. Only a dirty mirror can change the
+    # source this redeploy consumes.
     dirty_locations = [
         loc for loc in locations
-        if loc.get("dirty") and loc.get("id") != "release"
+        if loc.get("dirty") and loc.get("id") == "mirror"
     ]
     non_blocking_dirty_locations = [
         loc for loc in locations
-        if loc.get("dirty") and loc.get("id") == "release"
+        if loc.get("dirty") and loc.get("id") in {"release", "workspace"}
     ]
     supported = any(loc.get("supported") for loc in locations)
     dirty = bool(dirty_locations)

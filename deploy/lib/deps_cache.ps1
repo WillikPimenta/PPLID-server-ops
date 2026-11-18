@@ -21,7 +21,11 @@ function Get-PplidDepsFingerprintFromDir {
 }
 
 function Initialize-PplidPipCache {
-    $cacheDir = Get-PplidPipCacheDir
+    # Cache compartilhado na raiz pode ter wheels com ACL de outro usuario/servico (Errno 13).
+    $baseDir = Get-PplidPipCacheDir
+    $userKey = if ($env:USERNAME) { [string]$env:USERNAME } else { "default" }
+    $userKey = ($userKey -replace '[\\/:*?"<>|]', '_')
+    $cacheDir = Join-Path $baseDir $userKey
     if (-not (Test-Path $cacheDir)) {
         New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
     }
@@ -229,6 +233,10 @@ function Parse-PipFailure {
         $detail.rootCause = "corrupt_venv"
         $detail.message = "pip install falhou: ambiente virtual (.venv) corrompido."
         $detail.recommendation = "O pipeline recriara o venv automaticamente no proximo deploy; se persistir, remova backend/.venv manualmente."
+    } elseif ($text -match '(?i)Permission denied|\[Errno 13\]') {
+        $detail.rootCause = "pip_cache_permission"
+        $detail.message = "pip install falhou: permissao negada no cache de wheels do pip."
+        $detail.recommendation = "O deploy reintenta com --no-cache-dir; se persistir, remova deploy/cache/pip como administrador ou ajuste ACLs da pasta."
     } elseif ($text -match '(?i)ERROR:') {
         $detail.rootCause = "pip_error"
         $detail.message = "pip install falhou com erro reportado pelo pip."
@@ -329,7 +337,8 @@ function Invoke-PplidPipInstall {
         [int]$TimeoutSec = 3600,
         [ValidateSet("MAIN", "DEV", "HOM")][string]$Environment = "",
         [string]$RunId = "",
-        [string]$LogName = "build.log"
+        [string]$LogName = "build.log",
+        [switch]$SkipCacheRetry
     )
 
     Initialize-PplidPipCache | Out-Null
@@ -439,6 +448,17 @@ function Invoke-PplidPipInstall {
 
     $errorDetail = $null
     if ($exitCode -ne 0) {
+        $failureText = ($tailOut + $tailErr) -join "`n"
+        $cachePermissionFailure = $failureText -match '(?i)Permission denied|\[Errno 13\]'
+        $alreadyNoCache = ($Args | Where-Object { $_ -eq "--no-cache-dir" }).Count -gt 0
+        if (-not $SkipCacheRetry -and $cachePermissionFailure -and -not $alreadyNoCache) {
+            if ($Environment -and $RunId) {
+                Write-DeployLogWarn -Environment $Environment -RunId $RunId `
+                    -Message "pip: cache inacessivel; reintentando com --no-cache-dir" -LogName $LogName | Out-Null
+            }
+            return Invoke-PplidPipInstall -VenvPython $VenvPython -Args ($Args + @("--no-cache-dir")) `
+                -TimeoutSec $TimeoutSec -Environment $Environment -RunId $RunId -LogName $LogName -SkipCacheRetry
+        }
         $errorDetail = Parse-PipFailure -Lines $tail -ExitCode $exitCode -TimeoutSec $TimeoutSec
         $errorDetail.command = $cmdDisplay
     }

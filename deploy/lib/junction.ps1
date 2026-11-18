@@ -30,9 +30,12 @@ function Remove-PplidJunctionOrResidualPath {
 
     $item = Get-Item -LiteralPath $Path -Force
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        cmd /c rmdir "$Path" 2>$null | Out-Null
+        $removeOutput = @(& cmd.exe /d /c rmdir "$Path" 2>&1)
+        $removeExitCode = $LASTEXITCODE
         if (Test-Path -LiteralPath $Path) {
-            throw "Falha ao remover junction existente: $Path"
+            $detail = (@($removeOutput) | ForEach-Object { "$_" }) -join " "
+            if (-not $detail) { $detail = "rmdir exit $removeExitCode" }
+            throw "Falha ao remover junction existente: $Path ($detail)"
         }
         return
     }
