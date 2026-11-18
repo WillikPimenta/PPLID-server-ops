@@ -193,7 +193,8 @@ def probe_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
 
 def fetch_backend_api_metrics(
     config: dict[str, Any], env_name: str, window: str = "24h", *, since: str | None = None,
-    until: str | None = None, timeout: float | None = None
+    until: str | None = None, timeout: float | None = None,
+    include_latency: bool = False, method: str = "", route: str = ""
 ) -> dict[str, Any]:
     env_cfg = config.get(env_name, {})
     port = int(env_cfg.get("backendPort") or 0)
@@ -202,6 +203,8 @@ def fetch_backend_api_metrics(
     if timeout is None:
         timeout = max(1.0, float(get_monitoring_settings(config).get("apiTimeoutSec") or 15.0))
     params = {"window": window}
+    if include_latency:
+        params.update({"includeLatency": "1", "method": method, "route": route})
     if since and until:
         params.update({"since": since, "until": until})
     url = f"http://127.0.0.1:{port}/api/v1/ops-metrics/summary/?{urllib.parse.urlencode(params)}"
@@ -223,6 +226,7 @@ def fetch_backend_api_samples_around(
     radius_minutes: int = 5,
     min_ms: int = 0,
     timeout: float = 15.0,
+    method: str = "", route: str = "",
 ) -> dict[str, Any]:
     env_cfg = config.get(env_name, {})
     port = int(env_cfg.get("backendPort") or 0)
@@ -233,6 +237,8 @@ def fetch_backend_api_samples_around(
             "at": at,
             "radiusMinutes": max(1, min(60, int(radius_minutes or 5))),
             "minMs": max(0, int(min_ms or 0)),
+            "method": method,
+            "route": route,
         }
     )
     url = f"http://127.0.0.1:{port}/api/v1/ops-metrics/around/?{params}"
@@ -2684,6 +2690,75 @@ def build_monitoring_availability_detail(
     return _build_availability_window(config, env_name, start, end, window='custom', include_api=False)
 
 
+def _group_deploy_availability(incidents, events, deploys, observations, now):
+    """Consolidate deployment-related episodes without changing coverage evidence."""
+    def dt(value):
+        parsed = _parse_iso_dt(value)
+        return parsed if parsed is None or parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    windows, deploy_starts = [], []
+    for deploy in deploys:
+        started, finished = dt(deploy.get('started_at')), dt(deploy.get('finished_at'))
+        if started:
+            deploy_starts.append((started, deploy['run_id']))
+        # A recorded end is required: abandoned/incomplete runs must not absorb later outages.
+        if started and finished and finished >= started:
+            windows.append((started, finished + timedelta(seconds=120), deploy))
+    windows.sort(key=lambda item: item[0], reverse=True)
+    deploy_starts.sort(reverse=True)
+    grouped, result = {}, []
+    for incident in incidents:
+        began = dt(incident['startedAt'])
+        owner = next((run_id for at, run_id in deploy_starts if at <= began), None)
+        match = next((item for item in windows if item[2]['run_id'] == owner and item[0] <= began <= item[1]), None)
+        if match:
+            finished = dt(match[2]['finished_at'])
+            if began > finished and any(ok and finished - timedelta(milliseconds=1) <= at < began for at, ok in observations):
+                match = None  # A confirmed post-deploy recovery ends the grace period.
+        if match is None:
+            result.append(incident)
+            continue
+        deploy = match[2]
+        grouped.setdefault(deploy['run_id'], {'window': match, 'fragments': []})['fragments'].append(incident)
+
+    consumed = set()
+    for group in grouped.values():
+        _, boundary, deploy = group['window']
+        fragments = sorted(group['fragments'], key=lambda item: dt(item['startedAt']))
+        first, last = fragments[0], fragments[-1]
+        last_failure = max(dt(item.get('lastFailureAt') or item['startedAt']) for item in fragments)
+        # A later unrelated episode or deploy bounds the search for recovery evidence.
+        next_episode = min((dt(item['startedAt']) for item in incidents
+                            if dt(item['startedAt']) > last_failure), default=now)
+        next_deploy = min((at for at, _ in deploy_starts if at > last_failure), default=now)
+        recovery_limit = min(boundary, next_episode, next_deploy, now)
+        recovered = next((at for at, ok in observations if ok and last_failure < at <= recovery_limit), None)
+        recovered_at = recovered.isoformat() if recovered else last.get('finishedAt')
+        signal_end = dt(recovered_at) if recovered_at else min(boundary, now)
+        signals = []
+        for index, event in enumerate(events):
+            at = dt(event.get('startedAt'))
+            if (index not in consumed and event.get('title') in ('Backend offline', 'Backend recuperado')
+                    and at and dt(first['startedAt']) <= at <= signal_end + timedelta(seconds=120)
+                    and at <= boundary and at < next_deploy and at < next_episode):
+                consumed.add(index)
+                signals.append(event)
+        signals.sort(key=lambda event: dt(event['startedAt']))
+        observed = sum(item.get('observedDurationSec') or 0 for item in fragments)
+        uncertain = any(item.get('uncertain') for item in fragments)
+        result.append({
+            **first, 'finishedAt': recovered_at, 'lastFailureAt': last_failure.isoformat(),
+            'ongoing': bool(not recovered_at and last.get('ongoing')),
+            'durationSec': None if uncertain else int(observed), 'observedDurationSec': observed,
+            'uncertain': uncertain, 'association': 'deploy_window',
+            'deploy': {'runId': deploy['run_id'], 'startedAt': deploy['started_at'],
+                       'finishedAt': deploy['finished_at'], 'result': deploy.get('result')},
+            'fragmentCount': len(fragments), 'fragments': fragments, 'relatedSignals': signals,
+        })
+    result.sort(key=lambda item: dt(item['startedAt']))
+    return result, [event for index, event in enumerate(events) if index not in consumed]
+
+
 def _build_availability_window(
     config: dict[str, Any], env_name: str, start: datetime, now: datetime,
     *, window: str, include_api: bool = True
@@ -2711,8 +2786,8 @@ def _build_availability_window(
             (env_name, since, until),
         ).fetchall()
         deploys = conn.execute(
-            "SELECT run_id, status, result, started_at, finished_at FROM deploy_runs WHERE environment=? AND started_at>=? AND started_at<? ORDER BY started_at DESC LIMIT 101",
-            (env_name, since, until),
+            "SELECT run_id, status, result, started_at, finished_at FROM deploy_runs WHERE environment=? AND julianday(started_at)<julianday(?) AND (julianday(finished_at)>=julianday(?) OR (julianday(started_at)>=julianday(?) AND (finished_at IS NULL OR finished_at=''))) ORDER BY started_at DESC",
+            (env_name, until, (start - timedelta(seconds=120)).isoformat(), since),
         ).fetchall()
         latency_rows = conn.execute(
             "SELECT recorded_at, value FROM monitor_samples WHERE environment=? AND metric_key='health_latency_ms' AND recorded_at>=? AND recorded_at<? ORDER BY recorded_at, id",
@@ -2801,6 +2876,7 @@ def _build_availability_window(
                 streak = {'kind': 'outage', 'startedAt': max(dt, start).isoformat(),
                           'observedDurationSec': 0, 'uncertain': i == 0 or gap or dt < start}
             streak['observedDurationSec'] += segment_seconds
+            streak['lastFailureAt'] = dt.isoformat()
         elif streak:
             incidents.append({**streak, 'finishedAt': dt.isoformat(), 'ongoing': False,
                               'durationSec': None if streak['uncertain'] else int(streak['observedDurationSec'])})
@@ -2843,12 +2919,19 @@ def _build_availability_window(
         bucket['coveragePct'] = round(100 * bucket['observedSec'] / bucket_seconds, 1)
         bucket['observedSec'] = round(bucket['observedSec'], 3)
         bucket['downSec'] = round(bucket['downSec'], 3)
+    raw_incident_count = len(incidents)
+    incidents, availability_events = _group_deploy_availability(
+        incidents, [dict(row, kind="event", startedAt=row['recorded_at']) for row in events[:100]],
+        [dict(row) for row in deploys], observations, now,
+    )
     impact = {'incidentCount': len(incidents) if observed_seconds else None, 'estimatedDowntimeSec': round(down_seconds) if observed_seconds else None,
+              'rawIncidentCount': raw_incident_count if observed_seconds else None,
               'observedSec': round(observed_seconds),
               'unknownSec': max(0, round((now - start).total_seconds() - observed_seconds)),
               'uncertainIncidentCount': sum(1 for item in incidents if item['uncertain'])}
-    timeline = incidents[-100:] + [dict(row, kind="event", startedAt=row['recorded_at']) for row in events[:100]]
-    timeline += [dict(row, kind="deploy", startedAt=row['started_at'], finishedAt=row['finished_at']) for row in deploys[:100]]
+    visible_deploys = [row for row in deploys if start <= recorded_time({'recorded_at': row['started_at']}) < now]
+    timeline = incidents[-100:] + availability_events
+    timeline += [dict(row, kind="deploy", startedAt=row['started_at'], finishedAt=row['finished_at']) for row in visible_deploys[:100]]
     timeline.sort(key=lambda row: row['startedAt'], reverse=True)
 
     api = fetch_backend_api_metrics(config, env_name, window=window, since=since, until=until) if include_api else {'deferred': True}
@@ -2900,7 +2983,7 @@ def _build_availability_window(
             "impact": impact,
             "latency": {'samples': len(latency_values), 'avgMs': round(sum(latency_values) / len(latency_values), 1) if latency_values else None,
                         'maxMs': max(latency_values) if latency_values else None, 'points': latency_series},
-            "timelineTruncated": len(incidents) > 100 or len(events) > 100 or len(deploys) > 100,
+            "timelineTruncated": len(incidents) > 100 or len(events) > 100 or len(visible_deploys) > 100,
             "retentionDays": int(settings.get('retentionDays') or 30)}
 
 
@@ -3454,10 +3537,13 @@ def build_monitoring_service_logs_export(
 
 def build_monitoring_api_routes(
     config: dict[str, Any], env_name: str, window: str = "24h", *,
-    since: str | None = None, until: str | None = None
+    since: str | None = None, until: str | None = None,
+    include_latency: bool = False, method: str = "", route: str = ""
 ) -> dict[str, Any]:
     t0 = time.perf_counter()
-    cache_key = f"{env_name.upper()}:{window}:{since or ''}:{until or ''}"
+    method = method.strip().upper()
+    route = route.strip()
+    cache_key = json.dumps([env_name.upper(), window, since, until, include_latency, method, route])
     now = time.time()
     cached = _API_ROUTES_CACHE.get(cache_key)
     if cached and now - cached[0] < _API_ROUTES_CACHE_TTL_SEC:
@@ -3465,7 +3551,8 @@ def build_monitoring_api_routes(
         hit["cacheHit"] = True
         hit["timingMs"] = round((time.perf_counter() - t0) * 1000, 1)
         return hit
-    data = fetch_backend_api_metrics(config, env_name, window=window, since=since, until=until)
+    latency_options = {"include_latency": True, "method": method, "route": route} if include_latency else {}
+    data = fetch_backend_api_metrics(config, env_name, window=window, since=since, until=until, **latency_options)
     _enrich_active_users_peak(config, env_name, data)
     instrumentation = "unavailable"
     traffic = data.get("traffic") or {}
@@ -3498,6 +3585,7 @@ def build_monitoring_api_samples(
     at: str,
     radius_minutes: int = 5,
     min_ms: int = 0,
+    method: str = "", route: str = "",
 ) -> dict[str, Any]:
     """Drill-down: rotas/amostras de API em torno de um ponto do gráfico."""
     env_name = env_name.upper()
@@ -3507,6 +3595,7 @@ def build_monitoring_api_samples(
         at,
         radius_minutes=radius_minutes,
         min_ms=min_ms,
+        **({"method": method, "route": route} if method or route else {}),
     )
     sample_labels: dict[str, Any] = {}
     try:
@@ -3545,7 +3634,9 @@ def build_monitoring_api_samples(
         "at": at,
         "radiusMinutes": radius_minutes,
         "minMs": min_ms,
-        "collectorTopRoutes": sample_labels.get("topRoutes") or [],
+        "collectorTopRoutes": [r for r in (sample_labels.get("topRoutes") or [])
+                               if (not method or r.get("method") == method)
+                               and (not route or r.get("route") == route)],
         "collectorRequests": sample_labels.get("requests"),
         "collectorWindow": sample_labels.get("window"),
     }

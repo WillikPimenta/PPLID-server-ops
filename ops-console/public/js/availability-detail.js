@@ -18,7 +18,12 @@
     const api = selection.api;
     const verified = api && !api.error && api.periodVerified === true;
     const cached = [data, api].filter(item => item?._cache?.stale).map(item => `Última resposta de ${date(item._cache.savedAt)}: ${item._cache.error}`).join('; ');
-    const list = timeline.slice(0, 30).map(item => `<li><time>${escape(date(item.startedAt))}</time><strong>${escape(item.kind === 'deploy' ? 'Deploy' : item.kind === 'outage' ? 'Episódio de falha' : item.title || 'Evento')}</strong><small>${escape(item.kind === 'outage' ? `${item.ongoing ? 'Em andamento; ' : ''}${item.uncertain ? 'Continuidade incerta; ' : ''}tempo observado ${duration(item.observedDurationSec ?? item.durationSec)}` : item.result || item.status || 'Registrado')}</small></li>`).join('');
+    const list = timeline.slice(0, 30).map(item => `<li><time>${escape(date(item.startedAt))}</time><strong>${escape(item.kind === 'deploy' ? 'Deploy' : item.kind === 'outage' ? item.deploy ? 'Indisponibilidade associada ao deploy' : 'Episódio de falha' : item.title || 'Evento')}</strong><small>${escape(item.kind === 'outage' ? `${item.ongoing ? 'Em andamento; ' : ''}${item.uncertain ? 'Continuidade incerta; ' : ''}tempo observado ${duration(item.observedDurationSec ?? item.durationSec)}` : item.result || item.status || 'Registrado')}</small>
+      ${item.deploy ? `<details class="av-deploy-incident"><summary>Deploy ${escape(item.deploy.runId)} · ${escape(item.fragmentCount || 1)} episódio(s) consolidado(s)</summary>
+        <p>Associação pela janela registrada do deploy, incluindo até 2 minutos após o término. Lacunas de coleta continuam sem duração confirmada.</p>
+        <ul>${(item.fragments || []).map(fragment => `<li>${escape(date(fragment.startedAt))} → ${fragment.finishedAt ? escape(date(fragment.finishedAt)) : 'Fim não confirmado'}<small>Tempo observado ${escape(duration(fragment.observedDurationSec))}${fragment.uncertain ? ' · coleta incompleta' : ''}</small></li>`).join('')}</ul>
+        ${(item.relatedSignals || []).length ? `<ul>${item.relatedSignals.map(signal => `<li>${escape(date(signal.startedAt))} · ${escape(signal.title)}</li>`).join('')}</ul>` : ''}
+      </details>` : ''}</li>`).join('');
     const healthPoints = (data?.history || []).map(point => {
       const observed = point.observedSec == null ? Boolean(point.samples) : point.observedSec > 0;
       const state = !observed ? 'is-missing' : point.failures || point.downSec > 0 ? 'is-failed' : '';

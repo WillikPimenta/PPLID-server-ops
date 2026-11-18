@@ -1,6 +1,8 @@
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.db import DatabaseError
 from django.test import TestCase
 from django.utils import timezone
 
@@ -10,7 +12,7 @@ from apps.ops_monitoring.models import (
     ApiTrafficBucket,
     ApiTrafficUserBucket,
 )
-from apps.ops_monitoring.views import _build_api_traffic, _build_sampled_metrics
+from apps.ops_monitoring.views import _build_api_latency, _build_api_traffic, _build_sampled_metrics
 
 
 class ApiTrafficSummaryTests(TestCase):
@@ -123,6 +125,76 @@ class ApiTrafficSummaryTests(TestCase):
 
         self.assertEqual(traffic["totals"]["uniqueUsers"], 2)
         self.assertEqual(traffic["activeUsers"]["count"], 1)
+
+    def test_latency_preserves_minute_peaks_and_weighted_period_average(self):
+        start = (timezone.now() - timedelta(minutes=4)).replace(second=0, microsecond=0)
+        for minute, method, count, duration, maximum in [
+            (0, "GET", 10, 1000, 200), (0, "POST", 1, 3000, 3000),
+            (2, "GET", 1, 0, 0), (3, "GET", 2, 200, 150),
+        ]:
+            ApiTrafficBucket.objects.create(
+                bucket_start=start + timedelta(minutes=minute), method=method, route="/api/example/",
+                request_count=count, total_duration_ms=duration, max_duration_ms=maximum,
+            )
+        result = _build_api_latency(start, start + timedelta(minutes=3, seconds=30))
+        self.assertEqual(len(result["points"]), 4)
+        first, gap, zero, partial = result["points"]
+        self.assertEqual(first["avgMs"], 363.6)
+        self.assertEqual(first["maxMs"], 3000)
+        self.assertIsNone(gap["avgMs"])
+        self.assertIsNone(gap["maxMs"])
+        self.assertEqual(zero["avgMs"], 0)
+        self.assertEqual(zero["maxMs"], 0)
+        self.assertTrue(partial["partial"])
+        self.assertFalse(first["partial"])
+        self.assertEqual(result["totals"], {"requests": 14, "avgMs": 300.0, "maxMs": 3000})
+        filtered = _build_api_latency(start, start + timedelta(minutes=3), method="GET", route="/api/example/")
+        self.assertEqual(filtered["totals"]["requests"], 11)
+        self.assertEqual(filtered["totals"]["maxMs"], 200)
+        missing = _build_api_latency(start, start + timedelta(minutes=3), method="GET", route="/api/other/")
+        self.assertEqual(missing["totals"]["requests"], 0)
+        self.assertTrue(all(p["avgMs"] is None for p in missing["points"]))
+
+    def test_summary_latency_is_opt_in_and_does_not_filter_traffic(self):
+        start = (timezone.now() - timedelta(minutes=2)).replace(second=0, microsecond=0)
+        for method in ["GET", "POST"]:
+            ApiTrafficBucket.objects.create(bucket_start=start, method=method, route="/api/example/",
+                                           request_count=1, total_duration_ms=50, max_duration_ms=50)
+        url = "/api/v1/ops-metrics/summary/"
+        plain = self.client.get(url, {"window": "1h"}).json()
+        self.assertNotIn("latency", plain)
+        data = self.client.get(url, {"window": "1h", "includeLatency": "1", "method": "get", "route": "/api/example/"}).json()
+        self.assertEqual(data["traffic"]["totals"]["requests"], 2)
+        self.assertEqual(data["latency"]["totals"]["requests"], 1)
+        self.assertEqual(data["latency"]["method"], "GET")
+
+    def test_latency_custom_range_keeps_partial_boundary_minutes(self):
+        start = (timezone.now() - timedelta(minutes=3)).replace(second=0, microsecond=0)
+        ApiTrafficBucket.objects.create(bucket_start=start, method="GET", route="/api/example/",
+                                       request_count=2, total_duration_ms=400, max_duration_ms=300)
+        result = _build_api_latency(start + timedelta(seconds=15), start + timedelta(minutes=1))
+        self.assertEqual(len(result["points"]), 1)
+        self.assertTrue(result["points"][0]["partial"])
+        self.assertEqual(result["totals"]["requests"], 2)
+
+    def test_unavailable_latency_does_not_claim_zero_latency(self):
+        with patch("apps.ops_monitoring.views._build_api_latency", side_effect=DatabaseError("unavailable")):
+            data = self.client.get("/api/v1/ops-metrics/summary/", {"window": "1h", "includeLatency": "1"}).json()
+        self.assertFalse(data["latency"]["available"])
+        self.assertEqual(data["latency"]["points"], [])
+        self.assertNotIn("totals", data["latency"])
+        self.assertTrue(data["traffic"]["available"])
+
+    def test_around_filters_samples_before_ranking(self):
+        now = timezone.now()
+        for method in ["GET", "POST"]:
+            ApiRequestMetric.objects.create(recorded_at=now, method=method, route="/api/example/", status_code=200, duration_ms=100)
+        data = self.client.get("/api/v1/ops-metrics/around/", {
+            "at": now.isoformat(), "method": "GET", "route": "/api/example/",
+        }).json()
+        self.assertEqual(len(data["samples"]), 1)
+        self.assertEqual(data["samples"][0]["method"], "GET")
+        self.assertTrue(all(row["method"] == "GET" for row in data["slowRoutes"]))
 
 
 class ApiRouteSamplesViewTests(TestCase):

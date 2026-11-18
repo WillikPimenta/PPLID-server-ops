@@ -417,6 +417,44 @@ def _build_api_traffic(window: str, since: datetime, until: datetime | None = No
 
 
 
+def _build_api_latency(since: datetime, until: datetime, *, method: str = "", route: str = "") -> dict:
+    """One-minute latency from all accounted requests, independent of sampling."""
+    qs = ApiTrafficBucket.objects.filter(bucket_start__gte=_floor_bucket(since, 1), bucket_start__lt=until)
+    if method:
+        qs = qs.filter(method=method)
+    if route:
+        qs = qs.filter(route=route)
+    rows = qs.values("bucket_start").annotate(
+        requests=Sum("request_count"), duration=Sum("total_duration_ms"), maximum=Max("max_duration_ms")
+    ).order_by("bucket_start")
+    by_minute = {row["bucket_start"]: row for row in rows}
+    points = []
+    cursor = _floor_bucket(since, 1)
+    total_count = total_duration = maximum = 0
+    while cursor < until:
+        row = by_minute.get(cursor) or {}
+        count = int(row.get("requests") or 0)
+        duration = int(row.get("duration") or 0)
+        max_ms = int(row.get("maximum") or 0)
+        total_count += count
+        total_duration += duration
+        maximum = max(maximum, max_ms)
+        points.append({
+            "at": cursor.isoformat(), "requests": count,
+            "avgMs": round(duration / count, 1) if count else None,
+            "maxMs": max_ms if count else None,
+            "partial": cursor < since or cursor + timedelta(minutes=1) > until,
+        })
+        cursor += timedelta(minutes=1)
+    return {
+        "available": True, "source": "exact_aggregate", "resolutionMinutes": 1,
+        "since": since.isoformat(), "until": until.isoformat(), "method": method, "route": route,
+        "points": points,
+        "totals": {"requests": total_count, "avgMs": round(total_duration / total_count, 1) if total_count else None,
+                   "maxMs": maximum if total_count else None},
+    }
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def ops_metrics_summary(request):
@@ -460,6 +498,17 @@ def ops_metrics_summary(request):
 
     totals_payload, route_stats = _build_sampled_metrics(qs)
 
+    latency_payload = {}
+    if request.GET.get("includeLatency") == "1":
+        method = (request.GET.get("method") or "").strip().upper()
+        route = (request.GET.get("route") or "").strip()
+        try:
+            latency = _build_api_latency(since, until, method=method, route=route)
+        except DatabaseError as exc:
+            report_internal_error(exc, operation="ops_monitoring.api_latency")
+            latency = {"available": False, "source": "unavailable", "points": [], "error": PUBLIC_INTERNAL_ERROR}
+        latency_payload["latency"] = latency
+
     error_routes = (
         qs.filter(status_code__gte=500)
         .values("method", "route")
@@ -472,6 +521,7 @@ def ops_metrics_summary(request):
             "window": window,
             "since": since.isoformat(),
             "until": until.isoformat(),
+            **latency_payload,
             "sampling": _sampling_payload(),
             "totals": totals_payload,
             "routeStats": route_stats,
@@ -521,6 +571,12 @@ def ops_metrics_around(request):
     since = center - timedelta(minutes=radius)
     until = center + timedelta(minutes=radius)
     qs = ApiRequestMetric.objects.filter(recorded_at__gte=since, recorded_at__lte=until)
+    method = (request.GET.get("method") or "").strip().upper()
+    route = (request.GET.get("route") or "").strip()
+    if method:
+        qs = qs.filter(method=method)
+    if route:
+        qs = qs.filter(route=route)
     if min_ms > 0:
         qs = qs.filter(duration_ms__gte=min_ms)
 

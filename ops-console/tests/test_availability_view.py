@@ -108,6 +108,111 @@ class AvailabilityViewTests(unittest.TestCase):
         self.assertEqual(result['impact']['unknownSec'], 9 * 60)
         self.assertEqual(sum(1 for item in result['timeline'] if item['kind'] == 'outage'), 2)
 
+    def deploy(self, run_id, started_minutes, finished_minutes, env='MAIN'):
+        at = lambda minutes: (self.now - timedelta(minutes=minutes)).isoformat()
+        self.db.execute("INSERT INTO deploy_runs VALUES (?, ?, 'done', 'success', ?, ?)",
+                        (env, run_id, at(started_minutes), at(finished_minutes) if finished_minutes is not None else None))
+
+    def availability_detail(self, minutes=30, env='MAIN'):
+        return monitoring.build_monitoring_availability_detail({}, env,
+            since=(self.now - timedelta(minutes=minutes)).isoformat(), until=self.now.isoformat())
+
+    def test_deploy_groups_fragmented_outage_and_offline_recovery_signals(self):
+        for minute, value in [(6, 1), (5, 0), (5 - 61 / 60, 0), (5 - 122 / 60, 0), (2, 1)]:
+            self.sample(minute, value)
+        baseline = self.availability_detail()
+        self.assertEqual(baseline['impact']['incidentCount'], 3)
+        self.deploy('run-deploy', 15, 1)
+        for i, (minute, title) in enumerate([(4.98, 'Backend offline'), (1.5, 'Backend recuperado')]):
+            self.db.execute("INSERT INTO monitor_events VALUES (?, 'MAIN', 'availability', 'info', ?, ?)",
+                            (i + 1, title, (self.now - timedelta(minutes=minute)).isoformat()))
+        result = self.availability_detail()
+        self.assertEqual(result['impact']['incidentCount'], 1)
+        self.assertEqual(result['impact']['rawIncidentCount'], 3)
+        for metric in ['estimatedDowntimeSec', 'observedSec', 'unknownSec']:
+            self.assertEqual(result['impact'][metric], baseline['impact'][metric])
+        self.assertEqual(result['health'], baseline['health'])
+        self.assertEqual(len(result['timeline']), 2)  # one incident and the deploy itself
+        incident = next(item for item in result['timeline'] if item['kind'] == 'outage')
+        self.assertEqual(incident['deploy']['runId'], 'run-deploy')
+        self.assertEqual(incident['fragmentCount'], 3)
+        self.assertEqual(len(incident['relatedSignals']), 2)
+        self.assertEqual([signal['title'] for signal in incident['relatedSignals']], ['Backend offline', 'Backend recuperado'])
+        self.assertTrue(incident['uncertain'])
+        self.assertIsNone(incident['durationSec'])
+        self.assertIsNotNone(incident['finishedAt'])
+        self.assertFalse(incident['ongoing'])
+
+    def test_deploy_does_not_absorb_preexisting_or_later_outages(self):
+        for minute, value in [(13, 1), (12, 0), (11, 1), (8, 0), (7, 1), (1, 0), (.5, 1)]:
+            self.sample(minute, value)
+        self.deploy('run-middle', 10, 5)
+        result = self.availability_detail()
+        incidents = [item for item in result['timeline'] if item['kind'] == 'outage']
+        self.assertEqual(len(incidents), 3)
+        self.assertEqual(sum(1 for item in incidents if item.get('deploy')), 1)
+
+    def test_distinct_deploys_keep_distinct_incidents(self):
+        for minute, value in [(18, 0), (17, 1), (16, 0), (15, 1), (8, 0), (7, 1), (6, 0), (5, 1)]:
+            self.sample(minute, value)
+        self.deploy('first', 20, 14)
+        self.deploy('second', 10, 4)
+        result = self.availability_detail()
+        incidents = [item for item in result['timeline'] if item['kind'] == 'outage']
+        self.assertEqual(len(incidents), 2)
+        self.assertEqual({item['deploy']['runId'] for item in incidents}, {'first', 'second'})
+        self.assertTrue(all(item['fragmentCount'] == 2 for item in incidents))
+
+    def test_other_environment_or_unfinished_run_cannot_claim_incidents(self):
+        self.sample(10, 0)
+        self.sample(8, 0)
+        self.sample(7, 1)
+        self.deploy('other-env', 20, 1, env='DEV')
+        self.deploy('unfinished', 20, None)
+        result = self.availability_detail()
+        self.assertEqual(result['impact']['incidentCount'], 2)
+        self.assertFalse(any(item.get('deploy') for item in result['timeline']))
+
+    def test_deploy_starting_before_detail_window_is_still_correlated(self):
+        self.deploy('before-window', 40, 1)
+        self.sample(10, 0)
+        self.sample(8, 0)
+        self.sample(7, 1)
+        result = self.availability_detail(minutes=15)
+        self.assertEqual(result['impact']['incidentCount'], 1)
+        self.assertEqual(result['timeline'][0]['deploy']['runId'], 'before-window')
+        self.assertFalse(any(item['kind'] == 'deploy' for item in result['timeline']))
+
+    def test_grouping_precedes_timeline_limit(self):
+        for i in range(110):
+            self.sample(i * 2 + 1, 0)
+            self.sample(i * 2 + 2, 1)
+        self.deploy('one-long-run', 230, .5)
+        result = self.availability_detail(minutes=240)
+        self.assertEqual(result['impact']['incidentCount'], 1)
+        self.assertEqual(result['impact']['rawIncidentCount'], 110)
+        incident = next(item for item in result['timeline'] if item['kind'] == 'outage')
+        self.assertEqual(incident['fragmentCount'], 110)
+        self.assertFalse(result['timelineTruncated'])
+
+    def test_new_run_stops_previous_deploy_grace_period(self):
+        self.deploy('finished', 20, 5)
+        self.deploy('new-unfinished', 4, None)
+        self.sample(3.5, 0)
+        self.sample(3, 1)
+        result = self.availability_detail()
+        incident = next(item for item in result['timeline'] if item['kind'] == 'outage')
+        self.assertNotIn('deploy', incident)
+
+    def test_confirmed_recovery_stops_post_deploy_grace_period(self):
+        self.deploy('finished', 20, 5)
+        for minute, value in [(6, 0), (5, 1), (4, 0), (3.5, 1)]:
+            self.sample(minute, value)
+        result = self.availability_detail()
+        incidents = [item for item in result['timeline'] if item['kind'] == 'outage']
+        self.assertEqual(len(incidents), 2)
+        self.assertEqual(sum(bool(item.get('deploy')) for item in incidents), 1)
+
     def test_impact_not_limited_to_timeline_and_zero_is_not_missing(self):
         for i in range(110):
             self.sample(i * 2 + 1, 0)

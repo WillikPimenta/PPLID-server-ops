@@ -43,6 +43,36 @@ class ProbeHealthTests(unittest.TestCase):
 
 
 class MonitoringConfigTests(unittest.TestCase):
+    @patch.object(sm, "_enrich_active_users_peak")
+    @patch.object(sm, "fetch_backend_api_metrics", return_value={"traffic": {"available": True}})
+    def test_api_latency_cache_isolated_by_filter_and_period(self, fetch, enrich):
+        sm._API_ROUTES_CACHE.clear()
+        common = {"include_latency": True, "method": "get", "route": "/api/example/"}
+        first = sm.build_monitoring_api_routes({}, "MAIN", "1h", **common)
+        second = sm.build_monitoring_api_routes({}, "MAIN", "1h", **common)
+        self.assertFalse(first["cacheHit"])
+        self.assertTrue(second["cacheHit"])
+        self.assertEqual(fetch.call_args.kwargs["method"], "GET")
+        self.assertEqual(fetch.call_args.kwargs["route"], "/api/example/")
+        sm.build_monitoring_api_routes({}, "MAIN", "6h", **common)
+        sm.build_monitoring_api_routes({}, "MAIN", "1h", include_latency=True, method="POST", route="/api/example/")
+        sm.build_monitoring_api_routes({}, "MAIN", "1h")
+        self.assertEqual(fetch.call_count, 4)
+        sm._API_ROUTES_CACHE.clear()
+
+    @patch.object(sm.urllib.request, "urlopen")
+    def test_api_latency_parameters_are_forwarded(self, urlopen):
+        urlopen.return_value.__enter__.return_value.read.return_value = b'{}'
+        sm.fetch_backend_api_metrics({"MAIN": {"backendPort": 8000}}, "MAIN", window="custom",
+                                     since="2026-11-18T12:00:00Z", until="2026-11-18T12:10:00Z",
+                                     include_latency=True, method="GET", route="/api/example/?a=b&c=d")
+        from urllib.parse import parse_qs, urlparse
+        params = parse_qs(urlparse(urlopen.call_args.args[0].full_url).query)
+        self.assertEqual(params["includeLatency"], ["1"])
+        self.assertEqual(params["method"], ["GET"])
+        self.assertEqual(params["route"], ["/api/example/?a=b&c=d"])
+        self.assertEqual(params["since"], ["2026-11-18T12:00:00Z"])
+
     def test_default_monitoring_settings(self) -> None:
         settings = sm.get_monitoring_settings({"logDir": "C:/PPLID/logs"})
         self.assertEqual(settings["retentionDays"], 30)

@@ -4,6 +4,23 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('../public/js/availability-detail.js', import.meta.url), 'utf8');
+test('deploy incidents keep outage fragments and offline/recovery evidence in their details', () => {
+  const { OC } = setup(async () => ({}));
+  const html = OC.renderAvailabilityDetail({ env: 'DEV', since: '2026-11-18T12:00:00Z', until: '2026-11-18T12:10:00Z',
+    data: { health: {}, timeline: [{ kind: 'outage', startedAt: '2026-11-18T12:00:00Z',
+      deploy: { runId: 'deploy-123' }, fragmentCount: 3, uncertain: true, observedDurationSec: 90,
+      fragments: [{ startedAt: '2026-11-18T12:00:00Z', observedDurationSec: 30, uncertain: true }],
+      relatedSignals: [{ startedAt: '2026-11-18T12:00:01Z', title: 'Backend offline' },
+        { startedAt: '2026-11-18T12:03:00Z', title: 'Backend recuperado' }],
+    }] } });
+  assert.match(html, /Indisponibilidade associada ao deploy/);
+  assert.match(html, /deploy-123/);
+  assert.match(html, /3 episódio\(s\) consolidado/);
+  assert.match(html, /Backend offline/);
+  assert.match(html, /Backend recuperado/);
+  assert.match(html, /Continuidade incerta/);
+  assert.match(html, /Fim não confirmado/);
+});
 function setup(fetchMonitoringJson, demo = false) {
   const classes = { add() {}, remove() {}, toggle() {} };
   const close = { focus() {}, hasAttribute: name => name === 'data-av-detail-close', closest: () => null };
