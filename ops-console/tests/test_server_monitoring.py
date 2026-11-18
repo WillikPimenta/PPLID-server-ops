@@ -45,7 +45,7 @@ class ProbeHealthTests(unittest.TestCase):
 class MonitoringConfigTests(unittest.TestCase):
     def test_default_monitoring_settings(self) -> None:
         settings = sm.get_monitoring_settings({"logDir": "C:/PPLID/logs"})
-        self.assertEqual(settings["retentionDays"], 7)
+        self.assertEqual(settings["retentionDays"], 30)
         self.assertTrue(settings["enabledCategories"]["api"])
 
 

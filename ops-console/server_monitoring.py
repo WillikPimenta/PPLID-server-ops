@@ -28,7 +28,7 @@ import server_ops
 ENV_ORDER = ("MAIN", "DEV", "HOM")
 
 _DEFAULT_MONITORING = {
-    "retentionDays": 7,
+    "retentionDays": 30,
     "collectorIntervalSec": 60,
     "pgSnapshotIntervalSec": 300,
     "defaultEnvs": list(ENV_ORDER),
@@ -189,12 +189,14 @@ def probe_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
 
 def fetch_backend_api_metrics(
     config: dict[str, Any], env_name: str, window: str = "24h", *, since: str | None = None,
-    until: str | None = None, timeout: float = 5.0
+    until: str | None = None, timeout: float | None = None
 ) -> dict[str, Any]:
     env_cfg = config.get(env_name, {})
     port = int(env_cfg.get("backendPort") or 0)
     if not port:
         return {"error": "Porta backend nao configurada"}
+    if timeout is None:
+        timeout = max(1.0, float(get_monitoring_settings(config).get("apiTimeoutSec") or 15.0))
     params = {"window": window}
     if since and until:
         params.update({"since": since, "until": until})
@@ -216,7 +218,7 @@ def fetch_backend_api_samples_around(
     *,
     radius_minutes: int = 5,
     min_ms: int = 0,
-    timeout: float = 5.0,
+    timeout: float = 15.0,
 ) -> dict[str, Any]:
     env_cfg = config.get(env_name, {})
     port = int(env_cfg.get("backendPort") or 0)
@@ -295,7 +297,7 @@ def fetch_backend_api_recent_samples(
     since: str | None = None,
     until: str | None = None,
     limit: int = 50,
-    timeout: float = 5.0,
+    timeout: float = 15.0,
 ) -> dict[str, Any]:
     env_cfg = config.get(env_name, {})
     port = int(env_cfg.get("backendPort") or 0)
@@ -329,7 +331,7 @@ def fetch_backend_api_inflight(
     config: dict[str, Any],
     env_name: str,
     *,
-    timeout: float = 3.0,
+    timeout: float = 15.0,
 ) -> dict[str, Any]:
     env_cfg = config.get(env_name, {})
     port = int(env_cfg.get("backendPort") or 0)
@@ -2288,12 +2290,12 @@ def build_monitoring_summary(
     uptime_samples = ops_store.query_monitor_series(
         env_name, "health_reachable", since=since, limit=1000, db_path=db_path
     )
-    uptime_pct = 100.0
+    uptime_pct = None
     if uptime_samples:
         ok = sum(1 for s in uptime_samples if float(s.get("value") or 0) >= 1.0)
         uptime_pct = round(100.0 * ok / len(uptime_samples), 1)
 
-    latest_reachable = 1.0
+    latest_reachable = None
     if uptime_samples:
         latest_reachable = float(uptime_samples[-1].get("value") or 0)
 
@@ -2305,7 +2307,7 @@ def build_monitoring_summary(
         "since": since,
         "health": health,
         "uptimePct": uptime_pct,
-        "latestReachable": latest_reachable >= 1.0,
+        "latestReachable": latest_reachable >= 1.0 if latest_reachable is not None else None,
         "dataFresh": data_fresh,
         "postgres": {"connections": pg_conn, "blockingLocks": pg_locks},
         "logErrors": log_errors,
@@ -2323,13 +2325,22 @@ def build_monitoring_series(
     *,
     hours: int = 168,
     center: str | None = None,
+    range_since: str | None = None,
+    range_until: str | None = None,
 ) -> dict[str, Any]:
     ops_store = _import_ops_store()
     db_path = resolve_ops_store_path(config)
     now = datetime.now(timezone.utc)
     since: str
     until: str | None = None
-    if center:
+    if range_since or range_until:
+        start_dt, end_dt = _parse_iso_dt(range_since), _parse_iso_dt(range_until)
+        if not start_dt or not end_dt or not start_dt.tzinfo or not end_dt.tzinfo or end_dt <= start_dt or end_dt - start_dt > timedelta(days=30):
+            raise ValueError('Intervalo inválido; informe início e fim com fuso e duração de até 30 dias')
+        since = start_dt.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        until = end_dt.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        hours = max(1, int(((end_dt - start_dt).total_seconds() + 3599) // 3600))
+    elif center:
         center_dt = _parse_iso_dt(center)
         if center_dt:
             since = (center_dt - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -2342,7 +2353,11 @@ def build_monitoring_series(
         until = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     # Cap leitura bruta: ~1/min, mas não varre 10k em janelas longas sem downsample antecipado
     raw_limit = min(max(int(hours) * 30 + 50, 200), 3600 if hours >= 48 else 5000)
-    points_raw = ops_store.query_monitor_series(
+    points_raw = ops_store.query_monitor_series_bucketed(
+        env_name.upper(), metric_key, since=since, until=until,
+        bucket_seconds=max(1, int((end_dt - start_dt).total_seconds() / 360) + 1),
+        limit=800, db_path=db_path,
+    ) if range_since or range_until else ops_store.query_monitor_series(
         env_name.upper(),
         metric_key,
         since=since,
@@ -2576,6 +2591,207 @@ def build_monitoring_grouped_events(
     }
 
 
+def build_monitoring_availability_current(config: dict[str, Any], env_name: str) -> dict[str, Any]:
+    """A non-blocking current-state read; historical uptime never determines this state."""
+    from health_probe import get_coordinator
+
+    coordinator = get_coordinator()
+    snapshot = coordinator.get_snapshot(config, env_name.upper(), wait=False, force=False)
+    age = snapshot.get('ageMs')
+    max_age = int(coordinator.cfg.stale_window_sec * 1000)
+    state = snapshot.get('availabilityClass') or 'unknown'
+    if snapshot.get('envDisabled') or snapshot.get('status') == 'disabled':
+        state = 'disabled'
+    elif snapshot.get('lastValidUsed') or age is None or age > max_age:
+        state = 'stale' if snapshot.get('checkedAt') and age is not None else 'unknown'
+    if state not in ('healthy', 'degraded', 'saturated', 'offline', 'disabled', 'stale'):
+        state = 'unknown'
+    return {"environment": env_name.upper(), "state": state,
+            "checkedAt": snapshot.get('checkedAt'), "ageMs": age, "maxAgeMs": max_age,
+            "probeInFlight": bool(snapshot.get('probeInFlight')),
+            "durationMs": snapshot.get('durationMs'), "backendPortUp": snapshot.get('backendPortUp'),
+            "lastFailure": snapshot.get('lastFailure')}
+
+
+def build_monitoring_availability(
+    config: dict[str, Any], env_name: str, *, window: str = "24h"
+) -> dict[str, Any]:
+    """Availability for an exact rolling window, without summing overlapping API snapshots."""
+    durations = {"24h": 24, "7d": 168, "30d": 720}
+    if window not in durations:
+        raise ValueError("invalid availability window")
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(hours=durations[window])
+    return _build_availability_window(config, env_name, start, now, window=window)
+
+
+def build_monitoring_availability_detail(
+    config: dict[str, Any], env_name: str, *, since: str, until: str
+) -> dict[str, Any]:
+    start, end = _parse_iso_dt(since), _parse_iso_dt(until)
+    if not start or not end or not start.tzinfo or not end.tzinfo:
+        raise ValueError('Informe início e fim com fuso horário')
+    start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    if end <= start or end - start > timedelta(days=30) or end > datetime.now(timezone.utc) + timedelta(seconds=5):
+        raise ValueError('O intervalo deve estar no passado e ter duração de até 30 dias')
+    return _build_availability_window(config, env_name, start, end, window='custom', include_api=False)
+
+
+def _build_availability_window(
+    config: dict[str, Any], env_name: str, start: datetime, now: datetime,
+    *, window: str, include_api: bool = True
+) -> dict[str, Any]:
+    env_name = env_name.upper()
+    since = start.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    until = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    settings = get_monitoring_settings(config)
+    interval = max(15, int(settings.get("collectorIntervalSec") or 60))
+    store = _import_ops_store()
+    db_path = resolve_ops_store_path(config)
+
+    # Read the complete window: query_monitor_series deliberately caps results at 10,000.
+    with store.get_connection(db_path) as conn:
+        samples = conn.execute(
+            "SELECT recorded_at, value FROM monitor_samples WHERE environment=? AND metric_key='health_reachable' AND recorded_at>=? AND recorded_at<? ORDER BY recorded_at, id",
+            (env_name, since, until),
+        ).fetchall()
+        previous = conn.execute(
+            "SELECT recorded_at, value FROM monitor_samples WHERE environment=? AND metric_key='health_reachable' AND recorded_at<? ORDER BY recorded_at DESC, id DESC LIMIT 1",
+            (env_name, since),
+        ).fetchone()
+        events = conn.execute(
+            "SELECT id, title, severity, recorded_at FROM monitor_events WHERE environment=? AND category IN ('availability','health') AND recorded_at>=? AND recorded_at<? ORDER BY recorded_at DESC LIMIT 101",
+            (env_name, since, until),
+        ).fetchall()
+        deploys = conn.execute(
+            "SELECT run_id, status, result, started_at, finished_at FROM deploy_runs WHERE environment=? AND started_at>=? AND started_at<? ORDER BY started_at DESC LIMIT 101",
+            (env_name, since, until),
+        ).fetchall()
+        latency_rows = conn.execute(
+            "SELECT recorded_at, value FROM monitor_samples WHERE environment=? AND metric_key='health_latency_ms' AND recorded_at>=? AND recorded_at<? ORDER BY recorded_at, id",
+            (env_name, since, until),
+        ).fetchall() if not include_api else []
+
+    points = [(dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc), float(row['value'] or 0) >= 1.0)
+              for row in samples if (dt := _parse_iso_dt(row['recorded_at'])) is not None]
+    good = sum(1 for _, ok in points if ok)
+    expected = max(1, int((now - start).total_seconds() / interval))
+    # Count occupied intervals, so repeated snapshots cannot hide missing collection.
+    slots = {int((dt - start).total_seconds() // interval) for dt, _ in points}
+    coverage = min(100.0, round(100 * len(slots) / expected, 1))
+    health = {
+        "uptimePct": round(100 * good / len(points), 2) if points else None,
+        "samples": len(points), "successful": good, "expectedSamples": expected,
+        "coveragePct": coverage, "lastSampleAt": points[-1][0].isoformat() if points else None,
+        "intervalSec": interval,
+    }
+    bucket_count = {"24h": 48, "7d": 28, "30d": 30}.get(window, 60)
+    bucket_seconds = (now - start).total_seconds() / bucket_count
+    history = [{"since": (start + timedelta(seconds=i * bucket_seconds)).isoformat(),
+                "until": (start + timedelta(seconds=(i + 1) * bucket_seconds)).isoformat(),
+                "samples": 0, "failures": 0} for i in range(bucket_count)]
+    for dt, ok in points:
+        bucket = history[min(bucket_count - 1, int((dt - start).total_seconds() / bucket_seconds))]
+        bucket['samples'] += 1
+        bucket['failures'] += int(not ok)
+
+    observations = list(points)
+    if previous and (previous_dt := _parse_iso_dt(previous['recorded_at'])):
+        previous_dt = previous_dt if previous_dt.tzinfo else previous_dt.replace(tzinfo=timezone.utc)
+        if (start - previous_dt).total_seconds() <= interval:
+            observations.insert(0, (previous_dt, float(previous['value'] or 0) >= 1.0))
+    incidents, streak = [], None
+    observed_seconds, down_seconds = 0.0, 0.0
+    for i, (dt, ok) in enumerate(observations):
+        next_dt = observations[i + 1][0] if i + 1 < len(observations) else now
+        segment_end = min(next_dt, dt + timedelta(seconds=interval), now)
+        segment_seconds = max(0.0, (segment_end - max(dt, start)).total_seconds())
+        observed_seconds += segment_seconds
+        if not ok:
+            down_seconds += segment_seconds
+        gap = i > 0 and (dt - observations[i - 1][0]).total_seconds() > interval * 2
+        if streak and gap:
+            incidents.append({**streak, 'finishedAt': None, 'ongoing': False,
+                              'durationSec': None, 'uncertain': True})
+            streak = None
+        if not ok:
+            if streak is None:
+                streak = {'kind': 'outage', 'startedAt': max(dt, start).isoformat(),
+                          'observedDurationSec': 0, 'uncertain': i == 0 or gap or dt < start}
+            streak['observedDurationSec'] += segment_seconds
+        elif streak:
+            incidents.append({**streak, 'finishedAt': dt.isoformat(), 'ongoing': False,
+                              'durationSec': None if streak['uncertain'] else int(streak['observedDurationSec'])})
+            streak = None
+    if streak:
+        fresh = bool(observations and (now - observations[-1][0]).total_seconds() <= interval * 2)
+        # A historical interval ending in failure cannot prove an incident is still active now.
+        ongoing = fresh and abs((datetime.now(timezone.utc) - now).total_seconds()) <= interval * 2
+        uncertain = streak['uncertain'] or not fresh
+        incidents.append({**streak, 'finishedAt': None, 'ongoing': ongoing,
+                          'durationSec': None if uncertain else int(streak['observedDurationSec']),
+                          'uncertain': uncertain})
+    impact = {'incidentCount': len(incidents) if observed_seconds else None, 'estimatedDowntimeSec': round(down_seconds) if observed_seconds else None,
+              'observedSec': round(observed_seconds),
+              'unknownSec': max(0, round((now - start).total_seconds() - observed_seconds)),
+              'uncertainIncidentCount': sum(1 for item in incidents if item['uncertain'])}
+    timeline = incidents[-100:] + [dict(row, kind="event", startedAt=row['recorded_at']) for row in events[:100]]
+    timeline += [dict(row, kind="deploy", startedAt=row['started_at'], finishedAt=row['finished_at']) for row in deploys[:100]]
+    timeline.sort(key=lambda row: row['startedAt'], reverse=True)
+
+    api = fetch_backend_api_metrics(config, env_name, window=window, since=since, until=until) if include_api else {'deferred': True}
+    api_result: dict[str, Any] = {"window": window, "since": since, "until": until, "checkedAt": until}
+    if not include_api:
+        api_result = {'deferred': True}
+    elif api.get('error') or api.get('reachable') is False:
+        api_result['error'] = api.get('error') or 'Fonte indisponível'
+    else:
+        totals = api.get('totals') or api.get('summary') or {}
+        count = totals.get('requests', totals.get('count'))
+        failures = totals.get('errors5xx', totals.get('errors_5xx', totals.get('status5xx')))
+        reported_since = _parse_iso_dt(api.get('since'))
+        reported_until = _parse_iso_dt(api.get('until'))
+        if reported_since and not reported_since.tzinfo:
+            reported_since = reported_since.replace(tzinfo=timezone.utc)
+        if reported_until and not reported_until.tzinfo:
+            reported_until = reported_until.replace(tzinfo=timezone.utc)
+        # Longer windows require proof that the backend honored the requested bounds.
+        verified = bool(reported_since and reported_until and
+                        abs((reported_since - start).total_seconds()) <= 300 and
+                        abs((reported_until - now).total_seconds()) <= 300)
+        api_result.update({"requests": count, "errors5xx": failures, "periodVerified": verified})
+        if window != '24h' and not verified:
+            api_result['unavailableReason'] = 'A fonte não confirmou o período solicitado'
+        elif not isinstance(count, (int, float)) or not isinstance(failures, (int, float)) or count < 0 or failures < 0 or failures > count:
+            api_result['unavailableReason'] = 'Contagens indisponíveis ou inválidas'
+        elif count == 0:
+            api_result['unavailableReason'] = 'Sem requisições no período'
+        else:
+            api_result['availabilityPct'] = round(100 * (count - failures) / count, 2)
+
+    impact['failedRequests'] = api_result.get('errors5xx') if api_result.get('availabilityPct') is not None or (api_result.get('requests') == 0 and api_result.get('periodVerified')) else None
+    latency_values = [float(row['value']) for row in latency_rows if float(row['value']) > 0]
+    latency_buckets = {}
+    for row in latency_rows:
+        if float(row['value']) <= 0:
+            continue
+        dt = _parse_iso_dt(row['recorded_at'])
+        if dt is None:
+            continue
+        dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        index = min(bucket_count - 1, max(0, int((dt - start).total_seconds() / bucket_seconds)))
+        latency_buckets.setdefault(index, []).append(float(row['value']))
+    latency_series = [{'since': history[i]['since'], 'avgMs': round(sum(values) / len(values), 1),
+                       'maxMs': max(values), 'samples': len(values)} for i, values in sorted(latency_buckets.items())]
+    return {"environment": env_name, "window": window, "since": since, "until": until,
+            "health": health, "history": history, "api": api_result, "timeline": timeline,
+            "impact": impact,
+            "latency": {'samples': len(latency_values), 'avgMs': round(sum(latency_values) / len(latency_values), 1) if latency_values else None,
+                        'maxMs': max(latency_values) if latency_values else None, 'points': latency_series},
+            "timelineTruncated": len(incidents) > 100 or len(events) > 100 or len(deploys) > 100,
+            "retentionDays": int(settings.get('retentionDays') or 30)}
+
+
 def build_monitoring_uptime_days(
     config: dict[str, Any],
     env_name: str,
@@ -2596,7 +2812,7 @@ def build_monitoring_uptime_days(
     since = since_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
     reachable = ops_store.query_monitor_series(
-        env_name, "health_reachable", since=since, limit=10000, db_path=db_path
+        env_name, "health_reachable", since=since, limit=50000, db_path=db_path
     )
     latency = ops_store.query_monitor_series(
         env_name, "health_latency_ms", since=since, limit=10000, db_path=db_path
@@ -2710,6 +2926,8 @@ def build_monitoring_uptime_days(
         "days": days,
         "since": since,
         "uptimePct": period_uptime,
+        "samples": uptime_total,
+        "expectedSamples": max(1, int((now - since_dt).total_seconds() / max(15, int(settings.get("collectorIntervalSec") or 60)))),
         "dayBars": day_list,
     }
 
@@ -3156,7 +3374,8 @@ def build_monitoring_api_routes(
         "timingMs": round((time.perf_counter() - t0) * 1000, 1),
         **data,
     }
-    _API_ROUTES_CACHE[cache_key] = (now, result)
+    if not result.get("error") and result.get("reachable") is not False:
+        _API_ROUTES_CACHE[cache_key] = (now, result)
     return result
 
 
@@ -3474,7 +3693,7 @@ def build_monitoring_summary_lite(
     *,
     window_hours: int = 24,
     include_api: bool = False,
-    api_timeout: float = 2.0,
+    api_timeout: float | None = None,
 ) -> dict[str, Any]:
     """Resumo rápido: SQLite only, sem consultas PG de sync."""
     env_name = env_name.upper()
@@ -3499,8 +3718,8 @@ def build_monitoring_summary_lite(
     reach_agg = ops_store.aggregate_monitor_samples(
         env_name, "health_reachable", since=since, db_path=db_path
     )
-    uptime_pct = round(float(reach_agg.get("avg") or 0) * 100, 1)
-    latest_reachable = float(reach_agg.get("latest") or 0) >= 1.0
+    uptime_pct = round(float(reach_agg["avg"]) * 100, 1) if reach_agg.get("count") else None
+    latest_reachable = float(reach_agg["latest"]) >= 1.0 if reach_agg.get("count") else None
 
     api_metrics: dict[str, Any] = {"deferred": True}
     if include_api:
@@ -4172,7 +4391,6 @@ def build_monitoring_dashboard(
                     config,
                     env,
                     include_api=include_api,
-                    api_timeout=2.0,
                 )
                 futures_map[fut] = f"summary:{env}"
 
@@ -4220,6 +4438,7 @@ def build_monitoring_dashboard(
                 data = future.result()
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("monitoring dashboard task failed (%s): %s", kind, exc)
+                result["error"] = f"Falha na consulta {kind}: {exc}"
                 continue
             if kind.startswith("summary:"):
                 env = kind.split(":", 1)[1]
@@ -4264,5 +4483,6 @@ def build_monitoring_dashboard(
         dashboard_timing_ms=result["timingMs"],
     )
 
-    _DASHBOARD_CACHE[cache_key] = (now, result)
+    if not result.get("error"):
+        _DASHBOARD_CACHE[cache_key] = (now, result)
     return result

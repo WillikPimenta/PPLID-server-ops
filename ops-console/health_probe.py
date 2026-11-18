@@ -60,7 +60,7 @@ def disabled_env_snapshot(env_name: str) -> dict[str, Any]:
 
 # Tunables (override via configure() or env later).
 DEFAULT_CACHE_TTL_SEC = 5.0
-DEFAULT_PROBE_TIMEOUT_SEC = 1.0
+DEFAULT_PROBE_TIMEOUT_SEC = 3.0
 DEFAULT_BACKOFF_INITIAL_SEC = 5.0
 DEFAULT_BACKOFF_MAX_SEC = 60.0
 DEFAULT_STALE_WINDOW_SEC = 120.0

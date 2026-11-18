@@ -14,13 +14,27 @@
         OC._homeHostFetchedAt = Date.now();
         if (OC.currentRoute?.view === "deploy" && OC.lastOverview) OC.renderDeployHomeShell?.(OC.lastOverview);
       })
-      .catch(() => {})
+      .catch(() => {
+        const previous = OC.lastHostSummary || {};
+        OC.lastHostSummary = { ...previous, collector: { ...(previous.collector || {}), status: "stale" } };
+        OC._homeHostFetchedAt = Date.now();
+        if (OC.currentRoute?.view === "deploy" && OC.lastOverview) OC.renderDeployHomeShell?.(OC.lastOverview);
+      })
       .finally(() => { OC._homeHostInFlight = null; });
     return OC._homeHostInFlight;
   };
 
   async function ensureDeployRuntime(feature) {
-    await OC.ensureFeature?.(feature || "deployDetails");
+    try {
+      await OC.ensureFeature?.(feature || "deployDetails");
+    } catch (error) {
+      const now = Date.now();
+      if (feature === "deployDetails" || now - (OC._deployRuntimeErrorAt || 0) >= 30000) {
+        OC.showToast?.(`Não foi possível carregar os detalhes de deploy: ${error.message || error}`, "error");
+        OC._deployRuntimeErrorAt = now;
+      }
+      throw error;
+    }
     if (OC.bindDrawer && !OC._drawerEventsBound) {
       OC.bindDrawer();
       OC._drawerEventsBound = true;
@@ -369,6 +383,8 @@
 
   OC.bindEnvCardEvents = function bindEnvCardEvents(overview) {
     document.querySelectorAll("[data-card-toggle]").forEach((btn) => {
+      if (btn.dataset.cardToggleBound) return;
+      btn.dataset.cardToggleBound = "1";
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
         const env = btn.getAttribute("data-env");
@@ -376,31 +392,36 @@
         if (mode === "config") {
           OC.toggleEnvConfigExpand(env);
         } else if (mode === "history") {
-          await ensureDeployRuntime("deployDetails");
-          OC.openEnvHistoryDrawer(env, overview, btn);
+          try {
+            await ensureDeployRuntime("deployDetails");
+            OC.openEnvHistoryDrawer(env, OC.lastOverview || overview, btn);
+          } catch { /* ensureDeployRuntime already reports the error. */ }
         }
       });
     });
 
     document.querySelectorAll("[data-card-action]").forEach((btn) => {
+      if (btn.dataset.cardActionBound) return;
+      btn.dataset.cardActionBound = "1";
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
         const action = btn.getAttribute("data-card-action");
         const env = btn.getAttribute("data-env");
-        btn.disabled = true;
-        if (action === "rollback") {
-          await OC.runRollback(env, "", (err, result) => OC.afterActionRefresh(err, result, btn));
-        } else if (action === "redeploy") {
-          await OC.runRedeploy(env, "", (err, result) => OC.afterActionRefresh(err, result, btn));
-        } else if (action === "clear-block") {
-          await OC.runClearBlockRedeploy(env, (err, result) => OC.afterActionRefresh(err, result, btn));
-        } else if (action === "cancel-deploy") {
-          await OC.runCancelDeploy(env, (err, result) => OC.afterActionRefresh(err, result, btn));
-        } else if (action === "disable-env") {
-          await OC.runDisableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
-        } else if (action === "enable-env") {
-          await OC.runEnableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
-        }
+        await OC.withActionButton(btn, async () => {
+          if (action === "rollback") {
+            await OC.runRollback(env, "", (err, result) => OC.afterActionRefresh(err, result, btn));
+          } else if (action === "redeploy") {
+            await OC.runRedeploy(env, "", (err, result) => OC.afterActionRefresh(err, result, btn));
+          } else if (action === "clear-block") {
+            await OC.runClearBlockRedeploy(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+          } else if (action === "cancel-deploy") {
+            await OC.runCancelDeploy(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+          } else if (action === "disable-env") {
+            await OC.runDisableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+          } else if (action === "enable-env") {
+            await OC.runEnableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+          }
+        });
       });
     });
   };
@@ -736,7 +757,7 @@
     list.querySelectorAll("[data-copy-sha]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const sha = btn.getAttribute("data-copy-sha");
-        if (sha && navigator.clipboard) navigator.clipboard.writeText(sha).catch(() => {});
+        OC.copyText(sha, { button: btn, successMessage: "SHA copiado." });
         btn.closest(".action-menu")?.classList.add("hidden");
       });
     });
@@ -747,11 +768,13 @@
         const env = btn.getAttribute("data-env");
         const sha = btn.getAttribute("data-sha");
         btn.closest(".action-menu")?.classList.add("hidden");
-        if (action === "rollback") {
-          await OC.runRollback(env, sha, (err, result) => OC.afterActionRefresh(err, result));
-        } else if (action === "redeploy") {
-          await OC.runRedeploy(env, sha, (err, result) => OC.afterActionRefresh(err, result));
-        }
+        await OC.withActionButton(btn, async () => {
+          if (action === "rollback") {
+            await OC.runRollback(env, sha, (err, result) => OC.afterActionRefresh(err, result));
+          } else if (action === "redeploy") {
+            await OC.runRedeploy(env, sha, (err, result) => OC.afterActionRefresh(err, result));
+          }
+        });
       });
     });
 
@@ -820,8 +843,8 @@
       const occurredTone = kpis.occurredCount > 0 ? "warn" : "ok";
       const host = OC.lastHostSummary;
       const hostThresholds = host?.thresholds || {};
-      const cpu = Number(host?.cpu?.usedPct);
-      const memory = Number(host?.memory?.usedPct);
+      const cpu = host?.cpu?.usedPct == null ? NaN : Number(host.cpu.usedPct);
+      const memory = host?.memory?.usedPct == null ? NaN : Number(host.memory.usedPct);
       const hostTone = (value, warn, critical) => {
         if (!Number.isFinite(value)) return "info";
         if (value >= Number(critical || 95)) return "critical";
@@ -956,13 +979,13 @@
     document.getElementById("dashboard")?.classList.toggle("hidden", !visible);
   };
 
-  OC.setGlobalError = function setGlobalError(message) {
+  OC.setGlobalError = function setGlobalError(message, options = {}) {
     const el = document.getElementById("global-error");
     if (!el) return;
     if (message) {
       el.textContent = message;
       el.classList.remove("hidden");
-      OC.setDashboardVisible(false);
+      if (!options.preserveDashboard) OC.setDashboardVisible(false);
     } else {
       el.classList.add("hidden");
     }

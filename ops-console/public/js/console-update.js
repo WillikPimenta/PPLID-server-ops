@@ -14,13 +14,14 @@
   // O endpoint executa a verificacao Git antes de iniciar o worker. Em PCs
   // com rede/DNS/credencial mais lentos, o timeout global de 8s cancela a
   // requisicao embora o servidor ainda esteja processando a atualizacao.
-  const APPLY_REQUEST_TIMEOUT_MS = 120000;
+  const APPLY_REQUEST_TIMEOUT_MS = 150000;
 
   OC.consoleUpdateState = {
     status: null,
     busy: false,
     uiState: "idle",
     lastCheckedAt: null,
+    lastStatusAttemptAt: 0,
     lastError: null,
     dismissedErrorKey: null,
     activityStartedAt: null,
@@ -360,24 +361,7 @@
   async function copyUpdateError(button) {
     const raw = document.getElementById("console-update-error-raw");
     const text = raw?.value || OC.consoleUpdateState.lastError?.message || "";
-    try {
-      await navigator.clipboard.writeText(text);
-      if (button) {
-        const original = button.textContent;
-        button.textContent = "Copiado";
-        setTimeout(() => {
-          if (button.isConnected) button.textContent = original;
-        }, 1400);
-      }
-      OC.showToast?.("Erro copiado", "success");
-    } catch {
-      if (raw) {
-        raw.hidden = false;
-        raw.focus();
-        raw.select();
-      }
-      OC.showToast?.("Não foi possível copiar automaticamente. Selecione o texto do erro.", "warn");
-    }
+    await OC.copyText(text, { button, successMessage: "Erro copiado." });
   }
 
   function bindConsoleUpdateButton() {
@@ -542,7 +526,8 @@
     }
 
     const url = progressOnly ? `${STATUS_URL}?progress=1` : STATUS_URL;
-    const timeoutMs = progressOnly ? 15000 : 120000;
+    const timeoutMs = progressOnly ? 15000 : 150000;
+    if (!progressOnly) OC.consoleUpdateState.lastStatusAttemptAt = Date.now();
     const request = OC.fetchJson(url, { timeoutMs })
       .then((data) => {
         // Progress polls must not wipe updateAvailable from a prior full check.
@@ -635,7 +620,7 @@
     };
   }
 
-  async function waitForConsoleRestart() {
+  async function waitForConsoleRestart(previousInstanceId = null) {
     const started = Date.now();
     let sawDown = false;
     beginActivity("reconnecting", "Reiniciando o console…");
@@ -643,8 +628,9 @@
     while (Date.now() - started < RESTART_TIMEOUT_MS) {
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
       try {
-        await OC.fetchJson("/api/v1/auth/status", { timeoutMs: 3000 });
+        const health = await OC.fetchJson("/api/v1/auth/status", { timeoutMs: 3000 });
         if (sawDown) return true;
+        if (previousInstanceId && health?.serverInstanceId && health.serverInstanceId !== previousInstanceId) return true;
         // Ainda não reiniciou: servidor continua respondendo.
         OC.consoleUpdateState.activityLabel =
           "Aguardando reinício do processo (servidor ainda ativo)…";
@@ -690,7 +676,7 @@
       if (OC.consoleUpdateState.statusInFlight) {
         return OC.consoleUpdateState.statusInFlight;
       }
-      const lastMs = Date.parse(OC.consoleUpdateState.lastCheckedAt || "");
+      const lastMs = Number(OC.consoleUpdateState.lastStatusAttemptAt || 0);
       if (
         Number.isFinite(lastMs) &&
         Date.now() - lastMs < SILENT_STATUS_MIN_INTERVAL_MS &&
@@ -814,6 +800,10 @@
       beginActivity("applying", `Solicitando atualização ${fromSha} → ${toSha}…`);
       const applyStartedAt = new Date().toISOString();
       OC.consoleUpdateState.applyStartedAt = applyStartedAt;
+      let previousInstanceId = null;
+      try {
+        previousInstanceId = (await OC.fetchJson('/api/v1/auth/status', { timeoutMs: 3000 }))?.serverInstanceId || null;
+      } catch { /* A lost connection is handled by the apply request. */ }
 
       let result;
       try {
@@ -821,14 +811,23 @@
           timeoutMs: APPLY_REQUEST_TIMEOUT_MS,
         });
       } catch (err) {
-        setLastError(explainUpdateError(err, OC.consoleUpdateState.status), {
-          code: err.code,
-          timedOut: err.timedOut,
-          detail: err.message,
-        });
-        endActivity();
-        renderConsoleUpdateBar(OC.consoleUpdateState.status, "idle");
-        return;
+        // The worker may have started even when its acceptance response was lost.
+        let progress = null;
+        if (err.timedOut || err.code === "aborted" || /fetch|network/i.test(err.message || "")) {
+          try { progress = await OC.fetchConsoleUpdateStatus({ progressOnly: true }); } catch { /* Keep the original error. */ }
+        }
+        const workerStartedAt = progress?.lastResult?.startedAt;
+        const isCurrent = workerStartedAt && Date.parse(workerStartedAt) >= Date.parse(applyStartedAt) - 1000;
+        if (progress?.inProgress && isCurrent) {
+          result = { ok: true, accepted: true, restarting: true, startedAt: workerStartedAt };
+        } else {
+          setLastError(explainUpdateError(err, progress || OC.consoleUpdateState.status), {
+            code: err.code, timedOut: err.timedOut, detail: err.message,
+          });
+          endActivity();
+          renderConsoleUpdateBar(progress || OC.consoleUpdateState.status, "idle");
+          return;
+        }
       }
 
       if (!result?.ok) {
@@ -852,14 +851,11 @@
         return;
       }
 
-      const wait = await waitForApplyResult(result.startedAt || applyStartedAt, toSha);
+      let wait = await waitForApplyResult(result.startedAt || applyStartedAt, toSha);
+      while (wait.timedOut && wait.status?.inProgress) {
+        wait = await waitForApplyResult(result.startedAt || applyStartedAt, toSha);
+      }
       if (wait.timedOut && !isFinalApplyResult(wait.result, applyStartedAt)) {
-        if (wait.status?.inProgress) {
-          OC.consoleUpdateState.activityLabel =
-            "A atualização continua em andamento. Aguarde o console concluir e atualize esta tela…";
-          renderConsoleUpdateBar(wait.status, "applying");
-          return;
-        }
         setLastError(
           "A atualização não confirmou a conclusão dentro do tempo esperado. Verifique o status antes de tentar novamente.",
           {
@@ -882,7 +878,7 @@
         return;
       }
 
-      const restartState = await waitForConsoleRestart();
+      const restartState = await waitForConsoleRestart(previousInstanceId);
       if (restartState === true) {
         OC.showToast?.("Console reiniciado. Recarregando…", "success");
         window.location.reload();

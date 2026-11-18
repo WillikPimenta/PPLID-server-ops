@@ -1,5 +1,44 @@
 # Console de Operações PPLID
 
+Na Visão geral, o histórico de deploy oferece **Copiar log completo**, incluindo
+as linhas dos arquivos e da base local, com padrões reconhecidos de credenciais ocultados. Cópias
+limitadas a 5 milhões de caracteres ou com fontes indisponíveis são sinalizadas.
+Em navegadores sem acesso automático à área de transferência, o conteúdo fica
+selecionado para cópia manual.
+
+A tela consulta periodicamente o estado dos ambientes e verifica novas versões
+do console. Quando uma consulta falha, mantém a última visão disponível com o
+horário correspondente. A instalação de uma nova versão continua sendo iniciada
+após confirmação na interface.
+
+## Disponibilidade
+
+A tela **Disponibilidade**, em `/monitoring/availability`, apresenta a disponibilidade de requisições e o health check por ambiente,
+com períodos de 24 horas, 7 dias e 30 dias. A cobertura indica os intervalos de
+coleta observados; lacunas e histórico ainda em formação aparecem na tela.
+O botão **Ver demonstração** apresenta cenários simulados de MAIN, DEV e HOM,
+com incidentes, deploys e lacunas. A demonstração é isolada dos dados reais e
+não grava amostras no banco. Use **Voltar aos dados reais** para encerrar.
+O estado atual é consultado separadamente do percentual histórico e informa
+quando falta confirmação recente. O impacto por ambiente conta episódios de
+sondagens com falha, erros 5xx e tempo estimado de indisponibilidade. Cada
+sondagem cobre no máximo um intervalo de coleta; lacunas aparecem como tempo
+sem cobertura e não entram no tempo indisponível.
+
+Clique em uma faixa do histórico para investigar o intervalo no painel lateral.
+Sondagens, cobertura, latência e eventos locais são carregados independentemente
+das métricas de API. Os links para APIs e logs preservam ambiente, início e fim.
+Na demonstração, o painel usa somente dados simulados e o seletor de cenários
+permite validar queda em andamento, sobrecarga, degradação e ausência de dados.
+O SLI de requisições conta respostas não 5xx registradas pelo backend e não mede
+falhas que ocorrem antes da chegada ao backend. Para 7 e 30 dias, o percentual
+somente é exibido quando a fonte confirma os limites da janela consultada.
+
+O monitoramento retém 30 dias por padrão. Para definir outro prazo ou o timeout
+das métricas de API, configure `monitoring.retentionDays` e
+`monitoring.apiTimeoutSec` em `machine.config.json`. A ampliação da retenção
+não recupera amostras que já tenham sido removidas.
+
 Painel web para monitorar os ambientes MAIN, DEV e HOM (deploy, branches, links e health em tempo real).
 
 Este codigo vive em **PPLID-server-ops** (`C:\PPLID\ops\ops-console`), separado dos repos PPLID por branch.

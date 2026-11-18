@@ -378,7 +378,9 @@ function scheduleNextRefresh(ms) {
 }
 
 function startAutoRefresh() {
-  stopAutoRefresh();
+  // Restart the overview timer without interrupting the independent deploy-log poller.
+  if (OC.refreshTimer) clearTimeout(OC.refreshTimer);
+  OC.refreshTimer = null;
   if (OC.authState.locked || OC.refreshPaused || document.hidden || !OC.isDeployView?.()) return;
   scheduleNextRefresh(getRefreshInterval());
 }
@@ -446,7 +448,7 @@ OC.refresh = async function refresh(options = {}) {
 
       // Always prefer lite for auto/boot; full only when explicitly requested.
       const endpoint = full ? "/api/v1/overview" : "/api/v1/overview-lite";
-      const data = await OC.fetchJson(endpoint, { signal });
+      const data = await OC.fetchJson(endpoint, { signal, timeoutMs: full ? 45000 : 20000 });
       if (generation !== OC._refreshGeneration) return; // stale response
 
       if (!full && OC.lastOverview) {
@@ -490,13 +492,15 @@ OC.refresh = async function refresh(options = {}) {
       OC.syncDeployProgress?.(OC.lastOverview);
       OC.restartAutoRefreshIfNeeded?.();
     } catch (err) {
-      if (err.code === "aborted") return;
+      if (err.code === "aborted" && !err.timedOut) return;
       if (err.code === 401) {
         OC.applyAuthState({ locked: true });
         return;
       }
-      OC.setGlobalError(`Erro ao carregar: ${err.message}`);
-      if (statusEl) statusEl.textContent = "Falha na atualização";
+      const last = OC.lastOverview?.generatedAt ? OC.formatDate(OC.lastOverview.generatedAt) : null;
+      OC.setGlobalError(`Falha na atualização: ${err.message}${last ? ` · Exibindo dados de ${last}.` : ""}`, { preserveDashboard: Boolean(OC.lastOverview) });
+      if (OC.lastOverview && OC.isDeployView?.()) OC.setDashboardVisible?.(true);
+      if (statusEl) statusEl.textContent = last ? `Falha na atualização · últimos dados: ${last}` : "Falha na atualização";
     }
   };
 

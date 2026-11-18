@@ -9,6 +9,48 @@ window.OpsConsole.DEPLOY_REFRESH_MS = 2000;
 window.OpsConsole.FETCH_TIMEOUT_MS = 8000;
 window.OpsConsole.THEME_STORAGE_KEY = "pplid-theme";
 
+// Clipboard API requires a secure context; LAN installations frequently use HTTP.
+window.OpsConsole.copyText = async function copyText(text, options = {}) {
+  const OC = window.OpsConsole;
+  const value = String(text ?? "");
+  if (!value) {
+    OC.showToast?.("Não há conteúdo para copiar.", "warn");
+    return false;
+  }
+  const button = options.button;
+  let copied = false;
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      copied = true;
+    }
+  } catch { /* Try the browser's selection-based clipboard path below. */ }
+  let textarea;
+  if (!copied) {
+    textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.readOnly = true;
+    textarea.setAttribute("aria-label", "Conteúdo para copiar");
+    textarea.className = "ops-copy-fallback";
+    (button?.parentElement || document.body).appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try { copied = Boolean(document.execCommand?.("copy")); } catch { copied = false; }
+  }
+  if (copied) {
+    textarea?.remove();
+    if (button) {
+      const label = button.textContent;
+      button.textContent = "Copiado";
+      setTimeout(() => { if (button.isConnected) button.textContent = label; }, 1600);
+    }
+    OC.showToast?.(options.successMessage || "Conteúdo copiado.", "success");
+    return true;
+  }
+  OC.showToast?.("Não foi possível copiar automaticamente. Use Ctrl+C no texto selecionado.", "warn");
+  return false;
+};
+
 window.OpsConsole.escapeHtml = function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = String(text ?? "");

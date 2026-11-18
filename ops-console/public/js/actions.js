@@ -3,12 +3,23 @@
   window.OpsConsole = window.OpsConsole || {};
   const OC = window.OpsConsole;
 
+  const inFlightActions = new Set();
+  const actionTimeouts = { rollback: 315000, redeploy: 240000, 'clear-block': 240000,
+    cancel: 135000, restart: 90000, disable: 150000, enable: 330000, promote: 240000 };
   OC.postAction = async function postAction(url, body = {}, options = {}) {
-    return OC.fetchJson(url, {
-      method: "POST",
-      body: JSON.stringify(body),
-      ...options,
-    });
+    if (inFlightActions.has(url)) throw new Error('Esta ação já está em andamento. Aguarde o resultado.');
+    const action = String(url).match(/^\/api\/v1\/actions\/([^/]+)/)?.[1];
+    inFlightActions.add(url);
+    try {
+      return await OC.fetchJson(url, {
+        method: "POST",
+        body: JSON.stringify(body),
+        timeoutMs: actionTimeouts[action] || OC.FETCH_TIMEOUT_MS || 8000,
+        ...options,
+      });
+    } finally {
+      inFlightActions.delete(url);
+    }
   };
 
   OC.putJson = async function putJson(url, body = {}) {
@@ -31,7 +42,7 @@
       if (onDone) onDone(null, result);
       return result;
     } catch (err) {
-      if (onDone) onDone(err);
+      if (onDone) { onDone(err); return; }
       throw err;
     }
   };
@@ -47,7 +58,7 @@
       if (onDone) onDone(null, result);
       return result;
     } catch (err) {
-      if (onDone) onDone(err);
+      if (onDone) { onDone(err); return; }
       throw err;
     }
   };
@@ -60,7 +71,7 @@
       if (onDone) onDone(null, result);
       return result;
     } catch (err) {
-      if (onDone) onDone(err);
+      if (onDone) { onDone(err); return; }
       throw err;
     }
   };
@@ -76,7 +87,7 @@
       if (onDone) onDone(null, result);
       return result;
     } catch (err) {
-      if (onDone) onDone(err);
+      if (onDone) { onDone(err); return; }
       throw err;
     }
   };
@@ -88,7 +99,7 @@
       if (onDone) onDone(null, result);
       return result;
     } catch (err) {
-      if (onDone) onDone(err);
+      if (onDone) { onDone(err); return; }
       throw err;
     }
   };
@@ -109,6 +120,52 @@
     setTimeout(() => el.remove(), 6000);
   };
 
+  const deployTrackers = new Map();
+  OC.trackAcceptedDeploy = function trackAcceptedDeploy(env, runId) {
+    if (!env || !runId || deployTrackers.has(runId)) return;
+    const started = Date.now();
+    let warned = false;
+    const schedule = delay => deployTrackers.set(runId, setTimeout(poll, delay));
+    const finish = () => deployTrackers.delete(runId);
+    const poll = async () => {
+      if (Date.now() - started > 45 * 60 * 1000) {
+        finish();
+        OC.showToast('Acompanhamento do deploy expirou. Consulte o histórico antes de tentar novamente.', 'warn');
+        return;
+      }
+      if (OC.authState?.locked) { schedule(15000); return; }
+      try {
+        const status = await OC.fetchJson(`/api/v1/actions/deploy-status/${encodeURIComponent(env)}?runId=${encodeURIComponent(runId)}`, { timeoutMs: 10000 });
+        warned = false;
+        if (status.state === 'failed') {
+          finish();
+          OC.showToast(`Deploy ${env} não concluiu: ${status.error || 'verifique os logs.'}`, 'error');
+          OC.refresh?.();
+          return;
+        }
+        if (status.state === 'completed') {
+          finish();
+          OC.showToast(`Pipeline ${env} concluído.`, 'success');
+          OC.refresh?.();
+          return;
+        }
+        if (status.state === 'unknown') {
+          finish();
+          OC.showToast(`Não foi possível confirmar o pipeline ${env}. Consulte o histórico de deploy.`, 'warn');
+          return;
+        }
+        schedule(5000);
+      } catch (error) {
+        if (!warned) {
+          OC.showToast(`Acompanhamento do deploy ${env} indisponível; tentando novamente.`, 'warn');
+          warned = true;
+        }
+        schedule(15000);
+      }
+    };
+    schedule(5000);
+  };
+
   OC.runDisableEnv = async function runDisableEnv(env, onDone) {
     const strong =
       env === "MAIN"
@@ -120,7 +177,7 @@
       if (onDone) onDone(null, result);
       return result;
     } catch (err) {
-      if (onDone) onDone(err);
+      if (onDone) { onDone(err); return; }
       throw err;
     }
   };
@@ -132,7 +189,7 @@
       if (onDone) onDone(null, result);
       return result;
     } catch (err) {
-      if (onDone) onDone(err);
+      if (onDone) { onDone(err); return; }
       throw err;
     }
   };
@@ -155,7 +212,7 @@
       if (onDone) onDone(null, result);
       return result;
     } catch (err) {
-      if (onDone) onDone(err);
+      if (onDone) { onDone(err); return; }
       throw err;
     }
   };
@@ -166,7 +223,8 @@
       btn.classList.remove("is-loading");
     }
     if (err) {
-      window.alert(err.message || "Falha na acao");
+      const detail = err.timedOut ? '\n\nA operação pode continuar no servidor. Confira o status antes de tentar novamente.' : '';
+      window.alert((err.message || "Falha na acao") + detail);
       return;
     }
     if (result && !result.ok) {
@@ -176,10 +234,11 @@
     }
     if (result?.accepted && result.environment) {
       OC.showToast(
-        `Deploy ${result.environment} iniciado — SHA ${result.targetSha || "?"}, run ${result.runId || "?"}`,
+        `Solicitação de deploy ${result.environment} aceita — SHA ${result.targetSha || "?"}, run ${result.runId || "?"}. Acompanhe o pipeline.`,
         "success"
       );
       OC.focusEnvCard?.(result.environment);
+      OC.trackAcceptedDeploy(result.environment, result.runId);
     } else if (result?.ok && result.action === "cancel") {
       OC.showToast(result.message || `Deploy ${result.environment || ""} cancelado.`, "success");
       if (result.environment) OC.focusEnvCard?.(result.environment);
@@ -198,7 +257,9 @@
       else if (svc === "all" && result.portListening) {
         portOk = result.portListening.frontend !== false && result.portListening.backend !== false;
       }
-      if (portOk) {
+      if (!svc) {
+        OC.showToast(result.message || "Ação concluída.", "success");
+      } else if (portOk) {
         OC.showToast("Serviço reiniciado e porta respondendo.", "success");
       } else {
         OC.showToast("Restart concluído, mas a porta ainda não responde — veja logs de runtime.", "warn");
@@ -211,16 +272,21 @@
     OC.refresh?.();
   };
 
+  OC.withActionButton = async function withActionButton(btn, handler) {
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add("is-loading");
+    try {
+      return await handler();
+    } catch (err) {
+      OC.afterActionRefresh(err, null, btn);
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("is-loading");
+    }
+  };
+
   OC.bindActionButton = function bindActionButton(btn, handler) {
-    btn.addEventListener("click", async () => {
-      btn.disabled = true;
-      btn.classList.add("is-loading");
-      try {
-        await handler();
-      } finally {
-        btn.disabled = false;
-        btn.classList.remove("is-loading");
-      }
-    });
+    btn.addEventListener("click", () => OC.withActionButton(btn, handler));
   };
 })();
