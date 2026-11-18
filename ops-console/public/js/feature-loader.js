@@ -9,13 +9,13 @@
     database: ["/js/database-explorer.js"],
     automations: ["/js/automations-config.js?v=20260910b", "/js/automations.js?v=20260910b"],
     host: ["/js/ops-perf.js", "/js/host.js"],
-    monitoring: ["/js/ops-perf.js", "/js/monitoring.js?v=20260923-monitoring", "/js/monitor-drawer.js"],
-    deployDetails: ["/js/deploy-drawer.js", "/js/filters.js", "/js/drawer.js"],
+    monitoring: ["/js/ops-perf.js", "/js/monitoring.js?v=20261118-availability-detail", "/js/availability-detail.js?v=20261118-availability-detail", "/js/monitor-drawer.js"],
+    deployDetails: ["/js/deploy-drawer.js?v=20261118-overview", "/js/filters.js", "/js/drawer.js?v=20261118-overview"],
     deployProgress: [
-      "/js/deploy-progress.js",
-      "/js/deploy-drawer.js",
+      "/js/deploy-progress.js?v=20261118-overview",
+      "/js/deploy-drawer.js?v=20261118-overview",
       "/js/filters.js",
-      "/js/drawer.js",
+      "/js/drawer.js?v=20261118-overview",
     ],
   };
 
@@ -34,11 +34,18 @@
         script.dataset.loaded = "true";
         resolve();
       }, { once: true });
-      script.addEventListener("error", () => reject(new Error(`Falha ao carregar ${src}`)), { once: true });
+      script.addEventListener("error", () => {
+        script.remove?.();
+        reject(new Error(`Falha ao carregar ${src}`));
+      }, { once: true });
       if (!existing) document.body.appendChild(script);
     });
-    scripts.set(src, promise);
-    return promise;
+    const tracked = promise.catch(error => {
+      if (scripts.get(src) === tracked) scripts.delete(src);
+      throw error;
+    });
+    scripts.set(src, tracked);
+    return tracked;
   }
 
   OC.ensureFeature = function ensureFeature(name) {
@@ -57,6 +64,9 @@
       if (required && typeof OC[required] !== "function") {
         throw new Error(`A funcionalidade ${name} foi carregada, mas nao foi inicializada corretamente.`);
       }
+    }).catch(error => {
+      if (features.get(name) === promise) features.delete(name);
+      throw error;
     });
     features.set(name, promise);
     return promise;

@@ -111,6 +111,8 @@ def _resolve_origin_branch_sha(base_dir: Path, env_name: str) -> tuple[str, str]
             text=True,
             timeout=60,
         )
+        if fetch_result.returncode != 0:
+            return "", ""
         proc_full = _run_hidden(
             _git_command(mirror, "rev-parse", ref),
             capture_output=True,
@@ -161,7 +163,7 @@ def _resolve_sha_in_mirror(
         return "", ""
     mirror = base_dir / "deploy" / env_name / "mirror"
     if not mirror.is_dir():
-        return sha, sha if len(sha) >= 40 else sha
+        return sha, ""
     try:
         if fetch:
             _run_hidden(
@@ -177,7 +179,7 @@ def _resolve_sha_in_mirror(
             timeout=15,
         )
         if proc.returncode != 0:
-            return sha, sha if len(sha) >= 40 else sha
+            return sha, ""
         full = proc.stdout.strip()
         short_proc = _run_hidden(
             _git_command(mirror, "rev-parse", "--short", full),
@@ -188,7 +190,7 @@ def _resolve_sha_in_mirror(
         short = short_proc.stdout.strip() if short_proc.returncode == 0 else full[:7]
         return short, full
     except (OSError, subprocess.TimeoutExpired):
-        return sha, sha if len(sha) >= 40 else sha
+        return sha, ""
 
 
 def get_base_dir(config: dict[str, Any]) -> Path:
@@ -322,7 +324,10 @@ def run_powershell_async(
     run_id = secrets.token_hex(8)
 
     def _worker() -> None:
-        result = run_powershell(script, args, timeout=timeout, extra_env=extra_env)
+        try:
+            result = run_powershell(script, args, timeout=timeout, extra_env=extra_env)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "error": str(exc), "exitCode": -1}
         if on_complete:
             on_complete(result)
 
@@ -514,6 +519,18 @@ def action_cancel_deploy(
     }
 
 
+_REDEPLOY_JOBS: dict[tuple[str, str], dict[str, Any]] = {}
+_REDEPLOY_JOBS_LOCK = threading.Lock()
+_REDEPLOY_JOB_TTL_SEC = 4 * 3600
+_REDEPLOY_PENDING_ENVS: set[str] = set()
+
+
+def get_redeploy_job(env_name: str, run_id: str) -> dict[str, Any]:
+    with _REDEPLOY_JOBS_LOCK:
+        job = _REDEPLOY_JOBS.get((env_name.upper(), run_id))
+        return dict(job) if job else {'ok': False, 'state': 'unknown', 'environment': env_name.upper(), 'runId': run_id}
+
+
 def action_redeploy(
     config: dict[str, Any],
     env_name: str,
@@ -523,6 +540,33 @@ def action_redeploy(
     trigger: str = "console-redeploy",
     async_mode: bool = False,
     promote_source: str = "",
+    clear_block_before_start: bool = False,
+) -> dict[str, Any]:
+    env_name = env_name.upper()
+    with _REDEPLOY_JOBS_LOCK:
+        if env_name in _REDEPLOY_PENDING_ENVS:
+            return {'ok': False, 'error': 'Já existe uma solicitação de deploy em andamento neste ambiente.'}
+        _REDEPLOY_PENDING_ENVS.add(env_name)
+    try:
+        result = _action_redeploy_impl(
+            config, env_name, target_sha=target_sha, target_sha_full=target_sha_full,
+            trigger=trigger, async_mode=async_mode, promote_source=promote_source,
+            clear_block_before_start=clear_block_before_start,
+        )
+    except Exception:
+        with _REDEPLOY_JOBS_LOCK:
+            _REDEPLOY_PENDING_ENVS.discard(env_name)
+        raise
+    if not result.get('accepted'):
+        with _REDEPLOY_JOBS_LOCK:
+            _REDEPLOY_PENDING_ENVS.discard(env_name)
+    return result
+
+
+def _action_redeploy_impl(
+    config: dict[str, Any], env_name: str, *, target_sha: str = '', target_sha_full: str = '',
+    trigger: str = 'console-redeploy', async_mode: bool = False, promote_source: str = '',
+    clear_block_before_start: bool = False,
 ) -> dict[str, Any]:
     disabled = require_env_enabled(config, env_name)
     if disabled:
@@ -549,8 +593,10 @@ def action_redeploy(
 
     sha = target_sha.strip()
     sha_full = target_sha_full.strip() or sha
+    fetched_origin = False
     if not sha:
         sha, sha_full = _resolve_origin_branch_sha(base_dir, env_name)
+        fetched_origin = bool(sha)
         if not sha:
             return {
                 "ok": False,
@@ -558,11 +604,11 @@ def action_redeploy(
             }
 
     if sha:
-        resolved_short, resolved_full = _resolve_sha_in_mirror(base_dir, env_name, sha)
+        resolved_short, resolved_full = _resolve_sha_in_mirror(base_dir, env_name, sha, fetch=not fetched_origin)
         if len(resolved_full) >= 40:
             sha, sha_full = resolved_short, resolved_full
-        elif len(sha_full) < 40:
-            sha_full = resolved_full if len(resolved_full) >= 40 else sha_full
+        else:
+            sha_full = ""
 
     if not sha:
         return {"ok": False, "error": "SHA alvo nao encontrado."}
@@ -577,6 +623,8 @@ def action_redeploy(
 
     run_id = f"console-{secrets.token_hex(6)}"
     script = base_dir / "ops" / "deploy" / "run_pipeline_locked.ps1"
+    if not script.is_file():
+        return {"ok": False, "error": f"Script de deploy não encontrado: {script}"}
     args = [
         "-Environment",
         env_name,
@@ -593,24 +641,45 @@ def action_redeploy(
     if promote_source:
         extra_env["PPLID_PROMOTE_SOURCE"] = promote_source.strip().upper()
 
+    cleared = clear_deploy_blocked(base_dir, env_name) if clear_block_before_start else {}
     if async_mode:
-        def _on_complete(result: dict[str, Any]) -> None:
-            if result.get("exitCode") == 2:
-                # Mutex held — surface as busy without leaving a failed deploy state
-                pass
+        with _REDEPLOY_JOBS_LOCK:
+            cutoff = time.time() - _REDEPLOY_JOB_TTL_SEC
+            for key, job in list(_REDEPLOY_JOBS.items()):
+                if job.get('state') != 'running' and job.get('_updatedAt', 0) < cutoff:
+                    del _REDEPLOY_JOBS[key]
+            _REDEPLOY_JOBS[(env_name, run_id)] = {
+                'ok': True, 'state': 'running', 'environment': env_name, 'runId': run_id,
+                'targetSha': sha, '_updatedAt': time.time(),
+            }
 
-        run_powershell_async(
-            script,
-            args,
-            extra_env=extra_env or None,
-            on_complete=_on_complete,
-        )
+        def _on_complete(result: dict[str, Any]) -> None:
+            try:
+                ok = bool(result.get('ok'))
+                message = ('Já existe um deploy em andamento neste ambiente.' if result.get('exitCode') == 2
+                           else result.get('error') or 'O pipeline encerrou sem sucesso.') if not ok else None
+                with _REDEPLOY_JOBS_LOCK:
+                    job = _REDEPLOY_JOBS.get((env_name, run_id))
+                    if job is not None:
+                        job.update({'ok': ok, 'state': 'completed' if ok else 'failed',
+                                    'error': redact_log_line(str(message)) if message else None,
+                                    '_updatedAt': time.time()})
+            finally:
+                with _REDEPLOY_JOBS_LOCK:
+                    _REDEPLOY_PENDING_ENVS.discard(env_name)
+
+        try:
+            run_powershell_async(script, args, extra_env=extra_env or None, on_complete=_on_complete)
+        except (OSError, RuntimeError) as exc:
+            _on_complete({'ok': False, 'error': str(exc)})
+            return {'ok': False, 'error': f'Não foi possível iniciar o pipeline: {exc}', 'runId': run_id}
         return {
             "ok": True,
             "accepted": True,
             "environment": env_name,
             "targetSha": sha,
             "runId": run_id,
+            **({'clearedBlockedSha': cleared['clearedBlockedSha']} if cleared.get('clearedBlockedSha') else {}),
         }
 
     result = run_powershell(script, args, timeout=2400, extra_env=extra_env or None)
@@ -638,16 +707,13 @@ def action_clear_block_and_redeploy(
     if is_deploy_busy(base_dir, env_name):
         return {"ok": False, "error": "Deploy em andamento neste ambiente."}
 
-    cleared = clear_deploy_blocked(base_dir, env_name)
-    result = action_redeploy(
+    return action_redeploy(
         config,
         env_name,
         trigger="console-clear-block",
         async_mode=True,
+        clear_block_before_start=True,
     )
-    if cleared.get("clearedBlockedSha"):
-        result["clearedBlockedSha"] = cleared["clearedBlockedSha"]
-    return result
 
 
 def action_promote_cross_env(
@@ -1788,12 +1854,9 @@ def build_services(
 
 
 LOG_REDACT_PATTERNS = [
-    re.compile(r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|authorization)\s*[=:]\s*\S+"),
-    re.compile(r"(?i)Bearer\s+\S+"),
-    re.compile(r"(?i)postgresql://[^\s]+"),
-    re.compile(r"(?i)mysql://[^\s]+"),
-    re.compile(r"(?i)SECRET_KEY\s*=\s*\S+"),
-    re.compile(r"(?i)DATABASE_URL\s*=\s*\S+"),
+    (re.compile(r"(?i)\bBearer\s+\S+"), "Bearer ***"),
+    (re.compile(r"(?i)\b(postgresql|mysql)://[^\s]+"), r"\1://***"),
+    (re.compile(r"(?i)\b(password|passwd|pwd|secret_key|secret|token|api[_-]?key|authorization|database_url)(\s*[=:]\s*)(?:Bearer\s+)?\S+"), r"\1\2***"),
 ]
 
 LOG_LINE_PATTERN = re.compile(
@@ -1803,8 +1866,8 @@ LOG_LINE_PATTERN = re.compile(
 
 def redact_log_line(text: str) -> str:
     out = str(text or "")
-    for pattern in LOG_REDACT_PATTERNS:
-        out = pattern.sub(lambda m: re.sub(r"=\s*\S+$", "=***", m.group(0)), out)
+    for pattern, replacement in LOG_REDACT_PATTERNS:
+        out = pattern.sub(replacement, out)
     return out
 
 
@@ -2137,7 +2200,8 @@ def _read_lines_from_offset(path: Path, offset: int = 0, limit: int = 500) -> tu
         text = path.read_text(encoding="utf-8", errors="replace")
         all_lines = text.splitlines()
         total = len(all_lines)
-        start = max(0, min(offset, total))
+        # A rotated or truncated file starts a new sequence.
+        start = 0 if offset > total else max(0, offset)
         chunk = all_lines[start : start + limit]
         return chunk, total
     except OSError:
@@ -2219,6 +2283,8 @@ def load_run_log_chunk(
     )
 
     safe_file = [redact_log_line(line) for line in file_lines]
+    file_start = 0 if file_offset > file_total else max(0, file_offset)
+    next_file = min(file_start + len(file_lines), file_total) if path.is_file() else file_offset
     file_parsed = [parse_log_line(line) for line in safe_file]
     sqlite_lines = sqlite_chunk.get("lines") or []
     sqlite_parsed = sqlite_chunk.get("parsed") or []
@@ -2232,7 +2298,7 @@ def load_run_log_chunk(
             "file": log_name,
             "lines": [],
             "parsed": [],
-            "nextFileOffset": file_total if path.is_file() else file_offset,
+            "nextFileOffset": next_file,
             "nextSqliteOffset": next_sqlite,
             "nextOffset": file_total,
             "source": "none",
@@ -2243,9 +2309,9 @@ def load_run_log_chunk(
         "file": log_name,
         "lines": merged_lines,
         "parsed": merged_parsed,
-        "nextFileOffset": file_total,
+        "nextFileOffset": next_file,
         "nextSqliteOffset": next_sqlite,
-        "nextOffset": file_total,
+        "nextOffset": next_file,
         "source": source,
     }
 
@@ -2481,6 +2547,84 @@ def load_run_logs(
         "failure": failure,
         "progressPct": compute_deploy_progress_pct(steps),
     }
+
+
+def load_run_logs_for_copy(base_dir: Path, env_name: str, run_id: str, *, max_chars: int = 5_000_000) -> dict[str, Any]:
+    """Read redacted run logs from their beginning, including SQLite-only entries."""
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', run_id or '') or run_id in ('.', '..'):
+        return {'ok': False, 'error': 'Run inválido.'}
+    run_dir = base_dir / 'deploy' / env_name / 'logs' / 'runs' / run_id
+    if not run_dir.is_dir():
+        return {'ok': False, 'error': 'Run não encontrado.'}
+    output: list[str] = []
+    count = 0
+    truncated = False
+    warnings: list[str] = []
+
+    def append(value: str) -> bool:
+        nonlocal count, truncated
+        remaining = max_chars - count
+        if len(value) > remaining:
+            if remaining > 0:
+                output.append(value[:remaining])
+            truncated = True
+            return False
+        output.append(value)
+        count += len(value)
+        return True
+
+    db_path = get_ops_store_db_path(base_dir)
+    store = None
+    if db_path:
+        try:
+            ops_root = resolve_ops_lib_dir({'logDir': str(base_dir / 'logs')})
+            if str(ops_root) not in sys.path:
+                sys.path.insert(0, str(ops_root))
+            import ops_store as store  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f'Logs SQLite indisponíveis: {exc}')
+
+    for name in RUN_LOG_NAMES:
+        path = run_dir / name
+        if path.is_file():
+            try:
+                with path.open('r', encoding='utf-8', errors='replace') as handle:
+                    wrote_header = False
+                    for line in handle:
+                        if not wrote_header:
+                            if not append(f'=== {name} (arquivo) ===\n'):
+                                break
+                            wrote_header = True
+                        if not append(redact_log_line(line.rstrip('\r\n')) + '\n'):
+                            break
+            except OSError as exc:
+                warnings.append(f'Não foi possível ler {name}: {exc}')
+        if truncated:
+            break
+        if store:
+            cursor = 0
+            wrote_header = False
+            try:
+                while True:
+                    rows = store.tail_deploy_logs(env_name, run_id, name, since_id=cursor, limit=500, db_path=db_path)
+                    if not rows:
+                        break
+                    if not wrote_header:
+                        if not append(f'\n=== {name} (SQLite) ===\n'):
+                            break
+                        wrote_header = True
+                    for row in rows:
+                        cursor = max(cursor, int(row.get('id') or 0))
+                        stamp = _format_deploy_log_display_ts(str(row.get('logged_at') or ''))
+                        if not append(redact_log_line(f"[{stamp}] [{row.get('level', 'INFO')}] {row.get('message', '')}") + '\n'):
+                            break
+                    if truncated or len(rows) < 500:
+                        break
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f'Logs SQLite de {name} indisponíveis: {exc}')
+        if truncated:
+            break
+    return {'ok': True, 'text': ''.join(output), 'truncated': truncated, 'warnings': warnings}
 
 
 def build_run_logs_zip(base_dir: Path, env_name: str, run_id: str) -> bytes | None:
@@ -2979,7 +3123,16 @@ def _spawn_detached_powershell(script: Path, args: list[str]) -> None:
     )
 
 
+_CONSOLE_UPDATE_APPLY_LOCK = threading.Lock()
+
+
 def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
+    # Protect check-and-start as one operation across concurrent HTTP requests.
+    with _CONSOLE_UPDATE_APPLY_LOCK:
+        return _apply_console_update_locked(config)
+
+
+def _apply_console_update_locked(config: dict[str, Any]) -> dict[str, Any]:
     script = _console_update_script(config)
     if not script.is_file():
         result = {

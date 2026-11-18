@@ -796,6 +796,8 @@
 
   OC.bindDeployProgressEvents = function bindDeployProgressEvents() {
     document.querySelectorAll("[data-deploy-details-toggle]").forEach((btn) => {
+      if (btn.dataset.deployDetailsBound) return;
+      btn.dataset.deployDetailsBound = "1";
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         const env = btn.getAttribute("data-deploy-details-toggle");
@@ -810,6 +812,8 @@
     });
 
     document.querySelectorAll("[data-deploy-log-toggle]").forEach((btn) => {
+      if (btn.dataset.deployLogBound) return;
+      btn.dataset.deployLogBound = "1";
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         const env = btn.getAttribute("data-deploy-log-toggle");
@@ -825,23 +829,26 @@
     });
 
     document.querySelectorAll("[data-copy-deploy-error]").forEach((btn) => {
+      if (btn.dataset.deployCopyBound) return;
+      btn.dataset.deployCopyBound = "1";
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         const text = btn.getAttribute("data-copy-deploy-error");
-        if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+        OC.copyText(text, { button: btn, successMessage: "Erro copiado." });
       });
     });
 
     document.querySelectorAll("[data-cancel-deploy]").forEach((btn) => {
+      if (btn.dataset.deployCancelBound) return;
+      btn.dataset.deployCancelBound = "1";
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
         const env = btn.getAttribute("data-cancel-deploy");
         if (!env || !OC.runCancelDeploy) return;
-        btn.disabled = true;
-        await OC.runCancelDeploy(env, (err, result) => {
+        await OC.withActionButton(btn, () => OC.runCancelDeploy(env, (err, result) => {
           OC.afterActionRefresh?.(err, result, btn);
           if (err || !result?.ok) btn.disabled = false;
-        });
+        }));
       });
     });
   };

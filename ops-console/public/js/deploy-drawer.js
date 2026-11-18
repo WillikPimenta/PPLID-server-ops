@@ -268,25 +268,28 @@
     OC.bindTimelineToggle(body, OC.deployDrawerState.expandedSteps);
 
     body.querySelectorAll("[data-copy-deploy-error]").forEach((btn) => {
+      if (btn.dataset.deployCopyBound) return;
+      btn.dataset.deployCopyBound = "1";
       btn.addEventListener("click", () => {
         const text = btn.getAttribute("data-copy-deploy-error");
-        if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+        OC.copyText(text, { button: btn, successMessage: "Erro copiado." });
       });
     });
 
     body.querySelectorAll("[data-cancel-deploy]").forEach((btn) => {
+      if (btn.dataset.deployCancelBound) return;
+      btn.dataset.deployCancelBound = "1";
       btn.addEventListener("click", async () => {
         const env = btn.getAttribute("data-cancel-deploy");
         if (!env || !OC.runCancelDeploy) return;
-        btn.disabled = true;
-        await OC.runCancelDeploy(env, (err, result) => {
+        await OC.withActionButton(btn, () => OC.runCancelDeploy(env, (err, result) => {
           OC.afterActionRefresh?.(err, result, btn);
           if (!err && result?.ok) {
             OC.closeDeployDrawer?.();
           } else {
             btn.disabled = false;
           }
-        });
+        }));
       });
     });
 

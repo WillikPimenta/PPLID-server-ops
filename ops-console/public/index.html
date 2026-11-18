@@ -10,7 +10,7 @@
         document.documentElement.setAttribute("data-theme", t === "dark" ? "dark" : "light");
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=20260923-monitoring" />
+    <link rel="stylesheet" href="/styles.css?v=20261118-overview" />
   </head>
   <body>
     <div class="app-shell">
@@ -136,6 +136,12 @@
                     </svg>
                   </span>
                   <span>Incidentes</span>
+                </a>
+                <a class="sidebar-link" href="/monitoring/availability" data-sidebar-view="availability" title="Disponibilidade">
+                  <span class="sidebar-link-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="m8 12 3 3 5-6" /></svg>
+                  </span>
+                  <span>Disponibilidade</span>
                 </a>
                 <a class="sidebar-link" href="/monitoring/latency" data-sidebar-view="performance" title="Desempenho">
                   <span class="sidebar-link-icon" aria-hidden="true">
@@ -282,15 +288,15 @@
     <div id="auto-config-modal-host" aria-live="polite"></div>
     <div id="monitor-api-route-modal-host" aria-live="polite"></div>
 
-    <script src="/js/utils.js"></script>
-    <script src="/js/feature-loader.js?v=20260923-monitoring"></script>
+    <script src="/js/utils.js?v=20261118-overview"></script>
+    <script src="/js/feature-loader.js?v=20261118-overview"></script>
     <script src="/js/ops-ui.js"></script>
     <script src="/js/status.js"></script>
-    <script src="/js/actions.js"></script>
-    <script src="/js/console-update.js"></script>
-    <script src="/js/router.js"></script>
+    <script src="/js/actions.js?v=20261118-overview"></script>
+    <script src="/js/console-update.js?v=20261118-overview"></script>
+    <script src="/js/router.js?v=20261118-availability-detail"></script>
     <script src="/js/history.js"></script>
-    <script src="/js/render.js"></script>
-    <script src="/js/app.js"></script>
+    <script src="/js/render.js?v=20261118-overview"></script>
+    <script src="/js/app.js?v=20261118-overview"></script>
   </body>
 </html>

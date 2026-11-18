@@ -1,0 +1,91 @@
+﻿import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const source = readFileSync(new URL("../public/js/monitoring.js", import.meta.url), "utf8");
+const fragment = source.slice(source.indexOf("  // Cache por URL completa"), source.indexOf("\n  OC.refreshMonitoring ="));
+const store = new Map();
+function setup(fetchJson) {
+  const OC = { fetchJson, formatRelativeTime: () => "há pouco", _monitorCacheWarnings: [] };
+  const window = { localStorage: { getItem: key => store.get(key), setItem: (key, value) => store.set(key, value) } };
+  vm.runInNewContext(fragment, { OC, window, Map, Date, JSON, Error });
+  return OC;
+}
+test("preserva dados por URL após falha e reinício; resposta vazia substitui cache", async () => {
+  store.clear();
+  let oc = setup(async () => ({ routes: ["A"] }));
+  await oc.fetchMonitoringJson("/api?env=DEV");
+  oc = setup(async () => { throw new Error("timeout"); });
+  assert.equal((await oc.fetchMonitoringJson("/api?env=DEV")).routes[0], "A");
+  assert.match(oc._monitorCacheWarnings[0], /timeout/);
+  assert.equal((await oc.fetchMonitoringJson("/api?env=HOM", { routes: [] })).routes.length, 0);
+  oc = setup(async () => ({ routes: [] }));
+  await oc.fetchMonitoringJson("/api?env=DEV");
+  oc = setup(async () => { throw new Error("timeout"); });
+  assert.equal((await oc.fetchMonitoringJson("/api?env=DEV")).routes.length, 0);
+});
+test("falha parcial preserva somente a parte afetada", async () => {
+  store.clear();
+  let oc = setup(async () => ({ envSummaries: [{ env: "DEV", summary: { api: { totals: { requests: 10 } } } }, { env: "HOM", summary: { api: { totals: { requests: 20 } } } }] }));
+  await oc.fetchMonitoringJson("/dashboard");
+  oc = setup(async () => ({ envSummaries: [{ env: "DEV", summary: { api: { error: "falhou" } } }, { env: "HOM", summary: { api: { totals: { requests: 30 } } } }] }));
+  const result = await oc.fetchMonitoringJson("/dashboard");
+  assert.equal(result.envSummaries[0].summary.api.totals.requests, 10);
+  assert.equal(result.envSummaries[1].summary.api.totals.requests, 30);
+  assert.match(oc._monitorCacheWarnings[0], /falhou/);
+});
+test("SLI usa os totais da janela e identifica falta de dados", () => {
+  const start = source.indexOf("  function renderAvailabilityView(");
+  const end = source.indexOf("\n  function renderTabContent(", start);
+  const context = { OC: { monitorState: { selectedEnvs: ["DEV", "HOM"], availabilityWindow: "7d" }, escapeHtml: String, formatDate: String } };
+  vm.runInNewContext(source.slice(start, end) + "\nthis.render = renderAvailabilityView;", context);
+  const html = context.render({ DEV: { window: "7d", api: { requests: 100, errors5xx: 2, availabilityPct: 98, periodVerified: true }, health: { samples: 4, coveragePct: 10 }, timeline: [] }, HOM: { window: "7d", api: { unavailableReason: "Sem requisições" }, health: {}, timeline: [] } });
+  assert.match(html, /98,00%/);
+  assert.match(html, /Sem dados/);
+  assert.match(html, /Coleta incompleta/);
+  assert.match(html, /data-availability-window="30d"/);
+});
+
+test("demonstração cria cenários isolados para os três ambientes e períodos", () => {
+  const start = source.indexOf("  OC.buildAvailabilityDemo =");
+  const end = source.indexOf("\n  function renderTabContent(", start);
+  const OC = { monitorState: { selectedEnvs: ["DEV"], availabilityWindow: "30d", availabilityDemo: true }, escapeHtml: String, formatDate: String };
+  const context = { OC };
+  vm.runInNewContext(source.slice(start, end) + "\nthis.render = renderAvailabilityView;", context);
+  for (const period of ["24h", "7d", "30d"]) {
+    const demo = OC.buildAvailabilityDemo(period);
+    assert.deepEqual(Object.keys(demo), ["MAIN", "DEV", "HOM"]);
+    assert.equal(demo.MAIN.window, period);
+    assert.ok(demo.DEV.history.some(bucket => bucket.failures > 0));
+    assert.ok(demo.HOM.history.some(bucket => bucket.samples === 0));
+  }
+  const html = context.render({});
+  assert.match(html, /Dados simulados/);
+  assert.match(html, /Voltar aos dados reais/);
+  assert.match(html, /MAIN/);
+  assert.match(html, /Indeterminada/);
+});
+
+test("rota dedicada resolve disponibilidade", () => {
+  const window = { OpsConsole: { ENV_ORDER: ["MAIN", "DEV", "HOM"] } };
+  vm.runInNewContext(readFileSync(new URL("../public/js/router.js", import.meta.url), "utf8"), { window, URLSearchParams });
+  const route = window.OpsConsole.parseRoute("/monitoring/availability?env=DEV");
+  assert.equal(route.tab, "availability");
+  assert.equal(route.env, "DEV");
+});
+
+test('estado atual não é determinado pelo histórico e dados atuais antigos ficam sem confirmação', () => {
+  const start = source.indexOf('  function renderAvailabilityView(');
+  const end = source.indexOf('\n  function renderTabContent(', start);
+  const OC = { monitorState: { selectedEnvs: ['DEV'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String };
+  const context = { OC };
+  vm.runInNewContext(source.slice(start, end) + '\nthis.render = renderAvailabilityView;', context);
+  const history = { DEV: { window: '24h', health: { uptimePct: 0, samples: 5 }, timeline: [{ kind: 'outage', ongoing: true }] } };
+  let html = context.render(history, { DEV: { state: 'healthy', checkedAt: new Date().toISOString(), maxAgeMs: 120000 } });
+  assert.match(html, /Saudável agora/);
+  assert.doesNotMatch(html, />Indisponível</);
+  html = context.render(history, { DEV: { state: 'healthy', checkedAt: '2020-01-01T00:00:00Z', maxAgeMs: 120000 } });
+  assert.match(html, /Sem confirmação recente/);
+  assert.doesNotMatch(html, /Saudável agora/);
+});

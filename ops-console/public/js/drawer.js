@@ -197,57 +197,48 @@ OC.renderDrawerContent = function renderDrawerContent(row) {
 
   body.querySelector("[data-copy-sha]")?.addEventListener("click", (e) => {
     const sha = e.currentTarget.getAttribute("data-copy-sha");
-    if (sha && navigator.clipboard) navigator.clipboard.writeText(sha).catch(() => {});
+    OC.copyText(sha, { button: e.currentTarget, successMessage: "SHA copiado." });
   });
 
   document.getElementById("drawer-btn-rollback")?.addEventListener("click", async () => {
     const btn = document.getElementById("drawer-btn-rollback");
-    btn.disabled = true;
-    await OC.runRollback(row.environment, "", (err, result) => {
+    await OC.withActionButton(btn, () => OC.runRollback(row.environment, "", (err, result) => {
       OC.afterActionRefresh(err, result, btn);
       if (!err && result?.ok) OC.closeDrawer();
-    });
+    }));
   });
 
   document.getElementById("drawer-btn-redeploy")?.addEventListener("click", async () => {
     const btn = document.getElementById("drawer-btn-redeploy");
-    btn.disabled = true;
-    await OC.runRedeploy(row.environment, row.sha !== "—" ? row.sha : "", (err, result) => {
+    await OC.withActionButton(btn, () => OC.runRedeploy(row.environment, row.sha !== "—" ? row.sha : "", (err, result) => {
       OC.afterActionRefresh(err, result, btn);
       if (!err && result?.ok) OC.closeDrawer();
-    });
+    }));
   });
 
   document.getElementById("drawer-btn-promote-hom")?.addEventListener("click", async () => {
     const btn = document.getElementById("drawer-btn-promote-hom");
-    if (!btn || btn.disabled) return;
-    btn.disabled = true;
-    btn.classList.add("is-loading");
-    await OC.runPromote("DEV", "HOM", (err, result) => {
+    await OC.withActionButton(btn, () => OC.runPromote("DEV", "HOM", (err, result) => {
       OC.afterActionRefresh(err, result, btn);
-    });
+    }));
   });
 
   document.getElementById("drawer-btn-toggle-env")?.addEventListener("click", async () => {
     const btn = document.getElementById("drawer-btn-toggle-env");
-    if (!btn || btn.disabled) return;
-    btn.disabled = true;
-    const env = row.environment;
-    const enabled = (OC.lastOverview?.environments?.[env]?.enabled) !== false;
-    if (enabled) {
-      await OC.runDisableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
-    } else {
-      await OC.runEnableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
-    }
+    await OC.withActionButton(btn, async () => {
+      const env = row.environment;
+      const enabled = (OC.lastOverview?.environments?.[env]?.enabled) !== false;
+      if (enabled) await OC.runDisableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+      else await OC.runEnableEnv(env, (err, result) => OC.afterActionRefresh(err, result, btn));
+    });
   });
 
   body.querySelectorAll(".drawer-restart").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const service = btn.getAttribute("data-service") || "all";
-      btn.disabled = true;
-      await OC.runRestartService(row.environment, service, (err, result) => {
+      await OC.withActionButton(btn, () => OC.runRestartService(row.environment, service, (err, result) => {
         OC.afterActionRefresh(err, result, btn);
-      });
+      }));
     });
   });
 
@@ -410,11 +401,6 @@ OC.loadDrawerLogs = async function loadDrawerLogs(env, sha, runId) {
               ${failureHtml}
               <div class="deploy-timeline drawer-run-timeline" aria-label="Logs por etapa">${timelineHtml}</div>
             </div>`;
-          panel.dataset.runLogPayload = JSON.stringify(
-            Object.fromEntries(
-              Object.entries(runData.logs || {}).map(([k, v]) => [k, (v?.lines || v || []).join("\n")])
-            )
-          );
         }
       } catch {
         runBlock = "";
@@ -459,15 +445,30 @@ OC.loadDrawerLogs = async function loadDrawerLogs(env, sha, runId) {
 
     OC.resetDrawerBodyScroll?.();
 
-    panel.querySelector("[data-copy-run-log]")?.addEventListener("click", () => {
+    panel.querySelectorAll('[data-copy-deploy-error]').forEach(button => {
+      if (button.dataset.deployCopyBound) return;
+      button.dataset.deployCopyBound = '1';
+      button.addEventListener('click', () => OC.copyText(button.getAttribute('data-copy-deploy-error'), { button, successMessage: 'Erro copiado.' }));
+    });
+
+    panel.querySelector("[data-copy-run-log]")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const currentRunId = button.getAttribute("data-copy-run-log");
+      if (!currentRunId || button.disabled) return;
+      button.disabled = true;
+      const label = button.textContent;
+      button.textContent = 'Buscando log…';
       try {
-        const payload = panel.dataset.runLogPayload ? JSON.parse(panel.dataset.runLogPayload) : {};
-        const text = Object.entries(payload)
-          .map(([k, v]) => `=== ${k} ===\n${v}`)
-          .join("\n\n");
-        if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
-      } catch {
-        /* ignore */
+        const result = await OC.fetchJson(`/api/v1/runs/${encodeURIComponent(env)}/copy/${encodeURIComponent(currentRunId)}`, { timeoutMs: 60000 });
+        if (!result.ok) throw new Error(result.error || 'Não foi possível carregar o log.');
+        button.textContent = label;
+        await OC.copyText(result.text, { button, successMessage: result.truncated ? 'Parte do log copiada; o limite de tamanho foi atingido.' : 'Log copiado.' });
+        if (result.truncated || result.warnings?.length) OC.showToast?.(result.truncated ? 'O log excedeu o limite de cópia; o conteúdo está incompleto.' : result.warnings.join('; '), 'warn');
+      } catch (err) {
+        OC.showToast?.(err.message || 'Falha ao copiar o log.', 'error');
+      } finally {
+        button.disabled = false;
+        if (button.textContent === 'Buscando log…') button.textContent = label;
       }
     });
   } catch (err) {

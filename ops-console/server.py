@@ -39,6 +39,7 @@ ENV_ORDER = ("MAIN", "DEV", "HOM")
 DEFAULT_BASE_DIR = Path("C:/PPLID")
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 SESSION_COOKIE_NAME = "ops_session"
+SERVER_INSTANCE_ID = secrets.token_hex(12)
 PROTECTED_API_PREFIXES = (
     "/api/v1/overview",
     "/api/v1/overview-lite",
@@ -1281,7 +1282,7 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
 
     def _handle_auth_status(self) -> None:
         session = self._current_session()
-        self._send_json(auth_status_from_session(session, self.config))
+        self._send_json({**auth_status_from_session(session, self.config), 'serverInstanceId': SERVER_INSTANCE_ID})
 
     def _handle_auth_heartbeat(self) -> None:
         """Renew an unlocked session for passive displays such as the TV panel."""
@@ -1889,6 +1890,17 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Bloqueado ou nao autenticado"}, status=401)
             return
 
+        if path.startswith('/api/v1/actions/deploy-status/'):
+            env_name = path.removeprefix('/api/v1/actions/deploy-status/').strip('/').upper()
+            run_id = (parse_qs(parsed.query).get('runId') or [''])[0]
+            if env_name not in ENV_ORDER or not run_id:
+                self._send_json({'error': 'Ambiente ou run inválido.'}, status=400)
+                return
+            result = server_ops.get_redeploy_job(env_name, run_id)
+            result.pop('_updatedAt', None)
+            self._send_json(result)
+            return
+
         if path == "/api/v1/overview":
             overview = build_overview(self.config)
             self._send_json(overview)
@@ -2054,6 +2066,11 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             base_dir = server_ops.get_base_dir(self.config)
 
+            if len(parts) >= 2 and parts[1].lower() == "copy":
+                run_id = parts[2] if len(parts) >= 3 else query.get("runId", [""])[0]
+                result = server_ops.load_run_logs_for_copy(base_dir, env_name, run_id)
+                self._send_json(result, status=200 if result.get('ok') else 400)
+                return
             if len(parts) >= 2 and parts[1].lower() == "download":
                 run_id = parts[2] if len(parts) >= 3 else query.get("runId", [""])[0]
                 if not run_id:
@@ -2200,7 +2217,6 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                             env_name,
                             window_hours=hours,
                             include_api=include_api,
-                            api_timeout=2.0,
                         )
                     )
                 else:
@@ -2217,11 +2233,37 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                     return
                 hours = int(query.get("hours", ["168"])[0])
                 center = (query.get("center") or [None])[0]
-                self._send_json(
-                    server_monitoring.build_monitoring_series(
-                        self.config, env_name, metric, hours=hours, center=center
+                try:
+                    series = server_monitoring.build_monitoring_series(
+                        self.config, env_name, metric, hours=hours, center=center,
+                        range_since=(query.get('since') or [None])[0],
+                        range_until=(query.get('until') or [None])[0],
                     )
-                )
+                except ValueError as exc:
+                    self._send_json({'error': str(exc)}, status=400)
+                    return
+                self._send_json(series)
+                return
+            if sub == "availability-current":
+                self._send_json(server_monitoring.build_monitoring_availability_current(self.config, env_name))
+                return
+            if sub == "availability-detail":
+                try:
+                    detail = server_monitoring.build_monitoring_availability_detail(
+                        self.config, env_name, since=(query.get('since') or [''])[0],
+                        until=(query.get('until') or [''])[0],
+                    )
+                except ValueError as exc:
+                    self._send_json({'error': str(exc)}, status=400)
+                    return
+                self._send_json(detail)
+                return
+            if sub == "availability":
+                window = (query.get("window") or ["24h"])[0]
+                if window not in ("24h", "7d", "30d"):
+                    self._send_json({"error": "Período inválido"}, status=400)
+                    return
+                self._send_json(server_monitoring.build_monitoring_availability(self.config, env_name, window=window))
                 return
             if sub == "uptime-days":
                 days = int(query.get("days", ["7"])[0])

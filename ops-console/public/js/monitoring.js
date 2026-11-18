@@ -41,6 +41,7 @@
   };
   const TAB_LABELS = {
     summary: "Resumo",
+    availability: "Disponibilidade",
     incidents: "Incidentes",
     latency: "Latência",
     syncs: "Syncs",
@@ -85,6 +86,10 @@
     dataByEnv: {},
     lastRefreshedAt: null,
     payload: null,
+    availabilityWindow: "24h",
+    availabilityDemo: false,
+    availabilityScenario: "mixed",
+    availabilitySelection: null,
     apiWindow: "6h",
     apiSubTab: "overview",
     apiSince: "",
@@ -340,6 +345,15 @@
       /* ignore */
     }
     if (OC.currentRoute?.tab) OC.monitorState.activeTab = OC.currentRoute.tab;
+    if (OC.currentRoute?.tab === 'apis') {
+      const query = OC.currentRoute.query || {};
+      if (query.since && query.until && Number.isFinite(Date.parse(query.since)) && Date.parse(query.until) > Date.parse(query.since)) {
+        OC.monitorState.apiWindow = 'custom';
+        OC.monitorState.apiSince = query.since;
+        OC.monitorState.apiUntil = query.until;
+        if (OC.ENV_ORDER.includes(String(query.env || '').toUpperCase())) OC.monitorState.selectedEnvs = [query.env.toUpperCase()];
+      }
+    }
     syncApiSubTabFromRoute();
     applyLogRoutePrefs();
   }
@@ -1042,7 +1056,7 @@
           </header>
           <div class="monitor-uptime-headline">
             <span class="monitor-uptime-pct">${OC.escapeHtml(uptime)}</span>
-            <span class="monitor-uptime-trend">${(data.days || 7)} dias · foco operacional</span>
+            <span class="monitor-uptime-trend">${(data.days || 7)} dias · health check · ${data.samples ?? 0} amostras${data.expectedSamples && data.samples < data.expectedSamples * 0.9 ? " · coleta incompleta" : ""}</span>
           </div>
           <div class="monitor-day-bars" aria-label="Histórico ${OC.escapeHtml(env)}">${bars}</div>
           <div class="monitor-day-bars-meta">
@@ -1164,7 +1178,11 @@
     const compact = opts?.compact === true;
     const tabLabel = opts?.tabLabel || "Resumo";
     const tab = opts?.tab || "summary";
-    const uptimeLabel = kpis.avgUptime != null ? `${kpis.avgUptime}%` : "—";
+    if (tab === "availability") return OC.renderOpsHero({
+      title: "Disponibilidade",
+      subtitle: "Acompanhe a confiabilidade dos ambientes e investigue o histórico de falhas.",
+      compact: true, stats: [],
+    });
     const collectLabel = kpis.lastSampleAt
       ? OC.formatRelativeTime(kpis.lastSampleAt)
       : kpis.collectorLabel || "—";
@@ -1177,7 +1195,7 @@
         : "Visão consolidada da saúde dos ambientes e serviços.",
       compact,
       stats: [
-        { label: "Disponibilidade 7d", value: uptimeLabel },
+        { label: "Ambientes monitorados", value: String(kpis.total ?? 0) },
         { label: "Alertas ativos", value: String(kpis.alertCount ?? 0), action: "alerts" },
         { label: "Problemas 24h", value: String(kpis.occurredCount ?? 0), action: "alerts" },
         { label: "Última coleta", value: collectLabel },
@@ -1253,21 +1271,11 @@
       });
     });
     const collector = config?.collectorStatus || {};
-    const uptimeEnvs = OC.monitorState.selectedEnvs?.length
-      ? OC.monitorState.selectedEnvs
-      : OC.ENV_ORDER;
-    const uptimes = uptimeEnvs.map((env) => uptimeByEnv?.[env]?.uptimePct).filter(
-      (v) => v != null && !Number.isNaN(Number(v))
-    );
-    const avgUptime = uptimes.length
-      ? Math.round((uptimes.reduce((a, b) => a + Number(b), 0) / uptimes.length) * 100) / 100
-      : null;
     return {
       healthy,
       total,
       alertCount,
       occurredCount,
-      avgUptime,
       lastDeployAt,
       lastSampleAt: collector.lastSampleAt || null,
       collectorLabel: collector.label || "—",
@@ -1408,6 +1416,7 @@
       : `${selectedCount} de ${OC.ENV_ORDER.length} ambientes`;
     const descriptions = {
       summary: "Escolha os ambientes e as categorias exibidas no resumo.",
+      availability: "Escolha os ambientes para acompanhar a disponibilidade. A demonstração apresenta três cenários simulados.",
       incidents: "Escolha os ambientes; severidade e período ficam na lista de incidentes.",
       latency: "Compare latência e disponibilidade usando o mesmo escopo.",
       syncs: "Escolha os ambientes que deseja comparar.",
@@ -3186,6 +3195,9 @@
       logs: false,
     };
     switch (tab) {
+      case "availability":
+        plan.config = false;
+        break;
       case "summary":
         plan.summaries = true;
         plan.events = true;
@@ -3230,6 +3242,8 @@
 
   function emptyPayloadExtras() {
     return {
+      availabilityByEnv: {},
+      availabilityCurrentByEnv: {},
       healthSeries: {},
       events: [],
       groupedEvents: [],
@@ -3244,6 +3258,129 @@
       host: null,
       diagnosis: null,
     };
+  }
+
+  OC.buildAvailabilityDemo = function buildAvailabilityDemo(period = "24h", scenario = "mixed") {
+    const now = new Date(OC._availabilityDemoAt ?? (OC._availabilityDemoAt = Date.now()));
+    const hours = { "24h": 24, "7d": 168, "30d": 720 }[period] || 24;
+    const count = { "24h": 48, "7d": 28, "30d": 30 }[period] || 48;
+    const at = hoursAgo => new Date(now.getTime() - hoursAgo * 3600000).toISOString();
+    return Object.fromEntries(["MAIN", "DEV", "HOM"].map((env, index) => {
+      const requests = [148260, 18420, 6340][index] * Math.max(1, hours / 24);
+      const errors5xx = Math.round(requests * [0.0002, 0.0084, 0.0021][index]);
+      const history = Array.from({ length: count }, (_, i) => ({
+        since: at(hours * (count - i) / count),
+        until: at(hours * (count - i - 1) / count),
+        samples: index === 2 && i >= count - Math.round(count * 0.236) - 2 && i < count - 2 ? 0 : Math.round(hours * 60 / count),
+        failures: index === 1 && i === Math.floor((hours - 3.4) * count / hours) ? 10 : index === 2 && i === count - 2 ? 3 : 0,
+      }));
+      const samples = history.reduce((sum, bucket) => sum + bucket.samples, 0);
+      const failures = history.reduce((sum, bucket) => sum + bucket.failures, 0);
+      const coverage = Number((samples * 100 / (hours * 60)).toFixed(1));
+      const data = {
+        environment: env, window: period, since: at(hours), until: at(0), retentionDays: 30, demo: true,
+        api: { requests, errors5xx, availabilityPct: Number(((requests - errors5xx) * 100 / requests).toFixed(2)), periodVerified: true, checkedAt: at(index === 2 ? 0.3 : 0) },
+        health: { uptimePct: Number(((samples - failures) * 100 / samples).toFixed(2)), coveragePct: coverage, samples, expectedSamples: hours * 60, lastSampleAt: at(index === 2 ? 0.3 : 0), intervalSec: 60 },
+        history,
+        current: { state: ["healthy", "healthy", "stale"][index], checkedAt: at(index === 2 ? .3 : 0), maxAgeMs: 120000, probeInFlight: false },
+        timeline: index === 0
+          ? [{ kind: "deploy", startedAt: at(5.2), finishedAt: at(5.1), result: "ok" }]
+          : index === 1
+            ? [{ kind: "outage", startedAt: at(3.4), finishedAt: at(3.23), durationSec: 612, ongoing: false }, { kind: "event", title: "Latência elevada nas consultas de API", severity: "warn", startedAt: at(3.6) }, { kind: "deploy", startedAt: at(4), finishedAt: at(3.95), result: "ok" }]
+            : [{ kind: "outage", startedAt: at(2.7), finishedAt: at(1.2), durationSec: null, uncertain: true, ongoing: false }],
+      };
+      if (index === 1 && ["offline", "saturated", "degraded"].includes(scenario)) {
+        data.current.state = scenario;
+        if (scenario === "offline") data.timeline.unshift({ kind: 'outage', startedAt: at(.1), finishedAt: null, ongoing: true, durationSec: 360 });
+      }
+      if (index === 2 && scenario === "disabled") data.current.state = "disabled";
+      data.impact = { incidentCount: data.timeline.filter(item => item.kind === 'outage').length,
+        estimatedDowntimeSec: failures * 60, failedRequests: errors5xx,
+        observedSec: samples * 60, unknownSec: Math.max(0, hours * 3600 - samples * 60) };
+      if (scenario === 'empty') {
+        data.current = { state: 'unknown', checkedAt: null, maxAgeMs: 120000 };
+        data.health = { samples: 0, coveragePct: 0, uptimePct: null };
+        data.api = { unavailableReason: 'Sem requisições ou coleta no período' };
+        data.timeline = [];
+        data.history = history.map(bucket => ({ ...bucket, samples: 0, failures: 0 }));
+        data.impact = { incidentCount: null, estimatedDowntimeSec: null, failedRequests: null, unknownSec: hours * 3600 };
+      }
+      return [env, data];
+    }));
+  };
+
+  function renderAvailabilityView(availabilityByEnv, currentByEnv = {}) {
+    const period = OC.monitorState.availabilityWindow || "24h";
+    const demo = OC.monitorState.availabilityDemo === true;
+    const dataByEnv = demo ? OC.buildAvailabilityDemo(period, OC.monitorState.availabilityScenario) : availabilityByEnv;
+    const envs = demo ? ["MAIN", "DEV", "HOM"] : (OC.monitorState.selectedEnvs || OC.ENV_ORDER);
+    const escape = value => OC.escapeHtml(String(value ?? ""));
+    const number = value => Number(value || 0).toLocaleString("pt-BR");
+    const pct = value => value == null ? "—" : `${Number(value).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+    const date = value => value ? OC.formatDate(value) : "Sem registro";
+    const controls = ["24h", "7d", "30d"].map(value =>
+      `<button type="button" data-availability-window="${value}" aria-pressed="${value === period}">${{ "24h": "24 horas", "7d": "7 dias", "30d": "30 dias" }[value]}</button>`
+    ).join("");
+    const allEvents = [];
+    let hasData = false;
+    const rows = envs.map(env => {
+      const entry = dataByEnv?.[env];
+      const data = entry?.window === period && !entry.error ? entry : null;
+      const api = data?.api || {};
+      const health = data?.health || {};
+      const available = api.availabilityPct != null || health.uptimePct != null;
+      hasData ||= available;
+      const partial = health.samples > 0 && health.coveragePct < 90;
+      const current = demo ? data?.current : currentByEnv[env];
+      const outdated = !demo && (current?._cache?.stale || (current?.checkedAt && Date.now() - new Date(current.checkedAt).getTime() > (current.maxAgeMs || 120000)));
+      const currentState = current?.state === 'disabled' ? 'disabled' : outdated ? 'stale' : current?.state || 'unknown';
+      const states = { healthy: ['ok', 'Saudável agora'], degraded: ['warn', 'Degradado'], saturated: ['warn', 'Sobrecarga'], offline: ['down', 'Indisponível'], disabled: ['none', 'Desativado'], stale: ['none', 'Sem confirmação recente'], unknown: ['none', 'Sem confirmação recente'] };
+      const [tone, state] = states[currentState] || states.unknown;
+      const impact = data?.impact || {};
+      const duration = seconds => seconds == null ? 'Sem dados' : seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}min ${Math.round(seconds % 60)}s` : `${Math.floor(seconds / 3600)}h ${Math.round(seconds % 3600 / 60)}min`;
+      const history = data?.history || [];
+      const bars = history.length ? history.map(bucket => {
+        const status = !bucket.samples ? "none" : bucket.failures > 0 ? "down" : "ok";
+        const title = `${date(bucket.since)}: ${bucket.samples || 0} amostras, ${bucket.failures || 0} falhas`;
+        const selected = OC.monitorState.availabilitySelection;
+        const selectedCenter = selected && (Date.parse(selected.since) + Date.parse(selected.until)) / 2;
+        const active = selected?.env === env && Date.parse(bucket.since) <= selectedCenter && Date.parse(bucket.until) > selectedCenter;
+        return `<button type="button" class="av-bar av-tone-${status}${active ? ' is-selected' : ''}" data-availability-env="${escape(env)}" data-availability-since="${escape(bucket.since)}" data-availability-until="${escape(bucket.until)}" aria-pressed="${Boolean(active)}" title="${escape(title)}" aria-label="Investigar ${escape(env)}: ${escape(title)}"></button>`;
+      }).join("") : `<span class="av-history-empty">${data ? "Histórico ainda em formação" : "Aguardando coleta"}</span>`;
+      if (data) (data.timeline || []).forEach(item => allEvents.push({ ...item, env }));
+      const reason = entry?.error || api.unavailableReason || api.error || "A coleta ainda não retornou dados para este período.";
+      const latest = health.lastSampleAt || api.checkedAt;
+      const old = latest && Date.now() - new Date(latest).getTime() > 180000;
+      return `<article class="av-environment av-tone-${tone}">
+        <header class="av-env-name"><span class="av-env-mark">${escape(env.slice(0, 1))}</span><div><h3>${escape(env)}</h3><span class="av-state"><i></i>${state}</span><small class="av-current-time">${current?.checkedAt ? escape(date(current.checkedAt)) : 'Aguardando verificação'}${current?.probeInFlight ? '<br>Atualizando…' : ''}</small></div></header>
+        <div class="av-metric"><span>Requisições bem-sucedidas</span><strong>${pct(api.availabilityPct)}</strong><small>${api.availabilityPct != null ? `${number(api.requests)} requisições / ${number(api.errors5xx)} erros 5xx` : escape(reason)}</small></div>
+        <div class="av-metric av-metric-secondary"><span>Health check</span><strong>${pct(health.uptimePct)}</strong><small>${number(health.samples)} amostras coletadas</small></div>
+        <div class="av-history"><div class="av-history-caption"><span>Histórico do health check</span><span>${escape(period)}</span></div><div class="av-bars">${bars}</div><div class="av-history-caption"><span>${data ? escape(date(data.since)) : "Início do período"}</span><span>Agora</span></div></div>
+        <footer class="av-collection"><span class="av-quality ${partial ? "is-partial" : ""}">${health.coveragePct != null ? `${number(health.coveragePct)}% de cobertura` : "Sem cobertura"}</span><small>${partial ? "Coleta incompleta" : old ? "Dados desatualizados" : latest ? "Última amostra" : "Aguardando primeira amostra"}${latest ? `<br>${escape(date(latest))}` : ""}</small></footer>
+        <div class="av-impact"><span><strong>${impact.incidentCount == null ? 'Sem dados' : number(impact.incidentCount)}</strong> episódios de falha</span><span><strong>${impact.failedRequests == null ? 'Sem dados' : number(impact.failedRequests)}</strong> requisições com erro 5xx</span><span><strong>${escape(duration(impact.estimatedDowntimeSec))}</strong> de indisponibilidade estimada</span><span class="av-impact-unknown"><strong>${escape(duration(impact.unknownSec))}</strong> sem cobertura</span></div>
+      </article>`;
+    }).join("");
+    allEvents.sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
+    const events = allEvents.slice(0, 20).map(item => {
+      const outage = item.kind === "outage";
+      const deploy = item.kind === "deploy";
+      const title = outage ? "Indisponibilidade detectada" : deploy ? "Deploy executado" : item.title || "Evento de disponibilidade";
+      const tone = outage ? "down" : deploy ? "deploy" : "warn";
+      const status = outage ? item.ongoing ? "Em andamento" : item.uncertain ? "Coleta incompleta" : "Encerrado" : deploy ? item.result || item.status || "Sem status" : "Registrado";
+      const duration = outage ? item.durationSec == null ? "Indeterminada" : `${Math.max(1, Math.round(item.durationSec / 60))} min` : "—";
+      const detail = outage ? item.durationSec == null ? "Lacuna na coleta impede estimar a duração" : `Estimativa por sondagem${item.finishedAt ? `; fim ${date(item.finishedAt)}` : ""}` : deploy ? "Compare o horário com os incidentes próximos" : "Sinal observado pelo monitoramento";
+      return `<tr><td class="av-event-date">${escape(date(item.startedAt))}</td><td><span class="av-env-tag">${escape(item.env)}</span></td><td><div class="av-event-title"><i class="av-event-dot av-tone-${tone}"></i><strong>${escape(title)}</strong></div><small>${escape(detail)}</small></td><td><span class="av-event-status av-tone-${tone}">${escape(status)}</span></td><td class="av-event-duration">${duration}</td></tr>`;
+    }).join("");
+    return `<div class="availability-view">
+      <div class="av-toolbar"><div class="av-period-control" role="group" aria-label="Período de disponibilidade">${controls}</div><button type="button" class="av-demo-toggle" data-availability-demo aria-pressed="${demo}">${demo ? "Voltar aos dados reais" : "Ver demonstração"}</button></div>
+      ${demo ? `<label class="av-scenario">Cenário de validação <select data-availability-scenario>${Object.entries({mixed:'Incidente histórico e coleta atrasada',offline:'Queda em andamento',saturated:'Sobrecarga',degraded:'Serviço degradado',disabled:'Ambiente desativado',empty:'Sem dados'}).map(([value,label]) => `<option value="${value}" ${OC.monitorState.availabilityScenario === value || (!OC.monitorState.availabilityScenario && value === 'mixed') ? 'selected' : ''}>${label}</option>`).join('')}</select></label>` : ''}
+      ${demo ? '<div class="av-demo-banner" role="status"><strong>Dados simulados</strong><span>Cenários de validação: operação normal, incidente encerrado e lacuna de coleta. Nenhum dado foi gravado no banco.</span></div>' : ""}
+      <div class="av-environments">${rows}</div>
+      <div class="av-legend"><span><i class="av-tone-ok"></i>Sem falhas observadas</span><span><i class="av-tone-down"></i>Com falhas</span><span><i class="av-tone-none"></i>Sem coleta</span><span class="av-legend-note">Cada faixa representa um intervalo do período selecionado.</span></div>
+      <section class="av-events"><header><div><h3>Eventos no período</h3><p>Incidentes e deploys na mesma linha do tempo.</p></div><span>${allEvents.length} registro${allEvents.length === 1 ? "" : "s"}</span></header>
+      ${events ? `<div class="av-table-scroll"><table><thead><tr><th>Horário</th><th>Ambiente</th><th>Evento</th><th>Estado</th><th>Duração</th></tr></thead><tbody>${events}</tbody></table></div>${allEvents.length > 20 || envs.some(env => dataByEnv?.[env]?.timelineTruncated) ? '<p class="av-table-note">Exibindo os eventos mais recentes do período.</p>' : ""}` : `<div class="av-empty-events"><strong>${hasData ? "Nenhum evento registrado" : "O histórico aparecerá após as primeiras coletas"}</strong><p>${hasData ? "Sem incidentes ou deploys registrados no período selecionado." : "Use a demonstração para explorar os indicadores e os cenários de falha."}</p></div>`}</section>
+      <details class="av-method"><summary>Como interpretar estes indicadores</summary><p><strong>Requisições:</strong> respostas não 5xx / requisições registradas no backend. Falhas anteriores à chegada ao backend não entram nesta conta.</p><p><strong>Health check:</strong> sondagens bem-sucedidas / sondagens coletadas. A cobertura indica quanto do período foi observado; faixas verdes não comprovam coleta completa.</p><p>O SLI de 7 e 30 dias exige confirmação da janela pela fonte. Dados de 24 horas sem confirmação devem ser tratados como referência preliminar. Retenção padrão: 30 dias.</p></details>
+    </div>`;
   }
 
   function renderTabContent(tab, payload, overviews, slos) {
@@ -3266,6 +3403,8 @@
     const since = OC.currentRoute?.query?.since || "";
 
     switch (tab) {
+      case "availability":
+        return renderAvailabilityView(payload.availabilityByEnv, payload.availabilityCurrentByEnv);
       case "summary": {
         const kpis = computeExecutiveKpis(
           overviews,
@@ -3278,13 +3417,6 @@
           ${renderGlobalStatusBanner(overviews, config)}
           ${renderMonitoringDiagnosis(payload.diagnosis)}
           ${renderStatusOverview(overviews, uptimeByEnv)}
-          ${OC.renderOpsSection({
-            title: "Disponibilidade",
-            hint: "MAIN e HOM · 7 dias",
-            body: loading?.uptime
-              ? renderLoadingSection("Status diário")
-              : renderUptimeStatusBars(uptimeByEnv, { compact: true }),
-          })}
           ${OC.renderOpsSection({
             title: "Timeline de incidentes",
             hint: "Eventos recentes",
@@ -3682,8 +3814,32 @@
 
   function bindMonitoringInteractions(root) {
     OC.bindBackNavigation(root);
+    OC.bindAvailabilityDetails?.(root);
     bindApiRouteDetailRows(root);
     bindApiRouteTableSort(root);
+    root.querySelectorAll("[data-availability-window]").forEach(button => {
+      button.addEventListener("click", () => {
+        const value = button.getAttribute("data-availability-window");
+        if (!["24h", "7d", "30d"].includes(value)) return;
+        OC.closeAvailabilityDetail?.(false);
+        OC.monitorState.availabilityWindow = value;
+        if (OC.monitorState.availabilityDemo) OC.renderMonitoringView(OC.monitorState.payload || {}, { partial: true });
+        else OC.refreshMonitoring({ force: true });
+      });
+    });
+    root.querySelector("[data-availability-demo]")?.addEventListener("click", () => {
+      OC.closeAvailabilityDetail?.(false);
+      OC._availabilityDemoAt = null;
+      OC.monitorState.availabilityDemo = !OC.monitorState.availabilityDemo;
+      if (OC.monitorState.availabilityDemo) OC._monitorAbortController?.abort();
+      OC.renderMonitoringView(OC.monitorState.payload || {}, { partial: true });
+      if (!OC.monitorState.availabilityDemo) OC.refreshMonitoring({ force: true });
+    });
+    root.querySelector('[data-availability-scenario]')?.addEventListener('change', event => {
+      OC.closeAvailabilityDetail?.(false);
+      OC.monitorState.availabilityScenario = event.target.value;
+      OC.renderMonitoringView(OC.monitorState.payload || {}, { partial: true });
+    });
     const openAlerts = () => {
       if (OC.openMonitorAlertsDrawer) OC.openMonitorAlertsDrawer(OC.lastAlertGroups || [], { refresh: false });
       else OC.navigate("monitoring", null, { tab: "incidents" });
@@ -4250,15 +4406,64 @@
     OC._monitorRenderCount = (OC._monitorRenderCount || 0) + 1;
   };
 
-  OC.fetchMonitoringJson = async function fetchMonitoringJson(url, fallback = null, options = {}) {
+  // Cache por URL completa: filtros e ambientes nunca compartilham dados.
+  const monitoringCachePrefix = "ops-monitor-cache-v1:";
+  const monitoringMemoryCache = new Map();
+  function readMonitoringCache(url) {
+    if (monitoringMemoryCache.has(url)) return monitoringMemoryCache.get(url);
     try {
-      if (OC.timedFetchJson) {
-        return await OC.timedFetchJson(url, { ...options, perfLabel: options.perfLabel });
+      const entry = JSON.parse(window.localStorage.getItem(monitoringCachePrefix + url) || "null");
+      if (entry && entry.at && entry.data) monitoringMemoryCache.set(url, entry);
+      return entry;
+    } catch { return null; }
+  }
+  function writeMonitoringCache(url, entry) {
+    monitoringMemoryCache.set(url, entry);
+    try { window.localStorage.setItem(monitoringCachePrefix + url, JSON.stringify(entry)); } catch { /* armazenamento indisponível */ }
+  }
+  function restoreFailedParts(data, old, path, restored) {
+    if (!data || typeof data !== "object") return data;
+    if (data.error || (path.endsWith("/api") && data.reachable === false)) {
+      restored.push(`${path}: ${data.error || "fonte indisponível"}`);
+      return old && typeof old === "object" && !old.error ? old : data;
+    }
+    if (Array.isArray(data)) {
+      if (path.endsWith("envSummaries") && Array.isArray(old)) {
+        const items = data.map(item => restoreFailedParts(item, old.find(x => x.env === item.env), `${path}/${item.env}`, restored));
+        for (const item of old) if (!items.some(x => x.env === item.env)) {
+          restored.push(`${path}/${item.env}: consulta incompleta`); items.push(item);
+        }
+        return items;
       }
-      return await OC.fetchJson(url, options);
+      return data;
+    }
+    const result = { ...data };
+    for (const key of Object.keys(result)) {
+      result[key] = restoreFailedParts(result[key], old?.[key], `${path}/${key}`, restored);
+    }
+    return result;
+  }
+  OC.fetchMonitoringJson = async function fetchMonitoringJson(url, fallback = null, options = {}) {
+    const cached = readMonitoringCache(url);
+    const warn = (reason) => {
+      if (OC._monitorCacheWarnings) {
+        const when = cached?.at ? new Date(cached.at).toLocaleString("pt-BR") : "sem atualização anterior";
+        OC._monitorCacheWarnings.push(`${url}: ${reason}. ${cached ? `Últimos dados de ${when} (${OC.formatRelativeTime(cached.at)}).` : when}`);
+      }
+    };
+    try {
+      const fetcher = OC.timedFetchJson || OC.fetchJson;
+      const data = await fetcher(url, { timeoutMs: OC.MONITOR_FETCH_TIMEOUT_MS ?? 30000, ...options, perfLabel: options.perfLabel });
+      if (data?.error || data?.reachable === false) throw new Error(data.error || "Fonte indisponível");
+      const restored = [];
+      const result = restoreFailedParts(data, cached?.data, url, restored);
+      if (restored.length) warn(restored.join("; "));
+      else writeMonitoringCache(url, { at: new Date().toISOString(), data });
+      return result;
     } catch (err) {
-      if (err.name === "AbortError") throw err;
-      return { error: err.message || String(err), ...(fallback || {}) };
+      if (err.name === "AbortError" || (err.code === "aborted" && !err.timedOut) || err.code === 401) throw err;
+      warn(err.message || String(err));
+      return cached ? { ...cached.data, _cache: { stale: true, savedAt: cached.at, error: err.message || String(err) } } : { ...(fallback || {}), error: err.message || String(err) };
     }
   };
 
@@ -4279,12 +4484,13 @@
     const generation = OC._monitorRefreshGeneration;
     const abortController = new AbortController();
     OC._monitorAbortController = abortController;
-    const fetchOpts = (perfLabel) => ({ signal: abortController.signal, perfLabel });
+    const fetchOpts = (perfLabel) => ({ signal: abortController.signal, timeoutMs: OC.MONITOR_FETCH_TIMEOUT_MS ?? 30000, perfLabel });
     const tCycle0 = typeof performance !== "undefined" ? performance.now() : Date.now();
     OC._monitorRenderCount = 0;
 
     loadPrefs();
     const warnings = [];
+    OC._monitorCacheWarnings = warnings;
     const tab = OC.monitorState.activeTab || "summary";
     const plan = monitoringFetchPlan(tab, OC.monitorState.categories);
     const prev = OC.monitorState.payload || {};
@@ -4307,7 +4513,8 @@
     }
 
     if (options.showLoading || !prev.envSummaries?.length) {
-      OC.showMonitoringLoading();
+      if (tab === "availability") OC.renderMonitoringView({ ...emptyPayloadExtras(), ...prev });
+      else OC.showMonitoringLoading();
     }
 
     const envs = OC.monitorState.selectedEnvs.filter((e) => OC.ENV_ORDER.includes(e));
@@ -4336,6 +4543,8 @@
     let apiRecent = { ...emptyPayloadExtras().apiRecent, ...(prev.apiRecent || {}) };
     let apiInflight = { ...emptyPayloadExtras().apiInflight, ...(prev.apiInflight || {}) };
     let uptimeByEnv = { ...emptyPayloadExtras().uptimeByEnv, ...(prev.uptimeByEnv || {}) };
+    let availabilityByEnv = { ...(prev.availabilityByEnv || {}) };
+    let availabilityCurrentByEnv = { ...(prev.availabilityCurrentByEnv || {}) };
     let syncs = { ...emptyPayloadExtras().syncs, ...(prev.syncs || {}) };
     let deploys = { ...emptyPayloadExtras().deploys, ...(prev.deploys || {}) };
     let logs = { ...emptyPayloadExtras().logs, ...(prev.logs || {}) };
@@ -4353,6 +4562,8 @@
       apiRecent,
       apiInflight,
       uptimeByEnv,
+      availabilityByEnv,
+      availabilityCurrentByEnv,
       syncs,
       deploys,
       logs,
@@ -4366,7 +4577,7 @@
       OC.monitorState.lastRefreshedAt = new Date().toISOString();
       OC.monitorState.payload = payload;
 
-      const alertSource = Array.isArray(payload.alertGroups)
+      const alertSource = tab === "availability" ? null : Array.isArray(payload.alertGroups)
         ? payload.alertGroups
         : Array.isArray(payload.groupedEvents)
           ? payload.groupedEvents
@@ -4428,6 +4639,27 @@
     const DASHBOARD_TABS = new Set(["summary", "incidents", "latency"]);
 
     try {
+      if (tab === "availability") {
+        if (!OC.monitorState.availabilityDemo) {
+          const currentTask = Promise.all(envs.map(async env => {
+            availabilityCurrentByEnv[env] = await OC.fetchMonitoringJson(
+              `/api/v1/monitoring/${env}/availability-current`,
+              { environment: env, state: 'unknown' }, fetchOpts(`availability-current:${env}`)
+            );
+          })).then(() => finishMonitoringRefresh({ ...payloadFields(), loading: {} }));
+          const historyTask = Promise.all(envs.map(async env => {
+            const period = OC.monitorState.availabilityWindow || "24h";
+            availabilityByEnv[env] = await OC.fetchMonitoringJson(
+              `/api/v1/monitoring/${env}/availability?window=${period}`,
+              { environment: env, window: period }, fetchOpts(`availability:${env}`)
+            );
+          })).then(() => finishMonitoringRefresh({ ...payloadFields(), loading: {} }));
+          await Promise.all([currentTask, historyTask]);
+          return;
+        }
+        finishMonitoringRefresh({ ...payloadFields(), loading: {} });
+        return;
+      }
       if (DASHBOARD_TABS.has(tab)) {
         const ef = OC.monitorState.eventFilters;
         const dashParams = new URLSearchParams({
@@ -4600,11 +4832,16 @@
 
       if (plan.apiSeries) {
         const hours = apiWindowHours(OC.monitorState.apiWindow || "6h");
+        const seriesParams = new URLSearchParams({ metric: 'api_avg_ms', hours: String(hours) });
+        if (OC.monitorState.apiWindow === 'custom' && OC.monitorState.apiSince && OC.monitorState.apiUntil) {
+          seriesParams.set('since', OC.monitorState.apiSince);
+          seriesParams.set('until', OC.monitorState.apiUntil);
+        }
         phase2.push(
           Promise.all(
             envs.map(async (env) => {
               apiSeries[env] = await OC.fetchMonitoringJson(
-                `/api/v1/monitoring/${env}/series?metric=api_avg_ms&hours=${hours}`,
+                `/api/v1/monitoring/${env}/series?${seriesParams}`,
                 { environment: env, points: [] },
                 fetchOpts(`api-series:${env}`)
               );
@@ -4737,7 +4974,7 @@
       // activity and must prevent the idle lock while the dashboard is live.
       OC.resetIdleTimer?.();
     } catch (err) {
-      if (err.name === "AbortError") return;
+      if (generation !== OC._monitorRefreshGeneration || abortController.signal.aborted || err.name === "AbortError" || (err.code === 'aborted' && !err.timedOut)) return;
       const root = document.getElementById("view-monitoring");
       if (root) {
         root.innerHTML = `${OC.renderBackToEnvironments("DEV")}

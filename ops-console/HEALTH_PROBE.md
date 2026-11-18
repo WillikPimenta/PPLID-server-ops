@@ -16,7 +16,7 @@ Rollback: set `PPLID_WAITRESS_CHANNEL_TIMEOUT=600` before restart.
 | Setting | Default |
 |---------|---------|
 | success cache TTL | 5s |
-| probe timeout | 1s |
+| probe timeout | 3s |
 | backoff initial / max | 5s / 60s |
 | stale window | 120s |
 | offline after N failures | 3 |

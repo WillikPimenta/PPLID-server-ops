@@ -3,7 +3,7 @@
   window.OpsConsole = window.OpsConsole || {};
   const OC = window.OpsConsole;
 
-  OC.MONITOR_TABS = ["summary", "incidents", "latency", "syncs", "apis", "logs"];
+  OC.MONITOR_TABS = ["summary", "availability", "incidents", "latency", "syncs", "apis", "logs"];
 
   OC.currentRoute = { view: "deploy", env: "DEV" };
 
@@ -168,6 +168,7 @@
   OC.renderRoute = function renderRoute() {
     const previousRoute = OC.currentRoute;
     OC.currentRoute = OC.parseRoute();
+    if (OC.currentRoute.view !== 'monitoring' || OC.currentRoute.tab !== 'availability') OC.closeAvailabilityDetail?.(false);
     if (OC.currentRoute.view === "monitoring") {
       OC.monitorState = OC.monitorState || {};
       OC.monitorState.activeTab = OC.currentRoute.tab || "summary";
@@ -366,6 +367,7 @@
       let active = OC.currentRoute?.view || "deploy";
       if (active === "monitoring") {
         if (OC.currentRoute?.tab === "incidents") active = "incidents";
+        else if (OC.currentRoute?.tab === "availability") active = "availability";
         else if (OC.currentRoute?.tab === "logs") active = "logs";
         else active = "performance";
       }
