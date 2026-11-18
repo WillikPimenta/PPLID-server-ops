@@ -30,6 +30,7 @@ ENV_ORDER = ("MAIN", "DEV", "HOM")
 _DEFAULT_MONITORING = {
     "retentionDays": 30,
     "collectorIntervalSec": 60,
+    "availabilityIntervalSec": 30,
     "pgSnapshotIntervalSec": 300,
     "defaultEnvs": list(ENV_ORDER),
     "slowRequestMs": 2000,
@@ -52,6 +53,8 @@ _DEFAULT_MONITORING = {
 }
 
 _COLLECTOR_THREAD: threading.Thread | None = None
+_AVAILABILITY_THREAD: threading.Thread | None = None
+_AVAILABILITY_START_LOCK = threading.Lock()
 _COLLECTOR_WATCHDOG_THREAD: threading.Thread | None = None
 _COLLECTOR_STOP = threading.Event()
 _COLLECTOR_CONFIG: dict[str, Any] | None = None
@@ -67,6 +70,7 @@ _LATENCY_SPIKE_SAMPLES: dict[str, list[float]] = {}
 _LAST_REACHABLE: dict[str, bool] = {}
 _LAST_OFFLINE_SINCE: dict[str, str] = {}
 _LAST_COLLECTOR_TICK_AT: str | None = None
+_LAST_AVAILABILITY_CHECK: dict[str, str] = {}
 _COLLECTOR_ERRORS: list[dict[str, Any]] = []
 _COLLECTOR_MAX_ERRORS = 20
 _DASHBOARD_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -857,45 +861,38 @@ def _collect_availability(config: dict[str, Any], env_name: str, ops_store, db_p
     from health_probe import get_coordinator
 
     # Shared snapshot with overview — single-flight, no duplicate HTTP probes.
-    health = get_coordinator().get_snapshot(config, env_name, wait=True, force=False)
+    # Scheduled probes bypass SWR/backoff; they still join an existing in-flight
+    # request. Overview polling continues to use its normal cache and backoff.
+    health = get_coordinator().get_snapshot(config, env_name, wait=True, force=True)
+    # A cached observation is evidence only at its original timestamp. Never
+    # extend coverage by writing it again at the time of this collector tick.
+    checked_at = health.get("checkedAt")
+    if not checked_at or health.get("stale") or checked_at == _LAST_AVAILABILITY_CHECK.get(env_name):
+        return
+    interval = max(15, int(get_monitoring_settings(config).get("availabilityIntervalSec") or 30))
     backend_up = bool(health.get("backendPortUp"))
     frontend_up = bool(health.get("frontendPortUp"))
-
-    ops_store.insert_monitor_sample(
-        env_name,
-        "health_latency_ms",
-        float(health.get("durationMs") or 0),
-        labels={
-            "reachable": health.get("reachable"),
-            "availabilityClass": health.get("availabilityClass"),
-            "fromCache": health.get("fromCache"),
-        },
-        db_path=db_path,
-    )
-    ops_store.insert_monitor_sample(
-        env_name,
-        "health_reachable",
-        1.0 if health.get("reachable") else 0.0,
-        db_path=db_path,
-    )
-    ops_store.insert_monitor_sample(
-        env_name,
-        "backend_port_up",
-        1.0 if backend_up else 0.0,
-        db_path=db_path,
-    )
-    ops_store.insert_monitor_sample(
-        env_name,
-        "frontend_port_up",
-        1.0 if frontend_up else 0.0,
-        db_path=db_path,
-    )
+    labels = {"intervalSec": interval, "jitterToleranceSec": 2,
+              "availabilityClass": health.get("availabilityClass"), "fromCache": health.get("fromCache")}
+    # HTTP reachability alone also includes HTTP 5xx in the coordinator. Require
+    # a successful readiness response; a timeout cannot inherit cached success.
+    reachable = (bool(health.get("reachable")) and health.get("status") in ("ok", "healthy", "degraded")
+                 and not health.get("timedOut") and not health.get("lastValidUsed")
+                 and isinstance(health.get("httpStatus"), int) and 200 <= health["httpStatus"] < 300)
+    ops_store.insert_monitor_samples_batch([
+        {"environment": env_name, "metric_key": key, "value": value,
+         "recorded_at": checked_at, "labels": labels}
+        for key, value in (("health_latency_ms", float(health.get("durationMs") or 0)),
+                           ("health_reachable", float(reachable)),
+                           ("backend_port_up", float(backend_up)), ("frontend_port_up", float(frontend_up)))
+    ], db_path=db_path)
+    _LAST_AVAILABILITY_CHECK[env_name] = checked_at
     _detect_health_spike(
         ops_store,
         db_path,
         env_name,
         float(health.get("durationMs") or 0),
-        bool(health.get("reachable")),
+        reachable,
         health=health,
         backend_port_up=backend_up,
         frontend_port_up=frontend_up,
@@ -1763,8 +1760,6 @@ def _collector_tick(config: dict[str, Any]) -> None:
         if not _env_enabled(env_name):
             continue
         try:
-            if categories.get("availability", True):
-                _collect_availability(config, env_name, ops_store, db_path)
             last_pg = _LAST_PG_SNAPSHOT.get(env_name, 0.0)
             if categories.get("postgres", True) and (now - last_pg >= pg_interval):
                 _collect_postgres(config, env_name, ops_store, db_path)
@@ -1794,14 +1789,59 @@ def _collector_tick(config: dict[str, Any]) -> None:
 def _collector_loop(config: dict[str, Any]) -> None:
     settings = get_monitoring_settings(config)
     interval = max(15, int(settings.get("collectorIntervalSec") or 60))
-    while not _COLLECTOR_STOP.wait(interval):
+    _run_periodic(lambda: _collector_tick(config), interval)
+
+
+def _run_periodic(callback, interval: float) -> None:
+    """Fixed monotonic deadlines; skip missed ticks instead of issuing bursts."""
+    deadline = time.monotonic()
+    while not _COLLECTOR_STOP.is_set():
         try:
-            _collector_tick(config)
+            callback()
         except Exception as exc:  # noqa: BLE001
-            _logger.exception("monitoring collector loop failed: %s", exc)
+            _logger.exception("monitoring collector failed")
             _COLLECTOR_ERRORS.append({"at": _utc_now_iso(), "message": str(exc)})
-            if len(_COLLECTOR_ERRORS) > _COLLECTOR_MAX_ERRORS:
-                _COLLECTOR_ERRORS.pop(0)
+            del _COLLECTOR_ERRORS[:-_COLLECTOR_MAX_ERRORS]
+        deadline += interval
+        now = time.monotonic()
+        if deadline < now:
+            deadline += (int((now - deadline) // interval) + 1) * interval
+        if _COLLECTOR_STOP.wait(max(0, deadline - now)):
+            break
+
+
+def _availability_tick(config: dict[str, Any]) -> None:
+    if not get_monitoring_settings(config).get("enabledCategories", {}).get("availability", True):
+        return
+    store = _import_ops_store(config)
+    db_path = resolve_ops_store_path(config)
+    store.init_store(db_path)
+    envs = [env for env in ENV_ORDER if isinstance(config.get(env), dict) and config[env].get("enabled", True)]
+    # One slow environment cannot delay the other probes. The coordinator still
+    # enforces its shared concurrency limit and single-flight per environment.
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ops-availability") as pool:
+        futures = {pool.submit(_collect_availability, config, env, store, db_path): env for env in envs}
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001
+                _logger.exception("availability collector failed for %s", futures[future])
+                _COLLECTOR_ERRORS.append({"at": _utc_now_iso(), "message": f"availability {futures[future]}: {exc}"})
+                del _COLLECTOR_ERRORS[:-_COLLECTOR_MAX_ERRORS]
+
+
+def _availability_loop(config: dict[str, Any]) -> None:
+    interval = max(15, int(get_monitoring_settings(config).get("availabilityIntervalSec") or 30))
+    _run_periodic(lambda: _availability_tick(config), interval)
+
+
+def _ensure_availability_collector(config: dict[str, Any]) -> None:
+    global _AVAILABILITY_THREAD
+    with _AVAILABILITY_START_LOCK:
+        if not (_AVAILABILITY_THREAD and _AVAILABILITY_THREAD.is_alive()):
+            _AVAILABILITY_THREAD = threading.Thread(target=_availability_loop, args=(config,),
+                                                   name="ops-availability-collector", daemon=True)
+            _AVAILABILITY_THREAD.start()
 
 
 def _collector_watchdog_loop() -> None:
@@ -1810,6 +1850,7 @@ def _collector_watchdog_loop() -> None:
         cfg = _COLLECTOR_CONFIG
         if not cfg:
             continue
+        _ensure_availability_collector(cfg)
         if _COLLECTOR_THREAD and _COLLECTOR_THREAD.is_alive():
             continue
         _logger.warning("monitoring collector thread dead — restarting")
@@ -1830,6 +1871,8 @@ def _collector_watchdog_loop() -> None:
 def start_monitoring_collector(config: dict[str, Any]) -> None:
     global _COLLECTOR_THREAD, _COLLECTOR_WATCHDOG_THREAD, _COLLECTOR_CONFIG
     _COLLECTOR_CONFIG = config
+    _COLLECTOR_STOP.clear()
+    _ensure_availability_collector(config)
     if _COLLECTOR_THREAD and _COLLECTOR_THREAD.is_alive():
         if not (_COLLECTOR_WATCHDOG_THREAD and _COLLECTOR_WATCHDOG_THREAD.is_alive()):
             _COLLECTOR_WATCHDOG_THREAD = threading.Thread(
@@ -1847,7 +1890,6 @@ def start_monitoring_collector(config: dict[str, Any]) -> None:
         daemon=True,
     )
     _COLLECTOR_THREAD.start()
-    threading.Thread(target=_collector_tick, args=(config,), name="ops-monitoring-initial", daemon=True).start()
     if not (_COLLECTOR_WATCHDOG_THREAD and _COLLECTOR_WATCHDOG_THREAD.is_alive()):
         _COLLECTOR_WATCHDOG_THREAD = threading.Thread(
             target=_collector_watchdog_loop,
@@ -1947,6 +1989,11 @@ def build_monitoring_collector_status_detail(config: dict[str, Any]) -> dict[str
         "lastTickAt": _LAST_COLLECTOR_TICK_AT,
         "threadAlive": thread_alive,
         "samplesByEnv2h": samples_by_env,
+        "availabilityCollector": {
+            "threadAlive": bool(_AVAILABILITY_THREAD and _AVAILABILITY_THREAD.is_alive()),
+            "intervalSec": max(15, int(settings.get("availabilityIntervalSec") or 30)),
+            "lastChecksByEnv": dict(_LAST_AVAILABILITY_CHECK),
+        },
         "recentErrors": list(_COLLECTOR_ERRORS),
     }
 
@@ -2645,18 +2692,18 @@ def _build_availability_window(
     since = start.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     until = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     settings = get_monitoring_settings(config)
-    interval = max(15, int(settings.get("collectorIntervalSec") or 60))
+    interval = max(15, int(settings.get("availabilityIntervalSec") or 30))
     store = _import_ops_store()
     db_path = resolve_ops_store_path(config)
 
     # Read the complete window: query_monitor_series deliberately caps results at 10,000.
     with store.get_connection(db_path) as conn:
         samples = conn.execute(
-            "SELECT recorded_at, value FROM monitor_samples WHERE environment=? AND metric_key='health_reachable' AND recorded_at>=? AND recorded_at<? ORDER BY recorded_at, id",
+            "SELECT recorded_at, value, labels_json FROM monitor_samples WHERE environment=? AND metric_key='health_reachable' AND recorded_at>=? AND recorded_at<? ORDER BY recorded_at, id",
             (env_name, since, until),
         ).fetchall()
         previous = conn.execute(
-            "SELECT recorded_at, value FROM monitor_samples WHERE environment=? AND metric_key='health_reachable' AND recorded_at<? ORDER BY recorded_at DESC, id DESC LIMIT 1",
+            "SELECT recorded_at, value, labels_json FROM monitor_samples WHERE environment=? AND metric_key='health_reachable' AND recorded_at<? ORDER BY recorded_at DESC, id DESC LIMIT 1",
             (env_name, since),
         ).fetchone()
         events = conn.execute(
@@ -2675,21 +2722,37 @@ def _build_availability_window(
     points = [(dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc), float(row['value'] or 0) >= 1.0)
               for row in samples if (dt := _parse_iso_dt(row['recorded_at'])) is not None]
     good = sum(1 for _, ok in points if ok)
+    def cadence(row):
+        try:
+            labels = json.loads(row['labels_json'] or '{}')
+            # Legacy observations retain the original 60s policy. The current
+            # configuration must never reinterpret an existing observation.
+            seconds = max(15, min(3600, float(labels.get('intervalSec', 60))))
+            tolerance = max(0, min(2, float(labels.get('jitterToleranceSec', 0))))
+            return seconds, tolerance
+        except (ValueError, TypeError, AttributeError):
+            return 60, 0
+
+    def recorded_time(row):
+        dt = _parse_iso_dt(row['recorded_at'])
+        return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    policies = {dt: cadence(row) for row in samples if (dt := recorded_time(row)) is not None}
+    if previous:
+        policies[recorded_time(previous)] = cadence(previous)
     expected = max(1, int((now - start).total_seconds() / interval))
-    # Count occupied intervals, so repeated snapshots cannot hide missing collection.
-    slots = {int((dt - start).total_seconds() // interval) for dt, _ in points}
-    coverage = min(100.0, round(100 * len(slots) / expected, 1))
     health = {
         "uptimePct": round(100 * good / len(points), 2) if points else None,
         "samples": len(points), "successful": good, "expectedSamples": expected,
-        "coveragePct": coverage, "lastSampleAt": points[-1][0].isoformat() if points else None,
+        "lastSampleAt": points[-1][0].isoformat() if points else None,
         "intervalSec": interval,
     }
-    bucket_count = {"24h": 48, "7d": 28, "30d": 30}.get(window, 60)
+    display_interval = max([policy[0] for policy in policies.values()] or [interval])
+    bucket_count = {"24h": 48, "7d": 28, "30d": 30}.get(window, min(60, max(1, int((now - start).total_seconds() / display_interval))))
     bucket_seconds = (now - start).total_seconds() / bucket_count
     history = [{"since": (start + timedelta(seconds=i * bucket_seconds)).isoformat(),
                 "until": (start + timedelta(seconds=(i + 1) * bucket_seconds)).isoformat(),
-                "samples": 0, "failures": 0} for i in range(bucket_count)]
+                "samples": 0, "failures": 0, "observedSec": 0, "downSec": 0} for i in range(bucket_count)]
     for dt, ok in points:
         bucket = history[min(bucket_count - 1, int((dt - start).total_seconds() / bucket_seconds))]
         bucket['samples'] += 1
@@ -2698,18 +2761,37 @@ def _build_availability_window(
     observations = list(points)
     if previous and (previous_dt := _parse_iso_dt(previous['recorded_at'])):
         previous_dt = previous_dt if previous_dt.tzinfo else previous_dt.replace(tzinfo=timezone.utc)
-        if (start - previous_dt).total_seconds() <= interval:
+        if (start - previous_dt).total_seconds() <= policies[previous_dt][0]:
             observations.insert(0, (previous_dt, float(previous['value'] or 0) >= 1.0))
     incidents, streak = [], None
     observed_seconds, down_seconds = 0.0, 0.0
+    longest_gap, covered_until = 0.0, start
+    sample_intervals = []
     for i, (dt, ok) in enumerate(observations):
+        sample_interval, tolerance = policies.get(dt, (60, 0))
         next_dt = observations[i + 1][0] if i + 1 < len(observations) else now
-        segment_end = min(next_dt, dt + timedelta(seconds=interval), now)
-        segment_seconds = max(0.0, (segment_end - max(dt, start)).total_seconds())
+        separation = (next_dt - dt).total_seconds()
+        if i + 1 < len(observations):
+            sample_intervals.append(separation)
+        # Only bridge bounded scheduling jitter when a subsequent observation
+        # actually arrived. Missing probes remain unknown, never assumed healthy.
+        validity = separation if i + 1 < len(observations) and separation <= sample_interval + tolerance else sample_interval
+        segment_end = min(next_dt, dt + timedelta(seconds=validity), now)
+        segment_start = max(dt, start)
+        segment_seconds = max(0.0, (segment_end - segment_start).total_seconds())
+        longest_gap = max(longest_gap, (segment_start - covered_until).total_seconds())
+        covered_until = max(covered_until, segment_end)
         observed_seconds += segment_seconds
         if not ok:
             down_seconds += segment_seconds
-        gap = i > 0 and (dt - observations[i - 1][0]).total_seconds() > interval * 2
+        for index in range(max(0, int((segment_start - start).total_seconds() / bucket_seconds)),
+                           min(bucket_count - 1, int((segment_end - start).total_seconds() / bucket_seconds)) + 1):
+            overlap = max(0, (min(segment_end, start + timedelta(seconds=(index + 1) * bucket_seconds)) -
+                              max(segment_start, start + timedelta(seconds=index * bucket_seconds))).total_seconds())
+            history[index]['observedSec'] += overlap
+            if not ok:
+                history[index]['downSec'] += overlap
+        gap = i > 0 and (dt - observations[i - 1][0]).total_seconds() > sum(policies.get(observations[i - 1][0], (60, 0)))
         if streak and gap:
             incidents.append({**streak, 'finishedAt': None, 'ongoing': False,
                               'durationSec': None, 'uncertain': True})
@@ -2724,13 +2806,43 @@ def _build_availability_window(
                               'durationSec': None if streak['uncertain'] else int(streak['observedDurationSec'])})
             streak = None
     if streak:
-        fresh = bool(observations and (now - observations[-1][0]).total_seconds() <= interval * 2)
+        fresh = (now - observations[-1][0]).total_seconds() <= sum(policies.get(observations[-1][0], (60, 0)))
         # A historical interval ending in failure cannot prove an incident is still active now.
         ongoing = fresh and abs((datetime.now(timezone.utc) - now).total_seconds()) <= interval * 2
         uncertain = streak['uncertain'] or not fresh
         incidents.append({**streak, 'finishedAt': None, 'ongoing': ongoing,
                           'durationSec': None if uncertain else int(streak['observedDurationSec']),
                           'uncertain': uncertain})
+    longest_gap = max(longest_gap, (now - covered_until).total_seconds())
+    last_observation = observations[-1][0] if observations else None
+    # Estimate expected count using the recorded cadence in each part of the
+    # window, rather than applying today's configuration to the entire history.
+    active_interval = policies[observations[0][0]][0] if observations else interval
+    expected_count, policy_since = 0.0, start
+    for dt, _ in observations:
+        next_interval = policies[dt][0]
+        if dt > start and next_interval != active_interval:
+            expected_count += (dt - policy_since).total_seconds() / active_interval
+            policy_since = dt
+        active_interval = next_interval
+    expected_count += (now - policy_since).total_seconds() / active_interval
+    health.update({
+        'coveragePct': round(100 * observed_seconds / (now - start).total_seconds(), 1),
+        'coverageMethod': 'observed-duration-v2',
+        'lastSampleAt': last_observation.isoformat() if last_observation else None,
+        'lastSampleAgeSec': round((now - last_observation).total_seconds(), 1) if last_observation else None,
+        'intervalSec': active_interval,
+        'configuredIntervalSec': interval,
+        'expectedSamples': max(1, int(expected_count)),
+        'actualIntervalSec': round(sum(sample_intervals) / len(sample_intervals), 1) if sample_intervals else None,
+        'largestGapSec': round(longest_gap),
+        'recordedIntervalsSec': sorted({policy[0] for policy in policies.values()}),
+        'collectorAlive': bool(_AVAILABILITY_THREAD and _AVAILABILITY_THREAD.is_alive()),
+    })
+    for bucket in history:
+        bucket['coveragePct'] = round(100 * bucket['observedSec'] / bucket_seconds, 1)
+        bucket['observedSec'] = round(bucket['observedSec'], 3)
+        bucket['downSec'] = round(bucket['downSec'], 3)
     impact = {'incidentCount': len(incidents) if observed_seconds else None, 'estimatedDowntimeSec': round(down_seconds) if observed_seconds else None,
               'observedSec': round(observed_seconds),
               'unknownSec': max(0, round((now - start).total_seconds() - observed_seconds)),

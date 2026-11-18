@@ -19,14 +19,19 @@
     const verified = api && !api.error && api.periodVerified === true;
     const cached = [data, api].filter(item => item?._cache?.stale).map(item => `Última resposta de ${date(item._cache.savedAt)}: ${item._cache.error}`).join('; ');
     const list = timeline.slice(0, 30).map(item => `<li><time>${escape(date(item.startedAt))}</time><strong>${escape(item.kind === 'deploy' ? 'Deploy' : item.kind === 'outage' ? 'Episódio de falha' : item.title || 'Evento')}</strong><small>${escape(item.kind === 'outage' ? `${item.ongoing ? 'Em andamento; ' : ''}${item.uncertain ? 'Continuidade incerta; ' : ''}tempo observado ${duration(item.observedDurationSec ?? item.durationSec)}` : item.result || item.status || 'Registrado')}</small></li>`).join('');
-    const healthPoints = (data?.history || []).map(point => `<span class="av-detail-sample ${!point.samples ? 'is-missing' : point.failures ? 'is-failed' : ''}" title="${escape(`${date(point.since)}: ${point.samples} amostras, ${point.failures} falhas`)}"></span>`).join('');
+    const healthPoints = (data?.history || []).map(point => {
+      const observed = point.observedSec == null ? Boolean(point.samples) : point.observedSec > 0;
+      const state = !observed ? 'is-missing' : point.failures || point.downSec > 0 ? 'is-failed' : '';
+      const partial = observed && point.coveragePct != null && point.coveragePct < 99;
+      return `<span class="av-detail-sample ${state}${partial ? ' is-partial' : ''}" title="${escape(`${date(point.since)}: ${point.samples} amostras, ${point.failures} falhas${point.coveragePct == null ? '' : `, ${point.coveragePct}% de cobertura`}`)}"></span>`;
+    }).join('');
     const latencyPoints = (latency.points || []).filter(point => Number.isFinite(point.avgMs) && Number.isFinite(Date.parse(point.since)));
     const max = Math.max(1, ...latencyPoints.map(point => point.avgMs));
     const span = Math.max(1, Date.parse(selection.until) - Date.parse(selection.since));
     const pointPosition = point => `${8 + (Date.parse(point.since) - Date.parse(selection.since)) * 584 / span},${92 - point.avgMs / max * 80}`;
     const groups = [];
     latencyPoints.forEach((point, index) => {
-      if (!index || Date.parse(point.since) - Date.parse(latencyPoints[index - 1].since) > span / 60 * 1.5) groups.push([]);
+      if (!index || Date.parse(point.since) - Date.parse(latencyPoints[index - 1].since) > (data?.history?.length ? span / data.history.length : span / 60) * 1.5) groups.push([]);
       groups[groups.length - 1].push(point);
     });
     const chart = latencyPoints.length ? `<svg class="av-detail-latency" viewBox="0 0 600 100" role="img" aria-label="Latência média das sondagens por intervalo">${groups.map(group => group.length === 1 ? `<circle cx="${pointPosition(group[0]).split(',')[0]}" cy="${pointPosition(group[0]).split(',')[1]}" r="3" fill="currentColor" />` : `<polyline points="${group.map(pointPosition).join(' ')}" fill="none" stroke="currentColor" stroke-width="2.5" />`).join('')}</svg>` : '<p>Sem amostras de latência neste intervalo.</p>';
@@ -37,8 +42,8 @@
     const links = selection.demo ? '<p class="av-detail-notice">Demonstração: a investigação usa apenas dados simulados. As fontes reais não são consultadas.</p>' : `<nav class="av-detail-links"><a class="btn btn-secondary btn-sm" href="/monitoring/apis?${apiQuery}" data-av-detail-link>Investigar APIs</a><a class="btn btn-secondary btn-sm" href="/monitoring/logs?${query}" data-av-detail-link>Ver logs do intervalo</a></nav>`;
     return `<header class="av-detail-header"><div><span>Investigação de disponibilidade${selection.demo ? ' · Dados simulados' : ''}</span><h2 id="av-detail-title">${escape(selection.env)}</h2><p>${escape(date(selection.since))} → ${escape(date(selection.until))}</p></div><button type="button" class="av-detail-close" data-av-detail-close aria-label="Fechar investigação">×</button></header>
       <div class="av-detail-body">${selection.loading ? '<p role="status">Carregando sondagens e eventos locais…</p>' : ''}${selection.error || cached ? `<p class="av-detail-notice" role="alert">${escape(selection.error || cached)}</p>` : ''}
-      ${data ? `<section><h3>Impacto observado</h3><dl class="av-detail-kpis"><div><dt>Episódios de falha</dt><dd>${escape(impact.incidentCount ?? 'Sem dados')}</dd></div><div><dt>Indisponibilidade estimada</dt><dd>${escape(duration(impact.estimatedDowntimeSec))}</dd></div><div><dt>Sem cobertura</dt><dd>${escape(duration(impact.unknownSec))}</dd></div><div><dt>Cobertura da coleta</dt><dd>${health.coveragePct == null ? 'Sem dados' : `${escape(health.coveragePct)}%`}</dd></div></dl></section>
-      <section><h3>Sondagens do intervalo</h3><p>${escape(health.samples ?? 0)} amostras; ${escape(health.successful ?? 0)} bem-sucedidas. ${health.lastSampleAt ? `Última: ${escape(date(health.lastSampleAt))}.` : ''}</p><div class="av-detail-samples">${healthPoints}</div><p class="av-detail-caption">Verde: sem falhas observadas · vermelho: com falhas · cinza: sem coleta.</p></section>
+      ${data ? `<section><h3>Impacto observado</h3><dl class="av-detail-kpis"><div><dt>Episódios de falha</dt><dd>${escape(impact.incidentCount ?? 'Sem dados')}</dd></div><div><dt>Indisponibilidade estimada</dt><dd>${escape(duration(impact.estimatedDowntimeSec))}</dd></div><div><dt>Sem cobertura</dt><dd>${escape(duration(impact.unknownSec))}</dd></div><div><dt>Cobertura da coleta</dt><dd>${health.coveragePct == null ? 'Sem dados' : `${escape(health.coveragePct)}%`}</dd></div></dl>${health.coverageMethod ? `<dl class="av-detail-kpis av-detail-diagnostics"><div><dt>Frequência prevista</dt><dd>${escape(duration(health.intervalSec))}</dd></div><div><dt>Intervalo médio real</dt><dd>${escape(duration(health.actualIntervalSec))}</dd></div><div><dt>Idade da última amostra no fim do intervalo</dt><dd>${escape(duration(health.lastSampleAgeSec))}</dd></div><div><dt>Maior lacuna de coleta</dt><dd>${escape(duration(health.largestGapSec))}</dd></div></dl>` : ''}</section>
+      <section><h3>Sondagens do intervalo</h3><p>${escape(health.samples ?? 0)} amostras; ${escape(health.successful ?? 0)} bem-sucedidas. ${health.lastSampleAt ? `Última: ${escape(date(health.lastSampleAt))}.` : ''}</p><div class="av-detail-samples">${healthPoints}</div><p class="av-detail-caption">Verde: sem falhas observadas · vermelho: com falhas · cinza: sem coleta · hachurado: coleta parcial.</p></section>
       <section><h3>Latência do health check</h3><p>Média ${escape(latency.avgMs ?? '—')} ms / máxima ${escape(latency.maxMs ?? '—')} ms</p>${chart}<p class="av-detail-caption">Medições da sonda; não representa a latência de todas as requisições da aplicação.</p></section>
       <section><h3>Incidentes e deploys</h3>${list ? `<ol class="av-detail-events">${list}</ol>` : '<p>Sem eventos registrados neste intervalo.</p>'}${data.timelineTruncated || timeline.length > 30 ? '<p>Lista limitada aos registros mais recentes.</p>' : ''}</section>` : ''}
       <section><h3>Métricas de API</h3>${apiMarkup}</section>${links}</div>`;
@@ -128,10 +133,12 @@
       const buckets = fixture.history.filter(bucket => new Date(bucket.since) < end && new Date(bucket.until) > start);
       const samples = buckets.reduce((sum, bucket) => sum + bucket.samples, 0);
       const failures = buckets.reduce((sum, bucket) => sum + bucket.failures, 0);
+      const observedSec = buckets.reduce((sum, bucket) => sum + (bucket.observedSec ?? bucket.samples * 60), 0);
       const timeline = fixture.timeline.filter(item => new Date(item.startedAt) < end && (item.kind === 'outage' ? (!item.finishedAt || new Date(item.finishedAt) >= start) : new Date(item.startedAt) >= start));
       selection.data = { ...fixture, since, until, history: buckets, timeline,
-        health: { samples, successful: samples - failures, coveragePct: samples ? 100 : 0, lastSampleAt: samples ? until : null },
-        impact: { incidentCount: timeline.filter(item => item.kind === 'outage').length, estimatedDowntimeSec: failures * 60, unknownSec: samples ? 0 : (end - start) / 1000 },
+        health: { ...fixture.health, samples, successful: samples - failures, coveragePct: Math.min(100, observedSec * 100000 / (end - start)), lastSampleAt: samples ? until : null,
+          lastSampleAgeSec: samples ? 0 : null, largestGapSec: Math.max(0, ...buckets.map(bucket => (Date.parse(bucket.until) - Date.parse(bucket.since)) / 1000 - (bucket.observedSec ?? bucket.samples * 60))) },
+        impact: { incidentCount: timeline.filter(item => item.kind === 'outage').length, estimatedDowntimeSec: failures * 60, observedSec, unknownSec: Math.max(0, (end - start) / 1000 - observedSec) },
         latency: { avgMs: samples ? 145 : null, maxMs: samples ? 820 : null, points: buckets.filter(bucket => bucket.samples).map((bucket, i) => ({ since: bucket.since, avgMs: 100 + i % 5 * 32 })) } };
       selection.api = samples ? { periodVerified: true, totals: { requests: samples * 12, errors5xx: failures * 2 }, slowRoutes: [{ method: 'GET', route: '/api/v1/items/', avgMs: 220 }] } : { error: 'Sem dados simulados neste intervalo' };
       selection.loading = selection.apiLoading = false;
