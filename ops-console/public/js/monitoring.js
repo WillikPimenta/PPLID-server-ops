@@ -1954,6 +1954,16 @@
     const wrap = document.getElementById("monitor-api-routes-wrap");
     if (!wrap) return;
     const note = document.getElementById("monitor-api-routes-filter-note");
+    const selected = OC.monitorState.apiRouteFilter || "";
+    if (selected) {
+      wrap.querySelectorAll("tr[data-api-route]").forEach(tr => {
+        const match = tr.getAttribute("data-api-route") === selected;
+        tr.hidden = !match;
+        tr.classList.toggle("is-api-filter-hit", match);
+      });
+      if (note) note.hidden = true;
+      return;
+    }
     if (!routes?.length) {
       if (note) note.hidden = true;
       wrap.querySelectorAll("tr[data-api-route]").forEach((tr) => {
@@ -2556,13 +2566,77 @@
     return `<nav class="monitor-api-subtabs" role="tablist" aria-label="Visões de APIs">${tabs}</nav>`;
   }
 
-  function renderApisOverviewSection(apiRoutes, apiSeries, slos) {
+  function buildApiLatencyChart(latency, env, sloMs) {
+    const chartId = `api-${env}`;
+    OC._chartHoverData = OC._chartHoverData || {};
+    OC._chartHoverData[chartId] = [];
+    const empty = (message) => ({ html: `<p class="monitor-empty monitor-empty-neutral">${OC.escapeHtml(message)}</p>`, spikes: [] });
+    if (!latency?.available) return empty("Coleta de latência por minuto indisponível.");
+    const points = (latency.points || []).map(p => ({ ...p, time: new Date(p.at).getTime() }));
+    const populated = points.filter(p => p.requests > 0 && p.avgMs != null && p.maxMs != null && Number.isFinite(p.time));
+    if (!populated.length) return empty("Sem requisições contabilizadas neste período.");
+    const width = 720, height = 220;
+    const pad = { left: 54, right: 18, top: 24, bottom: 36 };
+    const tMin = Math.min(new Date(latency.since).getTime(), points[0].time);
+    const tMax = new Date(latency.until).getTime();
+    const { vMin, vMax, sloInScale } = chartValueDomain(populated.flatMap(p => [p.avgMs, p.maxMs]), sloMs);
+    const x = t => pad.left + (t - tMin) / (tMax - tMin || 1) * (width - pad.left - pad.right);
+    const y = v => height - pad.bottom - (v - vMin) / (vMax - vMin || 1) * (height - pad.top - pad.bottom);
+    const colors = { avgMs: ENV_COLORS[env] || "#2457a7", maxMs: "#d97706" };
+    const paths = ["avgMs", "maxMs"].map(key => {
+      let previous = null;
+      const segments = [];
+      points.forEach(p => {
+        if (!p.requests || p[key] == null || !Number.isFinite(p.time)) { previous = null; return; }
+        const xx = x(p.time), yy = y(p[key]);
+        // A short initial segment keeps isolated populated minutes visible.
+        segments.push(previous != null && p.time - previous === 60000
+          ? `L${xx.toFixed(1)},${yy.toFixed(1)}`
+          : `M${xx.toFixed(1)},${yy.toFixed(1)}h1`);
+        previous = p.time;
+      });
+      return `<path d="${segments.join(" ")}" fill="none" stroke="${colors[key]}" stroke-width="2" ${key === "maxMs" ? 'stroke-dasharray="5 3"' : ""} />`;
+    }).join("");
+    const spikes = populated.filter(p => sloMs != null && p.maxMs >= sloMs)
+      .map(p => ({ env, iso: p.at, v: p.maxMs })).sort((a, b) => b.v - a.v);
+    OC._chartHoverData[chartId] = points.filter(p => Number.isFinite(p.time)).map(p => ({
+      env, iso: p.at, t: p.time, v: p.maxMs, x: x(p.time), y: y(p.maxMs ?? 0),
+      labels: { apiLatency: true, ...p },
+    }));
+    const last = populated[populated.length - 1];
+    const total = latency.totals || {};
+    const summary = `Último minuto com tráfego: ${OC.formatDate(last.at)}${last.partial ? " (parcial)" : ""} · média ${formatLatencyMs(last.avgMs)} ms · máximo ${formatLatencyMs(last.maxMs)} ms`;
+    const period = `Média do período: ${formatLatencyMs(total.avgMs)} ms · ${Number(total.requests || 0).toLocaleString("pt-BR")} requisições contabilizadas`;
+    const grid = [0, 0.5, 1].map(f => {
+      const value = vMin + (vMax - vMin) * f;
+      return `<line x1="${pad.left}" y1="${y(value)}" x2="${width - pad.right}" y2="${y(value)}" class="monitor-grid-line" /><text x="${pad.left - 6}" y="${y(value) + 4}" text-anchor="end" class="monitor-axis-label">${formatLatencyMs(value)}</text>`;
+    }).join("");
+    const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => {
+      const time = tMin + (tMax - tMin) * f;
+      return `<text x="${x(time)}" y="${height - 8}" text-anchor="middle" class="monitor-axis-label">${OC.escapeHtml(formatChartAxisLabel(time, tMax - tMin, f === 0 ? "start" : f === 1 ? "end" : "mid"))}</text>`;
+    }).join("");
+    const limit = sloMs == null ? "" : `${sloInScale ? `<line x1="${pad.left}" y1="${y(sloMs)}" x2="${width - pad.right}" y2="${y(sloMs)}" class="monitor-slo-line" />` : ""}<text x="${width - pad.right}" y="${sloInScale ? y(sloMs) - 5 : 15}" text-anchor="end" class="monitor-slo-label">Limite ${formatLatencyMs(sloMs)} ms${sloInScale ? "" : " (fora da escala)"}</text>`;
+    const dots = spikes.slice(0, 8).map(p => `<circle class="monitor-spike-dot" cx="${x(new Date(p.iso).getTime())}" cy="${y(p.v)}" r="4" fill="${colors.maxMs}" data-env="${OC.escapeHtml(env)}" data-iso="${OC.escapeHtml(p.iso)}" data-ms="${p.v}" />`).join("");
+    return { spikes, html: `<p class="monitor-chart-summary">${OC.escapeHtml(summary)}<br>${OC.escapeHtml(period)}</p>
+      <div class="monitor-chart-wrap" data-chart-id="${chartId}" data-slo="${sloMs ?? ""}">
+        <svg class="monitor-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Média e máximo da latência por minuto em ${OC.escapeHtml(env)}" data-chart-svg="${chartId}">
+          ${grid}${limit}${paths}${dots}${ticks}
+          <line class="monitor-chart-cursor hidden" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${height - pad.bottom}" />
+          <rect class="monitor-chart-hit" x="${pad.left}" y="${pad.top}" width="${width - pad.left - pad.right}" height="${height - pad.top - pad.bottom}" fill="transparent" data-chart-hit="${chartId}" />
+        </svg>
+        <div class="monitor-chart-tooltip hidden" data-chart-tooltip="${chartId}"></div>
+        <div class="monitor-legend">${[["avgMs", "Média por minuto"], ["maxMs", "Máximo por minuto"]].map(([key, label]) => `<span class="monitor-legend-item"><span class="monitor-legend-swatch" style="background:${colors[key]}"></span>${label}</span>`).join("")}</div>
+      </div>` };
+  }
+
+  function renderApisOverviewSection(apiRoutes, slos) {
     const win = OC.monitorState.apiWindow || "6h";
     const hours = apiWindowHours(win);
     const sloMs = slos?.healthP95WarnMs ?? 2000;
     const focus = selectedApiEnvs();
     const routeOptions = apiFilterOptions(apiRoutes, focus);
     const selectedRoute = OC.monitorState.apiRouteFilter || "";
+    if (selectedRoute && !routeOptions.some(([key]) => key === selectedRoute)) routeOptions.push([selectedRoute]);
     const selectedRange =
       win === "custom"
         ? `
@@ -2574,7 +2648,7 @@
         : "";
     const routeFilter = `<div class="monitor-api-filter-line">
       <label for="monitor-api-route-filter">API específica</label>
-      <select id="monitor-api-route-filter" title="${selectedRoute ? "Filtro aplicado ao diagnóstico e aos detalhes." : "Escolha método e rota para investigar uma API."}"><option value="">Todas as APIs</option>${routeOptions
+      <select id="monitor-api-route-filter" title="${selectedRoute ? "Filtro aplicado ao gráfico, diagnóstico e detalhes." : "Escolha método e rota para investigar uma API."}"><option value="">Todas as APIs</option>${routeOptions
         .map(
           ([key]) =>
             `<option value="${OC.escapeHtml(key)}"${key === selectedRoute ? " selected" : ""}>${OC.escapeHtml(key)}</option>`
@@ -2583,23 +2657,18 @@
     </div>`;
     const charts = focus
       .map((env) => {
-        const series = apiSeries?.[env];
-        const single = series ? { [env]: series } : {};
-        if (!series) {
-          return `<article class="monitor-api-env-card" data-api-env="${OC.escapeHtml(env)}">
-            <h4 class="monitor-latency-env-title">${OC.escapeHtml(env)} · latência média API</h4>
-            <p class="monitor-empty monitor-empty-neutral">Sem amostras de api_avg_ms ainda. O collector passa a gravar a cada ~1 min.</p>
-            <div class="monitor-spike-context" data-spike-context="${OC.escapeHtml(env)}" hidden></div>
-          </article>`;
-        }
-        const built = buildSvgLineChart(single, `API avg ${env}`, sloMs, {
-          windowHours: hours,
-          chartId: `api-${env}`,
-        });
+        const response = apiRoutes?.[env];
+        const expectedMethod = selectedRoute ? selectedRoute.split(" ", 1)[0] : "";
+        const expectedRoute = selectedRoute ? selectedRoute.slice(selectedRoute.indexOf(" ") + 1) : "";
+        const latency = response?.latency;
+        const matches = latency && response.window === win && (latency.method || "") === expectedMethod && (latency.route || "") === expectedRoute
+          && (win !== "custom" || (new Date(latency.since).getTime() === new Date(OC.monitorState.apiSince).getTime()
+            && new Date(latency.until).getTime() === new Date(OC.monitorState.apiUntil).getTime()));
+        const built = buildApiLatencyChart(matches ? latency : null, env, sloMs);
         const spikeList =
           built.spikes && built.spikes.length
             ? `<div class="monitor-spike-list">
-                <p class="monitor-section-hint">Picos ≥ SLO ${sloMs} ms (${built.spikes.length})</p>
+                <p class="monitor-section-hint">Minutos com máximo ≥ ${sloMs} ms (${built.spikes.length})</p>
                 <ul>${built.spikes
                   .slice(0, 8)
                   .map(
@@ -2608,9 +2677,12 @@
                   )
                   .join("")}</ul>
               </div>`
-            : `<p class="monitor-section-hint">Nenhum pico ≥ ${sloMs} ms neste período.</p>`;
+            : latency?.available && matches && latency.totals?.requests > 0
+              ? `<p class="monitor-section-hint">Nenhum máximo por minuto atingiu o limite de ${sloMs} ms neste período.</p>` : "";
         return `<article class="monitor-api-env-card" data-api-env="${OC.escapeHtml(env)}">
-          <h4 class="monitor-latency-env-title">${OC.escapeHtml(env)} · latência média API</h4>
+          <h4 class="monitor-latency-env-title">${OC.escapeHtml(env)} · latência por minuto${selectedRoute ? ` · ${OC.escapeHtml(selectedRoute)}` : ""}</h4>
+          ${response?.sampling?.degraded ? `<p class="monitor-section-hint is-warning">Coleta sob pressão; dados podem estar incompletos.</p>` : ""}
+          ${response?._cache?.stale ? `<p class="monitor-section-hint is-warning">Dados salvos: atualização indisponível. Última consulta: ${OC.escapeHtml(OC.formatDate(new Date(response._cache.savedAt).toISOString()))}.</p>` : ""}
           ${built.html}
           ${spikeList}
           <div class="monitor-spike-context" data-spike-context="${OC.escapeHtml(env)}" hidden></div>
@@ -2641,7 +2713,8 @@
       })}${routeFilter}
     </div>${selectedRange}
     ${renderApiTrafficOverview(apiRoutes, focus, win, hours)}
-    <div class="monitor-access-subhead monitor-access-subhead--latency"><h4>Desempenho das APIs</h4><span>latência média e picos acima do SLO</span></div>
+    <div class="monitor-access-subhead monitor-access-subhead--latency"><h4>Desempenho das APIs</h4><span>média e máximo por minuto · duração medida no backend</span></div>
+    <p class="monitor-section-hint">Intervalos parciais têm precisão de 1 minuto. Minutos sem tráfego aparecem como lacunas.</p>
     <div class="monitor-latency-env-grid">${charts}</div>
     <div class="monitor-access-subhead monitor-access-subhead--diagnostics"><h4>Diagnóstico por rota</h4><span>latência de sucesso separada de respostas 4xx e 5xx</span></div>
     <p class="monitor-section-hint" id="monitor-api-routes-filter-note" hidden></p>
@@ -2685,12 +2758,12 @@
     </section>`;
   }
 
-  function renderApisSection(apiRoutes, apiSeries, apiRecent, apiInflight, slos) {
+  function renderApisSection(apiRoutes, apiRecent, apiInflight, slos) {
     const subTab = currentApiSubTab();
     const body =
       subTab === "live"
         ? renderApisLiveSection(apiRecent, apiInflight)
-        : renderApisOverviewSection(apiRoutes, apiSeries, slos);
+        : renderApisOverviewSection(apiRoutes, slos);
     return `${renderApiSubTabBar(subTab)}${body}`;
   }
 
@@ -3186,7 +3259,6 @@
       events: false,
       grouped: false,
       apiRoutes: false,
-      apiSeries: false,
       apiRecent: false,
       apiInflight: false,
       uptime: false,
@@ -3224,7 +3296,6 @@
           plan.apiInflight = true;
         } else {
           plan.apiRoutes = true;
-          plan.apiSeries = true;
         }
         break;
       case "logs":
@@ -3248,7 +3319,6 @@
       events: [],
       groupedEvents: [],
       apiRoutes: {},
-      apiSeries: {},
       apiRecent: {},
       apiInflight: {},
       uptimeByEnv: {},
@@ -3382,15 +3452,28 @@
     const events = allEvents.slice(0, 20).map(item => {
       const outage = item.kind === "outage";
       const deploy = item.kind === "deploy";
-      const title = outage ? "Indisponibilidade detectada" : deploy ? "Deploy executado" : item.title || "Evento de disponibilidade";
+      const title = outage ? item.deploy ? "Indisponibilidade associada ao deploy" : "Indisponibilidade detectada" : deploy ? "Deploy executado" : item.title || "Evento de disponibilidade";
       const tone = outage ? "down" : deploy ? "deploy" : "warn";
       const status = outage ? item.ongoing ? "Em andamento" : item.uncertain ? "Coleta incompleta" : "Encerrado" : deploy ? item.result || item.status || "Sem status" : "Registrado";
       const duration = outage ? item.durationSec == null ? "Indeterminada" : `${Math.max(1, Math.round(item.durationSec / 60))} min` : "—";
-      const detail = outage ? item.durationSec == null ? "Lacuna na coleta impede estimar a duração" : `Estimativa por sondagem${item.finishedAt ? `; fim ${date(item.finishedAt)}` : ""}` : deploy ? "Compare o horário com os incidentes próximos" : "Sinal observado pelo monitoramento";
-      return `<tr><td class="av-event-date">${escape(date(item.startedAt))}</td><td><span class="av-env-tag">${escape(item.env)}</span></td><td><div class="av-event-title"><i class="av-event-dot av-tone-${tone}"></i><strong>${escape(title)}</strong></div><small>${escape(detail)}</small></td><td><span class="av-event-status av-tone-${tone}">${escape(status)}</span></td><td class="av-event-duration">${duration}</td></tr>`;
+      const detail = outage ? item.deploy
+        ? `Deploy ${item.deploy.runId} · ${item.fragmentCount || 1} episódio(s) consolidado(s) · ${item.relatedSignals?.length || 0} sinal(is) nos detalhes${item.uncertain ? " · coleta incompleta" : ""}`
+        : item.durationSec == null ? "Lacuna na coleta impede estimar a duração" : `Estimativa por sondagem${item.finishedAt ? `; fim ${date(item.finishedAt)}` : ""}` : deploy ? "Compare o horário com os incidentes próximos" : "Sinal observado pelo monitoramento";
+      const inspectable = item.deploy && Number.isFinite(Date.parse(item.startedAt));
+      const eventUntil = inspectable ? new Date(Math.min(Date.now(), Date.parse(item.finishedAt || item.lastFailureAt || item.startedAt) + 120000)).toISOString() : null;
+      const eventTitle = inspectable ? `<button type="button" class="av-event-inspect" data-availability-env="${escape(item.env)}" data-availability-since="${escape(item.startedAt)}" data-availability-until="${escape(eventUntil)}" aria-label="Investigar indisponibilidade associada ao deploy ${escape(item.deploy.runId)}">${escape(title)}</button>` : escape(title);
+      return `<tr><td class="av-event-date">${escape(date(item.startedAt))}</td><td><span class="av-env-tag">${escape(item.env)}</span></td><td><div class="av-event-title"><i class="av-event-dot av-tone-${tone}"></i><strong>${eventTitle}</strong></div><small>${escape(detail)}</small></td><td><span class="av-event-status av-tone-${tone}">${escape(status)}</span></td><td class="av-event-duration">${duration}</td></tr>`;
     }).join("");
     return `<div class="availability-view">
-      <div class="av-toolbar"><div class="av-period-control" role="group" aria-label="Período de disponibilidade">${controls}</div><button type="button" class="av-demo-toggle" data-availability-demo aria-pressed="${demo}">${demo ? "Voltar aos dados reais" : "Ver demonstração"}</button></div>
+      <div class="av-toolbar"><div class="av-period-control" role="group" aria-label="Período de disponibilidade">${controls}</div><div class="av-toolbar-actions">
+        <details class="av-export"><summary class="btn btn-secondary btn-sm">Exportar dados</summary><div class="av-export-options" role="group" aria-label="Formato de exportação">
+          <span>Período e ambientes da tela</span>
+          <button type="button" data-availability-export="summary">Resumo por ambiente · CSV</button>
+          <button type="button" data-availability-export="history">Histórico por intervalo · CSV</button>
+          <button type="button" data-availability-export="events">Eventos do período · CSV</button>
+          <button type="button" data-availability-export="json">Relatório completo · JSON</button>
+        </div></details>
+        <button type="button" class="av-demo-toggle" data-availability-demo aria-pressed="${demo}">${demo ? "Voltar aos dados reais" : "Ver demonstração"}</button></div></div>
       ${demo ? `<label class="av-scenario">Cenário de validação <select data-availability-scenario>${Object.entries({mixed:'Incidente histórico e coleta atrasada',offline:'Queda em andamento',saturated:'Sobrecarga',degraded:'Serviço degradado',disabled:'Ambiente desativado',empty:'Sem dados'}).map(([value,label]) => `<option value="${value}" ${OC.monitorState.availabilityScenario === value || (!OC.monitorState.availabilityScenario && value === 'mixed') ? 'selected' : ''}>${label}</option>`).join('')}</select></label>` : ''}
       ${demo ? '<div class="av-demo-banner" role="status"><strong>Dados simulados</strong><span>Cenários de validação: operação normal, incidente encerrado e lacuna de coleta. Nenhum dado foi gravado no banco.</span></div>' : ""}
       <div class="av-environments">${rows}</div>
@@ -3407,7 +3490,6 @@
       groupedEvents,
       events,
       apiRoutes,
-      apiSeries,
       apiRecent,
       apiInflight,
       uptimeByEnv,
@@ -3504,7 +3586,7 @@
         const apisLoading =
           subTab === "live"
             ? loading?.apiRecent || loading?.apiInflight
-            : loading?.apiRoutes || loading?.apiSeries;
+            : loading?.apiRoutes;
         return apisLoading
           ? renderLoadingSection("Monitoramento de APIs")
           : OC.renderOpsSection({
@@ -3513,7 +3595,7 @@
                 subTab === "live"
                   ? "Em andamento agora · últimas concluídas amostradas"
                   : "Volume real, usuários, status HTTP, latência e rotas",
-              body: renderApisSection(apiRoutes, apiSeries, apiRecent, apiInflight, slos),
+              body: renderApisSection(apiRoutes, apiRecent, apiInflight, slos),
             });
       }
       case "logs":
@@ -3650,7 +3732,7 @@
     panel.hidden = false;
     panel.innerHTML = `<div class="monitor-spike-context-head">
         <strong>APIs em ${OC.escapeHtml(OC.formatDate(iso))}</strong>
-        ${ms != null ? `<span>· média ${formatLatencyMs(Number(ms))} ms</span>` : ""}
+        ${ms != null ? `<span>· valor selecionado ${formatLatencyMs(Number(ms))} ms</span>` : ""}
       </div>
       ${routesHtml}
       ${samplesHtml}
@@ -3681,14 +3763,16 @@
     const panel = document.querySelector(`[data-spike-context="${env}"]`);
     if (!panel) return;
     const normalizedMs = ms == null || ms === "" ? null : Number(ms);
+    const routeFilter = OC.monitorState.apiRouteFilter || "";
     const existing = OC.monitorState.apiSpikeDrill;
-    if (existing?.ready && existing.env === env && existing.iso === iso) {
+    if (existing?.ready && existing.env === env && existing.iso === iso && existing.routeFilter === routeFilter) {
       existing.ms = normalizedMs ?? existing.ms;
       paintSpikeContext(existing);
       return;
     }
 
-    OC.monitorState.apiSpikeDrill = { env, iso, ms: normalizedMs, ready: false };
+    const pendingDrill = { env, iso, ms: normalizedMs, routeFilter, ready: false };
+    OC.monitorState.apiSpikeDrill = pendingDrill;
     panel.hidden = false;
     panel.innerHTML = `<div class="loading-inline"><div class="loading-spinner loading-spinner-sm"></div> Buscando APIs e contexto em ${OC.escapeHtml(OC.formatDate(iso))}…</div>`;
 
@@ -3696,13 +3780,18 @@
     const winMs = 15 * 60 * 1000;
     let events = [];
     let apiDrill = null;
+    const sampleParams = new URLSearchParams({ at: iso, radiusMinutes: "5", minMs: "0" });
+    if (routeFilter) {
+      sampleParams.set("method", routeFilter.split(" ", 1)[0]);
+      sampleParams.set("route", routeFilter.slice(routeFilter.indexOf(" ") + 1));
+    }
     try {
       const [eventsData, samplesData] = await Promise.all([
         OC.fetchMonitoringJson(`/api/v1/monitoring/${env}/events?hours=24&limit=100`, {
           events: [],
         }),
         OC.fetchMonitoringJson(
-          `/api/v1/monitoring/${env}/api-samples?at=${encodeURIComponent(iso)}&radiusMinutes=5&minMs=0`,
+          `/api/v1/monitoring/${env}/api-samples?${sampleParams}`,
           { samples: [], slowRoutes: [] }
         ),
       ]);
@@ -3717,7 +3806,7 @@
 
     // Se o usuário limpou ou trocou o drill enquanto a busca rodava, não sobrescreve.
     const currentDrill = OC.monitorState.apiSpikeDrill;
-    if (!currentDrill || currentDrill.env !== env || currentDrill.iso !== iso) {
+    if (currentDrill !== pendingDrill) {
       return;
     }
 
@@ -3734,6 +3823,7 @@
     const drill = {
       env,
       iso,
+      routeFilter,
       ms: normalizedMs,
       ready: true,
       slowRoutes,
@@ -3796,11 +3886,16 @@
                 ? `<br>Rota líder no período: <code>${OC.escapeHtml(nearest.labels.leadingRoute)}</code>`
                 : "")
             : "";
-        tooltip.innerHTML = `<strong>${OC.escapeHtml(OC.formatDate(nearest.iso))}</strong><br>${OC.escapeHtml(nearest.env)}: <strong>${formatValue(nearest.v)}${OC.escapeHtml(valueSuffix)}</strong>${OC.escapeHtml(avgNote)}${OC.escapeHtml(vsSlo)}${accessNote}`;
+        const latency = nearest.labels;
+        tooltip.innerHTML = latency?.apiLatency
+          ? `<strong>${OC.escapeHtml(OC.formatDate(nearest.iso))}${latency.partial ? " · minuto parcial" : ""}</strong><br>${OC.escapeHtml(nearest.env)} · ${Number(latency.requests).toLocaleString("pt-BR")} requisições<br>${latency.requests ? `Média: <strong>${formatLatencyMs(latency.avgMs)} ms</strong><br>Máximo: <strong>${formatLatencyMs(latency.maxMs)} ms</strong>${OC.escapeHtml(vsSlo)}` : "Sem tráfego neste minuto"}`
+          : `<strong>${OC.escapeHtml(OC.formatDate(nearest.iso))}</strong><br>${OC.escapeHtml(nearest.env)}: <strong>${formatValue(nearest.v)}${OC.escapeHtml(valueSuffix)}</strong>${OC.escapeHtml(avgNote)}${OC.escapeHtml(vsSlo)}${accessNote}`;
         tooltip.classList.remove("hidden");
         const wrapRect = wrap.getBoundingClientRect();
-        tooltip.style.left = `${Math.min(Math.max(8, e.clientX - wrapRect.left + 12), wrapRect.width - 180)}px`;
-        tooltip.style.top = `${Math.max(8, e.clientY - wrapRect.top - 48)}px`;
+        tooltip.style.width = "max-content";
+        tooltip.style.maxWidth = `${Math.max(0, wrapRect.width - 16)}px`;
+        tooltip.style.left = `${Math.min(Math.max(8, e.clientX - wrapRect.left + 12), Math.max(8, wrapRect.width - tooltip.offsetWidth - 8))}px`;
+        tooltip.style.top = `${Math.min(Math.max(8, e.clientY - wrapRect.top - 48), Math.max(8, wrapRect.height - tooltip.offsetHeight - 8))}px`;
       };
 
       const onLeave = () => {
@@ -3813,6 +3908,7 @@
         const points = OC._chartHoverData?.[chartId] || [];
         const nearest = nearestHoverPoint(points, e.clientX, svg);
         if (!nearest) return;
+        if (nearest.labels?.apiLatency && !nearest.labels.requests) return;
         if (chartId.startsWith("api-")) {
           showSpikeContext(nearest.env, nearest.iso, nearest.v);
         }
@@ -3833,6 +3929,7 @@
   function bindMonitoringInteractions(root) {
     OC.bindBackNavigation(root);
     OC.bindAvailabilityDetails?.(root);
+    OC.bindAvailabilityExports?.(root);
     bindApiRouteDetailRows(root);
     bindApiRouteTableSort(root);
     root.querySelectorAll("[data-availability-window]").forEach(button => {
@@ -3896,6 +3993,7 @@
           OC.monitorState.selectedEnvs.push(env);
         }
         if (!OC.monitorState.selectedEnvs.length) OC.monitorState.selectedEnvs = [env];
+        clearApiSpikeDrill();
         const active = OC.monitorState.selectedEnvs.includes(env);
         el.classList.toggle("is-active", active);
         el.setAttribute("aria-pressed", active ? "true" : "false");
@@ -3986,6 +4084,7 @@
       }
       if (id === "api-window") {
         OC.monitorState.apiWindow = value || "6h";
+        clearApiSpikeDrill();
         savePrefs();
         OC.startMonitoringRefresh();
         refreshFromMonitoringControl("Alterando período das APIs…");
@@ -4193,13 +4292,15 @@
       OC.monitorState.apiSince = since;
       OC.monitorState.apiUntil = until;
       OC.monitorState.apiWindow = "custom";
+      clearApiSpikeDrill();
       savePrefs();
       refreshFromMonitoringControl("Aplicando período das APIs…");
     });
     root.querySelector("#monitor-api-route-filter")?.addEventListener("change", (event) => {
       OC.monitorState.apiRouteFilter = event.currentTarget.value || "";
+      clearApiSpikeDrill();
       savePrefs();
-      if (OC.monitorState.payload) OC.renderMonitoringView(OC.monitorState.payload, { partial: true });
+      refreshFromMonitoringControl("Atualizando latência da API…");
     });
     root.querySelector("#monitor-clear-events")?.addEventListener("click", async () => {
       if (
@@ -4474,7 +4575,9 @@
       const data = await fetcher(url, { timeoutMs: OC.MONITOR_FETCH_TIMEOUT_MS ?? 30000, ...options, perfLabel: options.perfLabel });
       if (data?.error || data?.reachable === false) throw new Error(data.error || "Fonte indisponível");
       const restored = [];
-      const result = restoreFailedParts(data, cached?.data, url, restored);
+      // An unavailable minute series must not silently become an older "current" series.
+      const result = restoreFailedParts(data, url.includes("/api-routes?") && url.includes("includeLatency=1")
+        ? { ...cached?.data, latency: null } : cached?.data, url, restored);
       if (restored.length) warn(restored.join("; "));
       else writeMonitoringCache(url, { at: new Date().toISOString(), data });
       return result;
@@ -4543,7 +4646,6 @@
     if (plan.healthSeries) loading.healthSeries = true;
     if (plan.events) loading.events = true;
     if (plan.apiRoutes) loading.apiRoutes = true;
-    if (plan.apiSeries) loading.apiSeries = true;
     if (plan.apiRecent) loading.apiRecent = true;
     if (plan.apiInflight) loading.apiInflight = true;
     if (plan.uptime) loading.uptime = true;
@@ -4557,7 +4659,6 @@
     let events = prev.events || [];
     let groupedEvents = prev.groupedEvents || [];
     let apiRoutes = { ...emptyPayloadExtras().apiRoutes, ...(prev.apiRoutes || {}) };
-    let apiSeries = { ...emptyPayloadExtras().apiSeries, ...(prev.apiSeries || {}) };
     let apiRecent = { ...emptyPayloadExtras().apiRecent, ...(prev.apiRecent || {}) };
     let apiInflight = { ...emptyPayloadExtras().apiInflight, ...(prev.apiInflight || {}) };
     let uptimeByEnv = { ...emptyPayloadExtras().uptimeByEnv, ...(prev.uptimeByEnv || {}) };
@@ -4576,7 +4677,6 @@
       events,
       groupedEvents,
       apiRoutes,
-      apiSeries,
       apiRecent,
       apiInflight,
       uptimeByEnv,
@@ -4833,6 +4933,12 @@
       if (plan.apiRoutes) {
         const win = OC.monitorState.apiWindow || "6h";
         const apiParams = apiRangeParams(win);
+        apiParams.set("includeLatency", "1");
+        const selectedRoute = OC.monitorState.apiRouteFilter || "";
+        if (selectedRoute) {
+          apiParams.set("method", selectedRoute.split(" ", 1)[0]);
+          apiParams.set("route", selectedRoute.slice(selectedRoute.indexOf(" ") + 1));
+        }
         phase2.push(
           Promise.all(
             envs.map(async (env) => {
@@ -4844,28 +4950,6 @@
             })
           ).then(() => {
             delete loading.apiRoutes;
-          })
-        );
-      }
-
-      if (plan.apiSeries) {
-        const hours = apiWindowHours(OC.monitorState.apiWindow || "6h");
-        const seriesParams = new URLSearchParams({ metric: 'api_avg_ms', hours: String(hours) });
-        if (OC.monitorState.apiWindow === 'custom' && OC.monitorState.apiSince && OC.monitorState.apiUntil) {
-          seriesParams.set('since', OC.monitorState.apiSince);
-          seriesParams.set('until', OC.monitorState.apiUntil);
-        }
-        phase2.push(
-          Promise.all(
-            envs.map(async (env) => {
-              apiSeries[env] = await OC.fetchMonitoringJson(
-                `/api/v1/monitoring/${env}/series?${seriesParams}`,
-                { environment: env, points: [] },
-                fetchOpts(`api-series:${env}`)
-              );
-            })
-          ).then(() => {
-            delete loading.apiSeries;
           })
         );
       }

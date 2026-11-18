@@ -9,7 +9,7 @@
     database: ["/js/database-explorer.js"],
     automations: ["/js/automations-config.js?v=20260910b", "/js/automations.js?v=20260910b"],
     host: ["/js/ops-perf.js", "/js/host.js"],
-    monitoring: ["/js/ops-perf.js", "/js/monitoring.js?v=20261118-availability-coverage", "/js/availability-detail.js?v=20261118-availability-coverage", "/js/monitor-drawer.js"],
+    monitoring: ["/js/ops-perf.js", "/js/monitoring.js?v=20261118-deploy-incidents", "/js/availability-detail.js?v=20261118-deploy-incidents", "/js/availability-export.js?v=20261118-deploy-incidents", "/js/monitor-drawer.js"],
     deployDetails: ["/js/deploy-drawer.js?v=20261118-overview", "/js/filters.js", "/js/drawer.js?v=20261118-overview"],
     deployProgress: [
       "/js/deploy-progress.js?v=20261118-overview",

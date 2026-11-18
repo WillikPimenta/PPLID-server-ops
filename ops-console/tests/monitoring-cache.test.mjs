@@ -12,6 +12,21 @@ function setup(fetchJson) {
   vm.runInNewContext(fragment, { OC, window, Map, Date, JSON, Error });
   return OC;
 }
+
+test("minute latency failures stay unavailable instead of silently restoring a historical series", async () => {
+  store.clear();
+  const url = "/api/v1/monitoring/MAIN/api-routes?window=1h&includeLatency=1";
+  let oc = setup(async () => ({ latency: { available: true, points: [{ avgMs: 100 }] } }));
+  await oc.fetchMonitoringJson(url);
+  oc = setup(async () => ({ latency: { available: false, error: "unavailable", points: [] } }));
+  const data = await oc.fetchMonitoringJson(url);
+  assert.equal(data.latency.available, false);
+  assert.equal(data.latency.points.length, 0);
+  oc = setup(async () => { throw new Error("timeout"); });
+  const saved = await oc.fetchMonitoringJson(url);
+  assert.equal(saved._cache.stale, true);
+  assert.equal(saved.latency.points[0].avgMs, 100);
+});
 test("preserva dados por URL após falha e reinício; resposta vazia substitui cache", async () => {
   store.clear();
   let oc = setup(async () => ({ routes: ["A"] }));
@@ -110,4 +125,21 @@ test('coverage bars distinguish partial, missing and predecessor evidence and sh
   assert.match(html, /av-collection-diagnostics/);
   assert.match(html, /30min 0s/);
   assert.match(html, /32s/);
+});
+
+test('a consolidated deploy incident opens its interval with recovery context', () => {
+  const start = source.indexOf('  function renderAvailabilityView(');
+  const end = source.indexOf('\n  function renderTabContent(', start);
+  const OC = { monitorState: { selectedEnvs: ['MAIN'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String };
+  const context = { OC };
+  vm.runInNewContext(source.slice(start, end) + '\nthis.render = renderAvailabilityView;', context);
+  const html = context.render({ MAIN: { window: '24h', health: {}, timeline: [{ kind: 'outage',
+    startedAt: '2026-11-18T12:00:00Z', finishedAt: '2026-11-18T12:04:00Z',
+    deploy: { runId: 'run-123' }, fragmentCount: 3, relatedSignals: [{}, {}], uncertain: true,
+  }] } });
+  assert.match(html, /Indisponibilidade associada ao deploy/);
+  assert.match(html, /3 episódio\(s\) consolidado\(s\)/);
+  assert.match(html, /2 sinal\(is\) nos detalhes/);
+  assert.match(html, /data-availability-since="2026-11-18T12:00:00Z"/);
+  assert.match(html, /data-availability-until="2026-11-18T12:06:00.000Z"/);
 });

@@ -2381,14 +2381,17 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                 until = (query.get("until") or [None])[0]
                 self._send_json(
                     server_monitoring.build_monitoring_api_routes(
-                        self.config, env_name, window=window, since=since, until=until
+                        self.config, env_name, window=window, since=since, until=until,
+                        include_latency=(query.get("includeLatency") or [""])[0] == "1",
+                        method=(query.get("method") or [""])[0],
+                        route=(query.get("route") or [""])[0],
                     )
                 )
                 return
             if sub == "api-samples":
                 method = (query.get("method") or [""])[0].strip().upper()
                 route = (query.get("route") or [""])[0].strip()
-                if method and route:
+                if method and route and not (query.get("at") or [""])[0]:
                     window = (query.get("window") or ["24h"])[0]
                     since = (query.get("since") or [None])[0]
                     until = (query.get("until") or [None])[0]
@@ -2428,6 +2431,8 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                         at=at,
                         radius_minutes=radius,
                         min_ms=min_ms,
+                        method=method,
+                        route=route,
                     )
                 )
                 return

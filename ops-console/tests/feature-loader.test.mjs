@@ -46,6 +46,7 @@ test("feature loader preserves dependency order and reuses shared scripts", asyn
     "/js/host.js",
     "/js/monitoring.js",
     "/js/availability-detail.js",
+    "/js/availability-export.js",
     "/js/monitor-drawer.js",
   ]);
 
