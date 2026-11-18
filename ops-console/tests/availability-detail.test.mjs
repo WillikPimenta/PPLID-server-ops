@@ -75,3 +75,15 @@ test('demo drawer never requests real sources and includes the selected interval
   assert.equal(OC.monitorState.availabilitySelection.data.history.length, 1);
   assert.match(OC.renderAvailabilityDetail(OC.monitorState.availabilitySelection), /Dados simulados/);
 });
+
+test('detail uses partial coverage styling and labels sample age relative to interval end', () => {
+  const { OC } = setup(async () => ({}));
+  const html = OC.renderAvailabilityDetail({ env: 'MAIN', since: '2026-11-18T10:00:00Z', until: '2026-11-18T10:30:00Z',
+    data: { health: { coverageMethod: 'observed-duration-v2', coveragePct: 50, intervalSec: 30, actualIntervalSec: 45, largestGapSec: 900, lastSampleAgeSec: 20 },
+      history: [{ since: '2026-11-18T10:00:00Z', samples: 1, failures: 1, observedSec: 30, downSec: 30, coveragePct: 50 }] } });
+  assert.match(html, /is-failed is-partial/);
+  assert.match(html, /50% de cobertura/);
+  assert.match(html, /no fim do intervalo/);
+  assert.match(html, /45s/);
+  assert.match(html, /15min 0s/);
+});

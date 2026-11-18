@@ -89,3 +89,25 @@ test('estado atual não é determinado pelo histórico e dados atuais antigos fi
   assert.match(html, /Sem confirmação recente/);
   assert.doesNotMatch(html, /Saudável agora/);
 });
+
+test('coverage bars distinguish partial, missing and predecessor evidence and show diagnostics', () => {
+  const start = source.indexOf('  function renderAvailabilityView(');
+  const end = source.indexOf('\n  function renderTabContent(', start);
+  const OC = { monitorState: { selectedEnvs: ['DEV'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String };
+  const context = { OC };
+  vm.runInNewContext(source.slice(start, end) + '\nthis.render = renderAvailabilityView;', context);
+  const history = [
+    { since: '2026-11-18T10:00:00Z', until: '2026-11-18T10:30:00Z', samples: 10, failures: 0, observedSec: 600, coveragePct: 33.3 },
+    { since: '2026-11-18T10:30:00Z', until: '2026-11-18T11:00:00Z', samples: 0, failures: 0, observedSec: 0, coveragePct: 0 },
+    { since: '2026-11-18T11:00:00Z', until: '2026-11-18T11:00:20Z', samples: 0, failures: 0, observedSec: 20, coveragePct: 100 },
+  ];
+  const html = context.render({ DEV: { window: '24h', history, health: { coverageMethod: 'observed-duration-v2', intervalSec: 30,
+    actualIntervalSec: 32, largestGapSec: 1800, lastSampleAgeSec: 12, coveragePct: 40, samples: 10 }, timeline: [] } });
+  assert.match(html, /av-bar av-tone-ok is-partial/);
+  assert.match(html, /av-bar av-tone-none/);
+  assert.match(html, /av-bar av-tone-ok"/);
+  assert.match(html, /33,3% de cobertura/);
+  assert.match(html, /av-collection-diagnostics/);
+  assert.match(html, /30min 0s/);
+  assert.match(html, /32s/);
+});

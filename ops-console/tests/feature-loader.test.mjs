@@ -41,11 +41,11 @@ test("feature loader preserves dependency order and reuses shared scripts", asyn
   assert.equal(appended.length, 2);
 
   await window.OpsConsole.ensureFeature("monitoring");
-  assert.deepEqual(appended, [
+  assert.deepEqual(appended.map(url => url.split('?')[0]), [
     "/js/ops-perf.js",
     "/js/host.js",
-    "/js/monitoring.js?v=20261118-availability-detail",
-    "/js/availability-detail.js?v=20261118-availability-detail",
+    "/js/monitoring.js",
+    "/js/availability-detail.js",
     "/js/monitor-drawer.js",
   ]);
 

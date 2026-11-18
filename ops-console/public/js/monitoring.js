@@ -3274,6 +3274,14 @@
         samples: index === 2 && i >= count - Math.round(count * 0.236) - 2 && i < count - 2 ? 0 : Math.round(hours * 60 / count),
         failures: index === 1 && i === Math.floor((hours - 3.4) * count / hours) ? 10 : index === 2 && i === count - 2 ? 3 : 0,
       }));
+      // Include partial coverage in the isolated demo so the same visual states
+      // and diagnostics can be reviewed without contacting production.
+      if (index === 2) history[1].samples = Math.floor(history[1].samples / 2);
+      history.forEach(bucket => {
+        bucket.observedSec = bucket.samples * 60;
+        bucket.downSec = bucket.failures * 60;
+        bucket.coveragePct = Number((100 * bucket.observedSec / (hours * 3600 / count)).toFixed(1));
+      });
       const samples = history.reduce((sum, bucket) => sum + bucket.samples, 0);
       const failures = history.reduce((sum, bucket) => sum + bucket.failures, 0);
       const coverage = Number((samples * 100 / (hours * 60)).toFixed(1));
@@ -3297,12 +3305,19 @@
       data.impact = { incidentCount: data.timeline.filter(item => item.kind === 'outage').length,
         estimatedDowntimeSec: failures * 60, failedRequests: errors5xx,
         observedSec: samples * 60, unknownSec: Math.max(0, hours * 3600 - samples * 60) };
+      let largestGapSec = 0, gapSec = 0;
+      history.forEach(bucket => {
+        gapSec = bucket.samples ? 0 : gapSec + hours * 3600 / count;
+        largestGapSec = Math.max(largestGapSec, gapSec);
+      });
+      Object.assign(data.health, { coverageMethod: 'observed-duration-v2', actualIntervalSec: 60,
+        lastSampleAgeSec: index === 2 ? 1080 : 0, largestGapSec, collectorAlive: true });
       if (scenario === 'empty') {
         data.current = { state: 'unknown', checkedAt: null, maxAgeMs: 120000 };
         data.health = { samples: 0, coveragePct: 0, uptimePct: null };
         data.api = { unavailableReason: 'Sem requisições ou coleta no período' };
         data.timeline = [];
-        data.history = history.map(bucket => ({ ...bucket, samples: 0, failures: 0 }));
+        data.history = history.map(bucket => ({ ...bucket, samples: 0, failures: 0, observedSec: 0, downSec: 0, coveragePct: 0 }));
         data.impact = { incidentCount: null, estimatedDowntimeSec: null, failedRequests: null, unknownSec: hours * 3600 };
       }
       return [env, data];
@@ -3330,7 +3345,7 @@
       const health = data?.health || {};
       const available = api.availabilityPct != null || health.uptimePct != null;
       hasData ||= available;
-      const partial = health.samples > 0 && health.coveragePct < 90;
+      const partial = health.samples > 0 && health.coveragePct < 99;
       const current = demo ? data?.current : currentByEnv[env];
       const outdated = !demo && (current?._cache?.stale || (current?.checkedAt && Date.now() - new Date(current.checkedAt).getTime() > (current.maxAgeMs || 120000)));
       const currentState = current?.state === 'disabled' ? 'disabled' : outdated ? 'stale' : current?.state || 'unknown';
@@ -3340,12 +3355,14 @@
       const duration = seconds => seconds == null ? 'Sem dados' : seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}min ${Math.round(seconds % 60)}s` : `${Math.floor(seconds / 3600)}h ${Math.round(seconds % 3600 / 60)}min`;
       const history = data?.history || [];
       const bars = history.length ? history.map(bucket => {
-        const status = !bucket.samples ? "none" : bucket.failures > 0 ? "down" : "ok";
-        const title = `${date(bucket.since)}: ${bucket.samples || 0} amostras, ${bucket.failures || 0} falhas`;
+        const observed = bucket.observedSec == null ? Boolean(bucket.samples) : bucket.observedSec > 0;
+        const status = !observed ? "none" : bucket.failures > 0 || bucket.downSec > 0 ? "down" : "ok";
+        const incomplete = observed && bucket.coveragePct != null && bucket.coveragePct < 99;
+        const title = `${date(bucket.since)}: ${bucket.samples || 0} amostras, ${bucket.failures || 0} falhas${bucket.coveragePct == null ? '' : `, ${number(bucket.coveragePct)}% de cobertura`}`;
         const selected = OC.monitorState.availabilitySelection;
         const selectedCenter = selected && (Date.parse(selected.since) + Date.parse(selected.until)) / 2;
         const active = selected?.env === env && Date.parse(bucket.since) <= selectedCenter && Date.parse(bucket.until) > selectedCenter;
-        return `<button type="button" class="av-bar av-tone-${status}${active ? ' is-selected' : ''}" data-availability-env="${escape(env)}" data-availability-since="${escape(bucket.since)}" data-availability-until="${escape(bucket.until)}" aria-pressed="${Boolean(active)}" title="${escape(title)}" aria-label="Investigar ${escape(env)}: ${escape(title)}"></button>`;
+        return `<button type="button" class="av-bar av-tone-${status}${incomplete ? ' is-partial' : ''}${active ? ' is-selected' : ''}" data-availability-env="${escape(env)}" data-availability-since="${escape(bucket.since)}" data-availability-until="${escape(bucket.until)}" aria-pressed="${Boolean(active)}" title="${escape(title)}" aria-label="Investigar ${escape(env)}: ${escape(title)}"></button>`;
       }).join("") : `<span class="av-history-empty">${data ? "Histórico ainda em formação" : "Aguardando coleta"}</span>`;
       if (data) (data.timeline || []).forEach(item => allEvents.push({ ...item, env }));
       const reason = entry?.error || api.unavailableReason || api.error || "A coleta ainda não retornou dados para este período.";
@@ -3357,6 +3374,7 @@
         <div class="av-metric av-metric-secondary"><span>Health check</span><strong>${pct(health.uptimePct)}</strong><small>${number(health.samples)} amostras coletadas</small></div>
         <div class="av-history"><div class="av-history-caption"><span>Histórico do health check</span><span>${escape(period)}</span></div><div class="av-bars">${bars}</div><div class="av-history-caption"><span>${data ? escape(date(data.since)) : "Início do período"}</span><span>Agora</span></div></div>
         <footer class="av-collection"><span class="av-quality ${partial ? "is-partial" : ""}">${health.coveragePct != null ? `${number(health.coveragePct)}% de cobertura` : "Sem cobertura"}</span><small>${partial ? "Coleta incompleta" : old ? "Dados desatualizados" : latest ? "Última amostra" : "Aguardando primeira amostra"}${latest ? `<br>${escape(date(latest))}` : ""}</small></footer>
+        ${health.coverageMethod ? `<div class="av-collection-diagnostics"><span>Frequência prevista <strong>${escape(duration(health.intervalSec))}</strong></span><span>Intervalo médio real <strong>${escape(duration(health.actualIntervalSec))}</strong></span><span>Última amostra há <strong>${escape(duration(health.lastSampleAgeSec))}</strong></span><span>Maior lacuna <strong>${escape(duration(health.largestGapSec))}</strong></span>${health.collectorAlive === false ? '<span class="av-collector-warning">Coletor de disponibilidade parado</span>' : ''}</div>` : ''}
         <div class="av-impact"><span><strong>${impact.incidentCount == null ? 'Sem dados' : number(impact.incidentCount)}</strong> episódios de falha</span><span><strong>${impact.failedRequests == null ? 'Sem dados' : number(impact.failedRequests)}</strong> requisições com erro 5xx</span><span><strong>${escape(duration(impact.estimatedDowntimeSec))}</strong> de indisponibilidade estimada</span><span class="av-impact-unknown"><strong>${escape(duration(impact.unknownSec))}</strong> sem cobertura</span></div>
       </article>`;
     }).join("");
@@ -3376,10 +3394,10 @@
       ${demo ? `<label class="av-scenario">Cenário de validação <select data-availability-scenario>${Object.entries({mixed:'Incidente histórico e coleta atrasada',offline:'Queda em andamento',saturated:'Sobrecarga',degraded:'Serviço degradado',disabled:'Ambiente desativado',empty:'Sem dados'}).map(([value,label]) => `<option value="${value}" ${OC.monitorState.availabilityScenario === value || (!OC.monitorState.availabilityScenario && value === 'mixed') ? 'selected' : ''}>${label}</option>`).join('')}</select></label>` : ''}
       ${demo ? '<div class="av-demo-banner" role="status"><strong>Dados simulados</strong><span>Cenários de validação: operação normal, incidente encerrado e lacuna de coleta. Nenhum dado foi gravado no banco.</span></div>' : ""}
       <div class="av-environments">${rows}</div>
-      <div class="av-legend"><span><i class="av-tone-ok"></i>Sem falhas observadas</span><span><i class="av-tone-down"></i>Com falhas</span><span><i class="av-tone-none"></i>Sem coleta</span><span class="av-legend-note">Cada faixa representa um intervalo do período selecionado.</span></div>
+      <div class="av-legend"><span><i class="av-tone-ok"></i>Sem falhas observadas</span><span><i class="av-tone-down"></i>Com falhas</span><span><i class="av-tone-none"></i>Sem coleta</span><span><i class="av-tone-partial"></i>Coleta parcial</span><span class="av-legend-note">Cada faixa representa um intervalo do período selecionado.</span></div>
       <section class="av-events"><header><div><h3>Eventos no período</h3><p>Incidentes e deploys na mesma linha do tempo.</p></div><span>${allEvents.length} registro${allEvents.length === 1 ? "" : "s"}</span></header>
       ${events ? `<div class="av-table-scroll"><table><thead><tr><th>Horário</th><th>Ambiente</th><th>Evento</th><th>Estado</th><th>Duração</th></tr></thead><tbody>${events}</tbody></table></div>${allEvents.length > 20 || envs.some(env => dataByEnv?.[env]?.timelineTruncated) ? '<p class="av-table-note">Exibindo os eventos mais recentes do período.</p>' : ""}` : `<div class="av-empty-events"><strong>${hasData ? "Nenhum evento registrado" : "O histórico aparecerá após as primeiras coletas"}</strong><p>${hasData ? "Sem incidentes ou deploys registrados no período selecionado." : "Use a demonstração para explorar os indicadores e os cenários de falha."}</p></div>`}</section>
-      <details class="av-method"><summary>Como interpretar estes indicadores</summary><p><strong>Requisições:</strong> respostas não 5xx / requisições registradas no backend. Falhas anteriores à chegada ao backend não entram nesta conta.</p><p><strong>Health check:</strong> sondagens bem-sucedidas / sondagens coletadas. A cobertura indica quanto do período foi observado; faixas verdes não comprovam coleta completa.</p><p>O SLI de 7 e 30 dias exige confirmação da janela pela fonte. Dados de 24 horas sem confirmação devem ser tratados como referência preliminar. Retenção padrão: 30 dias.</p></details>
+      <details class="av-method"><summary>Como interpretar estes indicadores</summary><p><strong>Requisições:</strong> respostas não 5xx / requisições registradas no backend. Falhas anteriores à chegada ao backend não entram nesta conta.</p><p><strong>Health check:</strong> sondagens bem-sucedidas / sondagens coletadas. A cobertura indica quanto do período foi observado; faixas hachuradas indicam coleta parcial. Cobertura e tempo sem cobertura usam a mesma duração observada. Cada nova sondagem registra sua frequência; amostras antigas mantêm a referência de 60 segundos. A tolerância de agendamento é de até 2 segundos, somente entre sondagens consecutivas. Lacunas maiores continuam sem cobertura.</p><p>O SLI de 7 e 30 dias exige confirmação da janela pela fonte. Dados de 24 horas sem confirmação devem ser tratados como referência preliminar. Retenção padrão: 30 dias.</p></details>
     </div>`;
   }
 

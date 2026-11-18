@@ -1,4 +1,5 @@
 import contextlib
+import json
 import sqlite3
 import sys
 import unittest
@@ -16,7 +17,7 @@ class AvailabilityViewTests(unittest.TestCase):
         self.db = sqlite3.connect(":memory:")
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
-            CREATE TABLE monitor_samples (id INTEGER PRIMARY KEY, environment TEXT, metric_key TEXT, value REAL, recorded_at TEXT);
+            CREATE TABLE monitor_samples (id INTEGER PRIMARY KEY, environment TEXT, metric_key TEXT, value REAL, recorded_at TEXT, labels_json TEXT);
             CREATE TABLE monitor_events (id INTEGER PRIMARY KEY, environment TEXT, category TEXT, severity TEXT, title TEXT, recorded_at TEXT);
             CREATE TABLE deploy_runs (environment TEXT, run_id TEXT, status TEXT, result TEXT, started_at TEXT, finished_at TEXT);
         """)
@@ -164,6 +165,64 @@ class AvailabilityViewTests(unittest.TestCase):
         self.assertEqual(query.call_args.kwargs['limit'], 800)
         with self.assertRaises(ValueError):
             monitoring.build_monitoring_series({}, 'MAIN', 'api_avg_ms', range_since=since)
+
+    def labeled_sample(self, seconds_ago, value=1, interval=30, tolerance=2):
+        at = (self.now - timedelta(seconds=seconds_ago)).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        self.db.execute("INSERT INTO monitor_samples(environment, metric_key, value, recorded_at, labels_json) VALUES ('MAIN', 'health_reachable', ?, ?, ?)",
+                        (value, at, json.dumps({'intervalSec': interval, 'jitterToleranceSec': tolerance})))
+
+    def detail(self, seconds):
+        return monitoring.build_monitoring_availability_detail({}, 'MAIN',
+            since=(self.now - timedelta(seconds=seconds)).isoformat(), until=self.now.isoformat())
+
+    def test_coverage_duration_and_bars_share_one_definition(self):
+        for seconds in range(30, 1801, 30):
+            self.labeled_sample(seconds)
+        result = self.detail(1800)
+        self.assertAlmostEqual(result['health']['coveragePct'], 100, places=1)
+        self.assertEqual(result['impact']['unknownSec'], 0)
+        self.assertEqual(len(result['history']), 60)
+        self.assertTrue(all(bucket['coveragePct'] > 99 for bucket in result['history']))
+        self.assertAlmostEqual(sum(bucket['observedSec'] for bucket in result['history']), result['impact']['observedSec'], places=1)
+        self.assertEqual(result['health']['actualIntervalSec'], 30)
+
+    def test_legacy_cadence_is_preserved_and_detail_has_no_half_interval_holes(self):
+        for minutes in range(1, 31):
+            self.sample(minutes, 1)
+        result = self.detail(1800)
+        self.assertEqual(len(result['history']), 30)
+        self.assertEqual(result['health']['recordedIntervalsSec'], [60])
+        self.assertEqual(result['health']['coveragePct'], 100)
+        self.assertEqual(result['impact']['unknownSec'], 0)
+
+    def test_real_gap_is_unknown_and_bars_are_partial(self):
+        self.labeled_sample(120)
+        self.labeled_sample(30)
+        result = self.detail(120)
+        self.assertEqual(result['health']['coveragePct'], 50)
+        self.assertEqual(result['impact']['unknownSec'], 60)
+        self.assertEqual(result['health']['largestGapSec'], 60)
+        self.assertEqual(result['health']['actualIntervalSec'], 90)
+        self.assertEqual(result['health']['lastSampleAgeSec'], 30)
+
+    def test_jitter_only_bridged_between_actual_observations(self):
+        self.labeled_sample(62, value=0)
+        self.labeled_sample(31)
+        result = self.detail(62)
+        self.assertEqual(result['impact']['unknownSec'], 1)
+        self.assertEqual(result['impact']['estimatedDowntimeSec'], 31)
+        self.assertEqual(result['health']['largestGapSec'], 1)
+
+    def test_interval_change_does_not_change_legacy_or_recorded_coverage(self):
+        self.sample(5, 1)  # historical 60s observation
+        self.labeled_sample(180, interval=30)
+        self.labeled_sample(60, interval=30)
+        result = self.detail(300)
+        with patch.object(monitoring, 'get_monitoring_settings', return_value={'availabilityIntervalSec': 15}):
+            changed = self.detail(300)
+        self.assertEqual(result['impact'], changed['impact'])
+        self.assertEqual(result['health']['coveragePct'], changed['health']['coveragePct'])
+        self.assertEqual(result['health']['recordedIntervalsSec'], [30, 60])
 
 
 if __name__ == "__main__":
