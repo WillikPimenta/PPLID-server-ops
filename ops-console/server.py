@@ -1813,6 +1813,15 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             self._send_json(result)
             return
 
+        if path == "/api/v1/console/update/cancel":
+            if not self._require_unlocked_session():
+                self._send_json({"error": "Bloqueado ou nao autenticado"}, status=401)
+                return
+            result = server_ops.cancel_console_update(self.config)
+            server_ops.audit_log(self.config, self._session_username(), "console_update_cancel", str(result))
+            self._send_json(result, status=200 if result.get("ok") else 409)
+            return
+
         if path == "/api/v1/console/update/apply":
             if not self._require_unlocked_session():
                 self._send_json({"error": "Bloqueado ou nao autenticado"}, status=401)

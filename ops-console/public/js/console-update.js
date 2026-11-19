@@ -6,6 +6,7 @@
   const STATUS_URL = "/api/v1/console/update/status";
   const LOG_URL = "/api/v1/console/update/log?limit=200";
   const APPLY_URL = "/api/v1/console/update/apply";
+  const CANCEL_URL = "/api/v1/console/update/cancel";
   const POLL_INTERVAL_MS = 2000;
   // Dependencias/bootstrap podem ultrapassar dois minutos em máquinas mais
   // lentas. Enquanto o lock estiver ativo, não tratar a atualização como erro.
@@ -34,6 +35,10 @@
     logError: null,
     statusInFlight: null,
     progressInFlight: null,
+    cancelPending: false,
+    logInFlight: null,
+    logUpdatedAt: null,
+    logTimer: null,
   };
 
   const SILENT_STATUS_MIN_INTERVAL_MS = 15000;
@@ -159,6 +164,12 @@
   function resolveStatusPresentation(status, uiState) {
     const elapsed = formatElapsed(OC.consoleUpdateState.activityStartedAt);
     const elapsedSuffix = elapsed ? ` (${elapsed})` : "";
+    if (status?.inProgress && (status.cancelRequested || OC.consoleUpdateState.cancelPending)) {
+      return { label: "Cancelando", tone: "running", detail: "Aguardando a etapa atual terminar. Alterações já aplicadas serão preservadas." };
+    }
+    if (!status?.inProgress && status?.lastResult?.cancelled) {
+      return { label: "Cancelado", tone: "info", detail: "Deploy cancelado. Alterações já aplicadas foram preservadas; o console não foi reiniciado." };
+    }
 
     const applyPhaseLabels = {
       started: "Iniciando worker de atualização",
@@ -200,8 +211,8 @@
         label: "Atualizando",
         tone: "running",
         detail: status.lockDetail
-          ? `Atualização em andamento (${status.lockDetail}).`
-          : "Atualização do console em andamento.",
+          ? `${applyPhase || "Atualização em andamento"} (${status.lockDetail}).`
+          : `${applyPhase || "Atualização do console em andamento"}.`,
       };
     }
     if (OC.consoleUpdateState.lastError) {
@@ -323,7 +334,7 @@
     if (!OC.consoleUpdateState.logOpen) return "";
     const state = OC.consoleUpdateState;
     let body = "";
-    if (state.logLoading) {
+    if (state.logLoading && !state.logLines.length) {
       body = "Carregando eventos da atualização…";
     } else if (state.logError) {
       body = `Não foi possível carregar o log: ${state.logError}`;
@@ -335,27 +346,63 @@
     return `
       <div class="ops-console-update-log" role="region" aria-label="Eventos da atualização">
         <div class="ops-console-update-log-head">
-          <strong>Eventos da atualização</strong>
-          <button type="button" class="btn btn-ghost btn-sm" id="btn-console-update-refresh-log">Atualizar log</button>
+          <div><strong>Eventos da atualização</strong><span class="ops-console-update-log-meta">Últimos ${state.logLines.length} eventos${state.logUpdatedAt ? ` · ${formatCheckedAt(state.logUpdatedAt, true)}` : ""}</span></div>
+          <div class="ops-console-update-log-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-console-update-copy-log" ${!state.logLines.length ? "disabled" : ""}>Copiar log</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-console-update-refresh-log" ${state.logLoading ? "disabled" : ""}>${state.logLoading ? "Carregando…" : "Atualizar log"}</button>
+          </div>
         </div>
-        <pre class="ops-console-update-log-body">${OC.escapeHtml(body)}</pre>
+        <pre class="ops-console-update-log-body" id="console-update-log-text" tabindex="0" aria-label="Log da atualização">${body.split("\n").map(line => `<span class="ops-console-update-log-line${/\[ERROR\]|\[failed\]/i.test(line) ? " is-error" : ""}">${OC.escapeHtml(line)}</span>`).join("\n")}</pre>
       </div>
     `;
   }
 
   async function loadConsoleUpdateLog() {
+    if (OC.consoleUpdateState.logInFlight) return OC.consoleUpdateState.logInFlight;
+    const request = fetchUpdateLog();
+    OC.consoleUpdateState.logInFlight = request;
+    try { await request; } finally { OC.consoleUpdateState.logInFlight = null; }
+  }
+
+  async function fetchUpdateLog() {
     OC.consoleUpdateState.logLoading = true;
     OC.consoleUpdateState.logError = null;
     renderConsoleUpdateBar(OC.consoleUpdateState.status, OC.consoleUpdateState.uiState);
     try {
       const payload = await OC.fetchJson(LOG_URL, { timeoutMs: 10000 });
       OC.consoleUpdateState.logLines = Array.isArray(payload?.lines) ? payload.lines : [];
+      OC.consoleUpdateState.logUpdatedAt = new Date().toISOString();
     } catch (err) {
       OC.consoleUpdateState.logError = err.message || "erro desconhecido";
     } finally {
       OC.consoleUpdateState.logLoading = false;
       renderConsoleUpdateBar(OC.consoleUpdateState.status, OC.consoleUpdateState.uiState);
     }
+  }
+
+  async function cancelConsoleUpdate() {
+    const state = OC.consoleUpdateState;
+    if (state.cancelPending || state.status?.cancelRequested) return;
+    state.cancelPending = true;
+    renderConsoleUpdateBar(state.status, state.uiState);
+    try {
+      await OC.postAction(CANCEL_URL, {}, { timeoutMs: 15000 });
+      const status = await OC.fetchConsoleUpdateStatus({ progressOnly: true });
+      renderConsoleUpdateBar(status, state.uiState);
+      OC.showToast?.("Cancelamento solicitado. Aguardando a etapa atual terminar.", "info");
+    } catch (err) {
+      OC.showToast?.(err.message || "Não foi possível cancelar o deploy.", "error");
+    } finally {
+      state.cancelPending = false;
+      renderConsoleUpdateBar(state.status, state.uiState);
+    }
+  }
+
+  function buildUpdateSteps(status, uiState) {
+    if (!status?.inProgress && uiState !== "applying" && uiState !== "reconnecting") return "";
+    const steps = [["started", "Início"], ["pulling", "Código"], ["dependencies", "Dependências"], ["automation_runtime", "Automações"], ["restarting", "Reinício"]];
+    const phase = uiState === "reconnecting" ? "restarting" : status?.lastResult?.phase || "started";
+    return `<ol class="ops-console-update-steps" aria-label="Etapas do deploy">${steps.map(([key, label]) => `<li${key === phase ? ' aria-current="step"' : ""}>${label}</li>`).join("")}</ol>`;
   }
 
   async function copyUpdateError(button) {
@@ -369,6 +416,14 @@
     if (!root || root.dataset.updateBound === "1") return;
     root.dataset.updateBound = "1";
     root.addEventListener("click", (event) => {
+      if (event.target.closest("#btn-console-update-copy-log")) {
+        OC.copyText(OC.consoleUpdateState.logLines.join("\n"), { button: event.target.closest("button"), successMessage: "Log copiado." });
+        return;
+      }
+      if (event.target.closest("#btn-console-update-cancel")) {
+        cancelConsoleUpdate();
+        return;
+      }
       if (event.target.closest("#btn-console-update-copy-error")) {
         event.preventDefault();
         copyUpdateError(event.target.closest("#btn-console-update-copy-error"));
@@ -411,10 +466,25 @@
     const hasUpdate = Boolean(status?.updateAvailable);
     const hasError = Boolean(OC.consoleUpdateState.lastError);
     const hasLog = Boolean(status?.inProgress || status?.lastResult);
+    const canCancel = status?.inProgress && status?.lastResult?.phase !== "restarting" && uiState !== "reconnecting";
+    const cancelRequested = OC.consoleUpdateState.cancelPending || status?.cancelRequested;
+    if (OC.consoleUpdateState.logOpen && status?.inProgress && !OC.consoleUpdateState.logTimer) {
+      OC.consoleUpdateState.logTimer = setInterval(() => {
+        if (OC.currentRoute?.view !== "deploy") {
+          clearInterval(OC.consoleUpdateState.logTimer);
+          OC.consoleUpdateState.logTimer = null;
+          return;
+        }
+        loadConsoleUpdateLog();
+      }, 5000);
+    } else if ((!OC.consoleUpdateState.logOpen || !status?.inProgress) && OC.consoleUpdateState.logTimer) {
+      clearInterval(OC.consoleUpdateState.logTimer);
+      OC.consoleUpdateState.logTimer = null;
+    }
     const buttonLabel =
       uiState === "checking"
         ? "Verificando…"
-        : uiState === "applying"
+        : uiState === "applying" || status?.inProgress
           ? "Aplicando…"
           : uiState === "reconnecting"
             ? "Reiniciando…"
@@ -442,6 +512,10 @@
           .join("")
       : `<span class="ops-console-update-chip is-muted"><span class="ops-console-update-chip-value">Carregando versão…</span></span>`;
 
+    const oldLog = root.querySelector(".ops-console-update-log-body");
+    const logScroll = oldLog?.scrollTop || 0;
+    const followLog = !oldLog || oldLog.scrollHeight - oldLog.clientHeight - logScroll < 24;
+    const focusedId = root.contains(document.activeElement) ? document.activeElement?.id : null;
     root.innerHTML = `
       <div class="ops-console-update-inner is-tone-${OC.escapeHtml(presentation.tone)}">
         <div class="ops-console-update-icon" aria-hidden="true">
@@ -462,10 +536,13 @@
               ? `<p class="ops-console-update-detail">${OC.escapeHtml(presentation.detail)}</p>`
               : ""
           }
-          ${hasLog ? `<button type="button" class="btn btn-ghost btn-sm ops-console-update-log-btn" id="btn-console-update-log">${OC.consoleUpdateState.logOpen ? "Ocultar eventos" : "Ver eventos"}</button>` : ""}
+          ${buildUpdateSteps(status, uiState)}
+          ${hasLog ? `<button type="button" class="btn btn-ghost btn-sm ops-console-update-log-btn" id="btn-console-update-log" aria-expanded="${OC.consoleUpdateState.logOpen}">${OC.consoleUpdateState.logOpen ? "Ocultar eventos" : "Ver eventos"}</button>` : ""}
           ${buildUpdateLogPanel()}
           ${uiState === "idle" ? buildErrorPanelHtml(status) : ""}
         </div>
+        <div class="ops-console-update-actions">
+        ${canCancel ? `<button type="button" class="btn btn-danger btn-sm" id="btn-console-update-cancel" title="Parar após a etapa atual, preservando alterações já aplicadas" ${cancelRequested ? "disabled" : ""}>${cancelRequested ? "Cancelando…" : "Cancelar deploy"}</button>` : ""}
         <button
           type="button"
           class="btn ${hasUpdate || hasError ? "btn-primary" : "btn-secondary"} btn-sm ops-console-update-btn"
@@ -483,9 +560,13 @@
         >
           ${OC.escapeHtml(buttonLabel)}
         </button>
+        </div>
       </div>
     `;
 
+    const nextLog = root.querySelector(".ops-console-update-log-body");
+    if (nextLog) nextLog.scrollTop = followLog ? nextLog.scrollHeight : logScroll;
+    if (focusedId) document.getElementById(focusedId)?.focus({ preventScroll: true });
     bindConsoleUpdateButton();
   }
 
@@ -506,7 +587,7 @@
     if (!result || typeof result !== "object") return false;
     const phase = String(result.phase || "");
     if (phase === "started") return false;
-    if (phase === "failed" || phase === "restarting" || phase === "done") return true;
+    if (phase === "failed" || phase === "restarting" || phase === "done" || phase === "cancelled") return true;
     if (result.ok === false) return true;
     if (!applyStartedAt) return Boolean(result.applied || result.restarting || result.error);
     const finishedMs = Date.parse(result.finishedAt || "");
@@ -851,6 +932,8 @@
         return;
       }
 
+      OC.consoleUpdateState.logOpen = true;
+      loadConsoleUpdateLog();
       let wait = await waitForApplyResult(result.startedAt || applyStartedAt, toSha);
       while (wait.timedOut && wait.status?.inProgress) {
         wait = await waitForApplyResult(result.startedAt || applyStartedAt, toSha);
@@ -865,6 +948,15 @@
         );
         endActivity();
         renderConsoleUpdateBar(wait.status || status, "idle");
+        return;
+      }
+
+      if (wait.result?.cancelled) {
+        clearLastError();
+        endActivity();
+        if (OC.consoleUpdateState.logOpen) await loadConsoleUpdateLog();
+        renderConsoleUpdateBar(wait.status || status, "idle");
+        OC.showToast?.("Deploy cancelado. Alterações já aplicadas foram preservadas.", "info");
         return;
       }
 

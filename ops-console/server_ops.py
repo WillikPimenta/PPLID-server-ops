@@ -2977,6 +2977,7 @@ def check_console_update(
                     "supported": local.get("supported", True),
                     "error": "Atualizacao do console ja em andamento.",
                     "lockDetail": lock.get("detail") or "",
+                    "cancelRequested": _console_update_cancel_path(config).exists(),
                     "progressOnly": bool(progress_only),
                 },
                 local,
@@ -3164,6 +3165,22 @@ def _spawn_detached_powershell(
 _CONSOLE_UPDATE_APPLY_LOCK = threading.Lock()
 
 
+def _console_update_cancel_path(config: dict[str, Any]) -> Path:
+    return _console_update_lock_path(config).with_name("console-update.cancel")
+
+
+def cancel_console_update(config: dict[str, Any]) -> dict[str, Any]:
+    with _CONSOLE_UPDATE_APPLY_LOCK:
+        result = _read_console_update_result(config) or {}
+        if not _read_console_update_lock(config) or result.get("phase") == "restarting":
+            return {"ok": False, "error": "Não há atualização cancelável. O reinício pode já ter começado."}
+        marker = _console_update_cancel_path(config)
+        if not marker.exists():
+            marker.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+            append_console_update_log(config, "Cancelamento solicitado; aguardando a etapa atual terminar.", phase="cancelling")
+        return {"ok": True, "cancelRequested": True}
+
+
 def apply_console_update(config: dict[str, Any]) -> dict[str, Any]:
     # Protect check-and-start as one operation across concurrent HTTP requests.
     with _CONSOLE_UPDATE_APPLY_LOCK:
@@ -3217,6 +3234,7 @@ def _apply_console_update_locked(config: dict[str, Any]) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat()
 
     try:
+        _console_update_cancel_path(config).unlink(missing_ok=True)
         _write_console_update_lock(config, detail=f"{previous_sha}->{target_sha}")
         _write_console_update_result(
             config,

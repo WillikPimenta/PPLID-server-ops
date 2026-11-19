@@ -5634,16 +5634,16 @@ body.is-locked .auth-mode-banner {
 
 .ops-console-update-inner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--spacing-3);
   min-height: 3.25rem;
   padding: 0.55rem 0.75rem 0.55rem 0.65rem;
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-lg);
+  border: 1px solid var(--theme-border);
+  border-radius: var(--border-radius-lg);
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--color-surface-elevated) 92%, #fff) 0%,
-    var(--color-surface-elevated) 100%
+    color-mix(in srgb, var(--theme-bg-elevated) 92%, #fff) 0%,
+    var(--theme-bg-elevated) 100%
   );
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
@@ -5665,24 +5665,24 @@ body.is-locked .auth-mode-banner {
 }
 
 .ops-console-update-bar.is-update-available .ops-console-update-inner {
-  border-color: color-mix(in srgb, var(--color-warning) 40%, var(--color-border-subtle));
+  border-color: color-mix(in srgb, var(--color-warning) 40%, var(--theme-border));
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--color-warning) 7%, var(--color-surface-elevated)) 0%,
-    var(--color-surface-elevated) 100%
+    color-mix(in srgb, var(--color-warning) 7%, var(--theme-bg-elevated)) 0%,
+    var(--theme-bg-elevated) 100%
   );
 }
 
 .ops-console-update-bar.is-updating .ops-console-update-inner {
-  border-color: color-mix(in srgb, #3b82f6 30%, var(--color-border-subtle));
+  border-color: color-mix(in srgb, #3b82f6 30%, var(--theme-border));
 }
 
 .ops-console-update-bar.is-update-error .ops-console-update-inner {
-  border-color: color-mix(in srgb, var(--color-error) 40%, var(--color-border-subtle));
+  border-color: color-mix(in srgb, var(--color-error) 40%, var(--theme-border));
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--color-error) 6%, var(--color-surface-elevated)) 0%,
-    var(--color-surface-elevated) 100%
+    color-mix(in srgb, var(--color-error) 6%, var(--theme-bg-elevated)) 0%,
+    var(--theme-bg-elevated) 100%
   );
 }
 
@@ -5693,9 +5693,9 @@ body.is-locked .auth-mode-banner {
   width: 2rem;
   height: 2rem;
   flex-shrink: 0;
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--color-text-primary) 6%, transparent);
-  color: var(--color-text-secondary);
+  border-radius: var(--border-radius-md);
+  background: color-mix(in srgb, var(--theme-text-primary) 6%, transparent);
+  color: var(--theme-text-secondary);
 }
 
 .ops-console-update-icon svg {
@@ -5726,7 +5726,7 @@ body.is-locked .auth-mode-banner {
 .ops-console-update-title {
   font-size: 0.8125rem;
   font-weight: var(--font-weight-semibold);
-  color: var(--color-text-primary);
+  color: var(--theme-text-primary);
   letter-spacing: -0.01em;
 }
 
@@ -5750,25 +5750,25 @@ body.is-locked .auth-mode-banner {
   max-width: 100%;
   padding: 0.12rem 0.45rem;
   border-radius: var(--border-radius-full);
-  border: 1px solid color-mix(in srgb, var(--color-border-subtle) 85%, transparent);
-  background: color-mix(in srgb, var(--color-surface-elevated) 70%, #fff);
-  font-size: 0.72rem;
+  border: 1px solid color-mix(in srgb, var(--theme-border) 85%, transparent);
+  background: color-mix(in srgb, var(--theme-bg-elevated) 70%, #fff);
+  font-size: 0.8125rem;
   line-height: 1.2;
-  color: var(--color-text-primary);
+  color: var(--theme-text-primary);
 }
 
 .ops-console-update-chip.is-warn {
-  border-color: color-mix(in srgb, var(--color-warning) 35%, var(--color-border-subtle));
-  background: color-mix(in srgb, var(--color-warning) 10%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--color-warning) 35%, var(--theme-border));
+  background: color-mix(in srgb, var(--color-warning) 10%, var(--theme-bg-elevated));
 }
 
 .ops-console-update-chip.is-muted {
-  color: var(--color-text-secondary);
+  color: var(--theme-text-secondary);
   border-style: dashed;
 }
 
 .ops-console-update-chip-label {
-  color: var(--color-text-secondary);
+  color: var(--theme-text-secondary);
   font-weight: var(--font-weight-medium);
   text-transform: lowercase;
 }
@@ -5784,27 +5784,28 @@ body.is-locked .auth-mode-banner {
 
 .ops-console-update-detail {
   margin: 0.25rem 0 0;
-  font-size: 0.72rem;
-  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  color: var(--theme-text-secondary);
   line-height: 1.35;
 }
 
 .ops-console-update-log-btn {
   margin-top: 0.35rem;
   padding: 0.12rem 0.35rem;
-  font-size: 0.7rem;
+  font-size: 0.8125rem;
 }
 
 .ops-console-update-log {
   margin-top: 0.45rem;
   padding: 0.5rem 0.6rem;
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--color-surface-elevated) 75%, #000);
+  border: 1px solid var(--theme-border);
+  border-radius: var(--border-radius-md);
+  background: var(--theme-bg-muted);
 }
 
 .ops-console-update-log-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
@@ -5812,20 +5813,20 @@ body.is-locked .auth-mode-banner {
 }
 
 .ops-console-update-log-head strong {
-  font-size: 0.72rem;
-  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  color: var(--theme-text-secondary);
 }
 
 .ops-console-update-log-body {
-  max-height: 12rem;
+  max-height: 22rem;
   margin: 0;
   overflow: auto;
   padding: 0.45rem 0.5rem;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--color-surface-elevated) 60%, #000);
-  color: var(--color-text-primary);
-  font-size: 0.68rem;
-  line-height: 1.45;
+  border-radius: var(--border-radius-md);
+  background: var(--theme-bg-input);
+  color: var(--theme-text-primary);
+  font-size: 0.8125rem;
+  line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -5834,9 +5835,9 @@ body.is-locked .auth-mode-banner {
 .ops-console-update-error {
   margin-top: 0.45rem;
   padding: 0.5rem 0.6rem;
-  border: 1px solid color-mix(in srgb, var(--color-error) 35%, var(--color-border-subtle));
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--color-error) 8%, var(--color-surface-elevated));
+  border: 1px solid color-mix(in srgb, var(--color-error) 35%, var(--theme-border));
+  border-radius: var(--border-radius-md);
+  background: color-mix(in srgb, var(--color-error) 8%, var(--theme-bg-elevated));
 }
 
 .ops-console-update-error-head {
@@ -5864,10 +5865,10 @@ body.is-locked .auth-mode-banner {
   max-height: 8rem;
   overflow: auto;
   padding: 0.4rem 0.5rem;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--color-surface-elevated) 70%, #000);
-  color: var(--color-text-primary);
-  font-size: 0.72rem;
+  border-radius: var(--border-radius-md);
+  background: color-mix(in srgb, var(--theme-bg-elevated) 70%, #000);
+  color: var(--theme-text-primary);
+  font-size: 0.8125rem;
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
@@ -5879,7 +5880,7 @@ body.is-locked .auth-mode-banner {
   margin-top: 0.35rem;
   width: 100%;
   min-height: 4.5rem;
-  font-size: 0.7rem;
+  font-size: 0.8125rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -5888,7 +5889,62 @@ body.is-locked .auth-mode-banner {
   white-space: nowrap;
 }
 
+.ops-console-update-actions,
+.ops-console-update-log-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ops-console-update-actions {
+  align-self: flex-start;
+  flex-shrink: 0;
+}
+
+.ops-console-update-log-meta {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--theme-text-secondary);
+}
+
+.ops-console-update-log-line.is-error {
+  color: var(--color-error);
+  font-weight: 600;
+}
+
+.ops-console-update-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.1rem;
+  list-style: none;
+  margin: 0.75rem 0 0.4rem;
+  padding: 0;
+  color: var(--theme-text-secondary);
+  font-size: 0.8rem;
+}
+
+.ops-console-update-steps li {
+  padding: 0.25rem 0;
+  border-bottom: 2px solid var(--theme-border);
+}
+
+.ops-console-update-steps [aria-current="step"] {
+  color: var(--theme-text-primary);
+  border-color: var(--color-warning);
+  font-weight: 600;
+}
+
+.ops-console-update-log-body:focus-visible {
+  outline: 2px solid var(--theme-text-secondary);
+  outline-offset: 2px;
+}
+
 @media (max-width: 900px) {
+  .ops-console-update-actions {
+    width: 100%;
+  }
   .ops-console-update-inner {
     flex-wrap: wrap;
     align-items: flex-start;

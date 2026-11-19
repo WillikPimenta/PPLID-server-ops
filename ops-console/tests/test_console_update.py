@@ -9,6 +9,28 @@ from unittest.mock import patch
 import server_ops as so
 
 
+def test_cancel_console_update_waits_for_worker_and_is_idempotent(tmp_path: Path):
+    config = {"logDir": str(tmp_path / "logs")}
+    so._write_console_update_lock(config, detail="abc->def")
+    so._write_console_update_result(config, {"ok": True, "phase": "dependencies"})
+    assert so.cancel_console_update(config) == {"ok": True, "cancelRequested": True}
+    assert so.cancel_console_update(config)["ok"] is True
+    assert so._read_console_update_lock(config) is not None
+    assert so._read_console_update_result(config)["phase"] == "dependencies"
+    assert len(so.read_console_update_log(config)["lines"]) == 1
+    with patch.object(so, "read_local_console_git_info", return_value={"ok": True}):
+        assert so.check_console_update(config, progress_only=True)["cancelRequested"] is True
+
+
+def test_cancel_console_update_rejects_idle_and_restart(tmp_path: Path):
+    config = {"logDir": str(tmp_path / "logs")}
+    assert so.cancel_console_update(config)["ok"] is False
+    so._write_console_update_lock(config)
+    so._write_console_update_result(config, {"phase": "restarting"})
+    assert so.cancel_console_update(config)["ok"] is False
+    assert not so._console_update_cancel_path(config).exists()
+
+
 def test_resolve_ops_repo_dir_prefers_installed_ops(tmp_path: Path):
     base = tmp_path / "pplid"
     logs = base / "logs"

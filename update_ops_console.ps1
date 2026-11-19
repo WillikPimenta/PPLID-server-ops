@@ -241,6 +241,7 @@ if (-not (Test-Path $resolvedLogDir)) {
 $lockPath = Join-Path $resolvedLogDir "console-update.lock"
 $resultPath = Join-Path $resolvedLogDir "console-update.result.json"
 $logPath = Join-Path $resolvedLogDir "console-update.log"
+$cancelPath = Join-Path $resolvedLogDir "console-update.cancel"
 
 try {
     if (-not $OpsRepoDir) {
@@ -295,6 +296,23 @@ function Write-ApplyResult {
     Write-ConsoleUpdateResult -Payload $Payload -ResultPath $resultPath
 }
 
+function Stop-IfConsoleUpdateCancelled {
+    if (-not (Test-Path $cancelPath)) { return }
+    $applied = [bool]$script:consoleCodeApplied
+    Write-ConsoleUpdateLog -Message "Atualizacao cancelada. Alteracoes ja aplicadas foram preservadas; o console nao sera reiniciado." -Phase "cancelled"
+    Write-ApplyResult -Payload @{
+        ok = $true
+        phase = "cancelled"
+        cancelled = $true
+        applied = $applied
+        restarting = $false
+        message = "Atualizacao cancelada. Alteracoes ja aplicadas foram preservadas."
+    }
+    Clear-ConsoleUpdateLock
+    Remove-Item -LiteralPath $cancelPath -Force -ErrorAction SilentlyContinue
+    exit 0
+}
+
 if ($CheckOnly) {
     try {
         $status = Get-ConsoleUpdateStatus -RepoDir $OpsRepoDir
@@ -313,6 +331,8 @@ if ($CheckOnly) {
 
 if ($RestartOnly) {
     if ($DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
+    $script:consoleCodeApplied = $true
+    Stop-IfConsoleUpdateCancelled
     $restartArgs = @("-Restart")
     if ($ConfigPath -and (Test-Path $ConfigPath)) {
         $restartArgs += @("-ConfigPath", $ConfigPath)
@@ -323,6 +343,7 @@ if ($RestartOnly) {
 
 if ($Apply) {
     try {
+    Stop-IfConsoleUpdateCancelled
     # O servidor grava "started" antes de criar o worker. Registre a entrada
     # do worker antes da segunda consulta ao Git para que o painel não pareça
     # congelado caso fetch/status demore na máquina destino.
@@ -346,6 +367,7 @@ if ($Apply) {
         message = "Worker de atualizacao iniciado; verificando Git."
     }
     $status = Get-ConsoleUpdateStatus -RepoDir $OpsRepoDir
+    Stop-IfConsoleUpdateCancelled
     if (-not $status.ok) {
         Write-ConsoleUpdateLog -Message ([string]($status.reason)) -Level "ERROR" -Phase "failed"
         Clear-ConsoleUpdateLock
@@ -404,6 +426,8 @@ if ($Apply) {
     try {
         Write-ConsoleUpdateLog -Message ("Executando git pull de origin/{0}." -f $status.branch) -Phase "pulling"
         Invoke-GitInRepo -RepoDir $OpsRepoDir -GitArgs @("pull", "--ff-only", "origin", $status.branch) | Out-Null
+        $script:consoleCodeApplied = $true
+        Stop-IfConsoleUpdateCancelled
         Write-ConsoleUpdateLog -Message "git pull concluído." -Phase "dependencies"
     } catch {
         Write-ConsoleUpdateLog -Message $_.Exception.Message -Level "ERROR" -Phase "failed"
@@ -421,6 +445,7 @@ if ($Apply) {
     }
 
     $newStatus = Get-ConsoleUpdateStatus -RepoDir $OpsRepoDir
+    Stop-IfConsoleUpdateCancelled
     Write-ApplyResult -Payload @{
         ok = $true
         accepted = $true
@@ -467,6 +492,7 @@ if ($Apply) {
         }
     }
 
+    Stop-IfConsoleUpdateCancelled
     if ($automationDepsChanged -or $depsChanged) {
         Write-ConsoleUpdateLog -Message "Atualizando runtime das automações." -Phase "automation_runtime"
         Write-ApplyResult -Payload @{
@@ -506,6 +532,7 @@ if ($Apply) {
         }
     }
 
+    Stop-IfConsoleUpdateCancelled
     Write-ApplyResult -Payload @{
         ok = $true
         accepted = $true
@@ -517,6 +544,8 @@ if ($Apply) {
         branch = $newStatus.branch
         startedAt = $startedAt
     }
+    # A cancellation accepted just before the phase transition must still win.
+    Stop-IfConsoleUpdateCancelled
     Clear-ConsoleUpdateLock
     Write-ApplyResult -Payload @{
         ok = $true
