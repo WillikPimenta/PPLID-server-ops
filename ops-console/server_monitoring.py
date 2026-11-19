@@ -2929,7 +2929,9 @@ def _build_availability_window(
               'observedSec': round(observed_seconds),
               'unknownSec': max(0, round((now - start).total_seconds() - observed_seconds)),
               'uncertainIncidentCount': sum(1 for item in incidents if item['uncertain'])}
-    visible_deploys = [row for row in deploys if start <= recorded_time({'recorded_at': row['started_at']}) < now]
+    visible_deploys = [row for row in deploys
+                       if (started_at := recorded_time({'recorded_at': row['started_at']})) is not None
+                       and start <= started_at < now]
     timeline = incidents[-100:] + availability_events
     timeline += [dict(row, kind="deploy", startedAt=row['started_at'], finishedAt=row['finished_at']) for row in visible_deploys[:100]]
     timeline.sort(key=lambda row: row['startedAt'], reverse=True)

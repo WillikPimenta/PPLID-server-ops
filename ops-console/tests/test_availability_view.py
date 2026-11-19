@@ -87,6 +87,21 @@ class AvailabilityViewTests(unittest.TestCase):
         self.assertEqual(result["api"]["availabilityPct"], 99.9)
         self.assertEqual({row["kind"] for row in result["timeline"]}, {"event", "deploy"})
 
+    def test_window_ignores_deploy_dates_sqlite_accepts_but_python_cannot_parse(self):
+        # SQLite accepts hour 24, but datetime.fromisoformat rejects it.
+        invalid_start = (self.now - timedelta(days=1)).strftime('%Y-%m-%dT24:00:00Z')
+        self.db.execute("INSERT INTO deploy_runs VALUES ('MAIN', 'invalid-date', 'done', 'ok', ?, ?)",
+                        (invalid_start, self.now.isoformat()))
+        self.deploy('valid-date', 10, 5)
+        self.sample(3, 1)
+        with patch.object(monitoring, 'fetch_backend_api_metrics', return_value={'error': 'unavailable'}):
+            result = monitoring.build_monitoring_availability({}, 'MAIN', window='24h')
+        self.assertEqual(result['health']['samples'], 1)
+        self.assertEqual([row['run_id'] for row in result['timeline'] if row['kind'] == 'deploy'], ['valid-date'])
+        detail = self.availability_detail(minutes=24 * 60)
+        self.assertEqual(detail['health']['samples'], 1)
+        self.assertEqual([row['run_id'] for row in detail['timeline'] if row['kind'] == 'deploy'], ['valid-date'])
+
     def test_thirty_days_includes_more_than_ten_thousand_samples(self):
         rows = [("MAIN", 1, (self.now - timedelta(minutes=i)).isoformat(timespec="milliseconds").replace("+00:00", "Z")) for i in range(10005)]
         self.db.executemany("INSERT INTO monitor_samples(environment, metric_key, value, recorded_at) VALUES (?, 'health_reachable', ?, ?)", rows)
