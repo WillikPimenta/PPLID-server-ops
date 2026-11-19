@@ -121,3 +121,64 @@ def test_event_log_route_returns_download_and_validation_errors():
     with patch.object(monitoring, 'build_monitoring_availability_event_log', side_effect=ValueError('Intervalo inválido')):
         handler._handle_monitoring_get(path, parsed)
         handler._send_json.assert_called_once_with({'error': 'Intervalo inválido'}, status=400)
+
+
+def test_queue_diagnostic_rotations_export_offline_preserves_event_time_and_pid(evidence_store):
+    _, store = evidence_store
+    at = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0)
+    original = at.isoformat()
+    ingested = (at + timedelta(seconds=30)).isoformat()
+    line = f'{original} WARNING waitress.queue {{"event_at":"{original}","environment":"MAIN","pid":4321,"pending_requests":73,"running_requests":16,"route":"/api/report/{{id}}/"}}'
+    store.query_service_log_lines = lambda *a, **kw: [
+        {'logged_at': ingested, 'service': 'backend', 'stream': 'queue', 'line': line}]
+    opened = []
+    def open_log(path, *args, **kwargs):
+        opened.append(path.name)
+        if path.name.endswith('.1'):
+            return io.BytesIO((line + '\n').encode())
+        raise FileNotFoundError()
+    with patch.object(monitoring, '_service_log_sources', return_value=[('backend', 'queue', Path('PPLID_MAIN.waitress.queue.log'))]), \
+         patch.object(Path, 'open', open_log), \
+         patch.object(monitoring, 'fetch_backend_api_inflight', side_effect=AssertionError('must work offline')):
+        body, _, _ = monitoring.build_monitoring_availability_event_log({}, 'MAIN',
+            since=(at - timedelta(minutes=1)).isoformat(), until=(at + timedelta(minutes=1)).isoformat(), event_at=original)
+    text = body.decode('utf-8-sig')
+    assert f'ingestão={ingested}' in text
+    assert line in text and '"pid":4321' in text
+    assert 'Arquivo não encontrado' in text
+    assert len(opened) == 4
+    assert 'não comprovam causa raiz' in text
+
+
+def test_queue_source_uses_configured_local_path():
+    paths = monitoring._service_log_sources({'logDir': 'logs', 'HOM': {'repoName': 'PPLID_HOM'}}, 'HOM')
+    assert ('backend', 'queue', Path('logs/PPLID_HOM.waitress.queue.log')) in paths
+    custom = monitoring._service_log_sources({'HOM': {'queueDiagnosticsLog': 'custom/queue.log'}}, 'HOM')
+    assert ('backend', 'queue', Path('custom/queue.log')) in custom
+
+
+def test_queue_ingestion_preserves_complete_lines_and_separate_clock():
+    event = '2026-11-18T12:00:00Z WARNING waitress.queue {"event_at":"2026-11-18T12:00:00Z","pid":99}\n'
+    source = Path('queue-ingestion-contract.log')
+    key = str(source.resolve())
+    store = SimpleNamespace(append_service_log=Mock())
+    monitoring._SERVICE_LOG_FILE_OFFSETS.pop(key, None)
+    content = event.encode()
+    def ingest():
+        with patch.object(monitoring, '_service_log_sources', return_value=[('backend', 'queue', source)]), \
+             patch.object(Path, 'is_file', return_value=True), patch.object(Path, 'exists', return_value=True), \
+             patch.object(Path, 'stat', return_value=SimpleNamespace(st_size=len(content))), \
+             patch.object(Path, 'open', side_effect=lambda *a, **kw: io.BytesIO(content)), \
+             patch.object(monitoring, '_utc_now_iso', return_value='2026-11-18T13:00:00Z'):
+            return monitoring._ingest_service_log_files({}, 'MAIN', store, Path('unused'))
+    try:
+        assert len(ingest()) == 1
+        content += event.encode() + b'partial'
+        rows = ingest()
+        assert len(rows) == 1
+        assert rows[0]['line'] == event.strip()
+        assert rows[0]['logged_at'] == '2026-11-18T13:00:00Z'
+        content += b' completed\n'
+        assert ingest()[0]['line'] == 'partial completed'
+    finally:
+        monitoring._SERVICE_LOG_FILE_OFFSETS.pop(key, None)

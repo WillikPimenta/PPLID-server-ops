@@ -1254,6 +1254,7 @@ def _service_log_sources(config: dict[str, Any], env_name: str) -> list[tuple[st
         ("app", "out", log_dir / f"{repo}.log"),
         ("backend", "stderr", log_dir / f"{repo}.backend.err.log"),
         ("backend", "stdout", log_dir / f"{repo}.backend.out.log"),
+        ("backend", "queue", Path(env_cfg.get("queueDiagnosticsLog") or log_dir / f"{repo}.waitress.queue.log")),
         ("frontend", "stderr", log_dir / f"{repo}.frontend.err.log"),
         ("frontend", "stdout", log_dir / f"{repo}.frontend.out.log"),
     ]
@@ -1433,6 +1434,7 @@ def _ingest_service_log_files(
         except OSError:
             continue
         offset = _SERVICE_LOG_FILE_OFFSETS.get(key)
+        initial_slice = offset is None
         if offset is None:
             # No restart, não reingestar histórico inteiro — só os últimos ~64KB
             offset = max(0, size - 64_000)
@@ -1448,18 +1450,24 @@ def _ingest_service_log_files(
         except OSError:
             continue
         text = chunk.decode("utf-8", errors="replace")
-        if offset > 0 and text and not text.startswith("\n"):
+        if offset > 0 and text and not text.startswith("\n") and (stream != 'queue' or initial_slice):
             # descarta linha parcial no início do slice
             nl = text.find("\n")
             if nl >= 0:
                 text = text[nl + 1 :]
+        if stream == 'queue' and text and not text.endswith('\n'):
+            # A reporter write may be observed mid-line. Keep its unfinished
+            # bytes for the next tick instead of storing invalid JSON fragments.
+            tail = text.rsplit('\n', 1)[-1]
+            new_offset -= len(tail.encode('utf-8'))
+            text = text[:-len(tail)]
         now_iso = _utc_now_iso()
         for raw in text.splitlines():
             line = raw.rstrip("\r")
             if not line.strip():
                 continue
             ts = _parse_bracket_log_ts(line)
-            logged_at = (
+            logged_at = now_iso if stream == 'queue' else (
                 ts.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z" if ts else now_iso
             )
             try:
@@ -2755,7 +2763,9 @@ def build_monitoring_availability_event_log(
     report += [f"[{row['recorded_at']}] {row['metric_key']}={row['value']} {row['labels_json'] or ''}" for row in probes[:10000]] or ['Nenhuma sondagem registrada neste intervalo; cobertura não confirmada.']
     if len(probes) > 10000:
         report.append('Lista parcial: primeiras 10000 medições.')
-    report += ['', 'Logs de serviços armazenados no banco']
+    report += ['', 'Logs de serviços armazenados no banco',
+               'Diagnóstico queue: logged_at representa ingestão; event_at no conteúdo representa o evento original UTC. Nos logs legados, logged_at pode representar evento ou coleta, sem distinção histórica disponível.',
+               'Rotas lentas e filas são evidências de ocupação; não comprovam causa raiz nem explicam, isoladamente, o fechamento posterior da porta.']
     try:
         logs = store.query_service_log_lines(env_name, since=since.replace('+00:00', 'Z'),
                                              until=until.replace('+00:00', 'Z'), limit=10000, db_path=db_path)
@@ -2764,15 +2774,22 @@ def build_monitoring_availability_event_log(
         logs = [row for row in logs if (at := _parse_iso_dt(row.get('logged_at'))) is not None
                 and start <= (at if at.tzinfo else at.replace(tzinfo=timezone.utc)) < end]
         for row in sorted(logs, key=lambda item: str(item.get('logged_at') or '')):
-            report.append(f"[{row.get('logged_at')}] [{row.get('service')}/{row.get('stream')}] {row.get('line') or ''}")
+            clock = 'ingestão' if row.get('stream') == 'queue' else 'horário registrado (evento/coleta)'
+            report.append(f"[{clock}={row.get('logged_at')}] [{row.get('service')}/{row.get('stream')}] {row.get('line') or ''}")
         if not logs:
             report.append('Nenhum log de serviço armazenado neste intervalo.')
     except Exception as exc:
         report.append(f'Fonte indisponível: {exc}')
     report += ['', 'Arquivos de serviços disponíveis',
                'Busca histórica em cada arquivo configurado, com limite de 32 MiB e 10000 linhas por arquivo.',
-               'Horários sem fuso nos arquivos usam o fuso do servidor. Arquivos rotacionados/removidos não são recuperados por esta busca.']
-    for service, stream, path in _service_log_sources(config, env_name):
+               'Horários sem fuso nos arquivos usam o fuso do servidor. Inclui rotações queue .1/.2/.3; demais arquivos rotacionados ou removidos não são recuperados por esta busca.']
+    sources = _service_log_sources(config, env_name)
+    # The dedicated diagnostic writer retains three rotations. Read them locally
+    # even when the backend health/metrics endpoints are blocked.
+    sources += [(service, stream, Path(f'{path}.{index}'))
+                for service, stream, path in list(sources) if stream == 'queue'
+                for index in range(1, 4)]
+    for service, stream, path in sources:
         lines, status = _availability_file_log_excerpt(path, start, end)
         report += ['', f'{service}/{stream} — {path.name}', status]
         report += lines or ['Nenhuma linha com horário correspondente disponível.']
