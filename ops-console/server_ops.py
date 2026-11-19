@@ -2673,6 +2673,10 @@ def _console_update_log_path(config: dict[str, Any]) -> Path:
     return get_base_dir(config) / "logs" / "console-update.log"
 
 
+def _console_update_worker_log_path(config: dict[str, Any]) -> Path:
+    return get_base_dir(config) / "logs" / "console-update-worker.log"
+
+
 def append_console_update_log(
     config: dict[str, Any], message: str, *, level: str = "INFO", phase: str = ""
 ) -> None:
@@ -3073,8 +3077,8 @@ def _maybe_fail_stuck_console_update(
     log_dir = str(config.get("logDir") or "")
     error = (
         "Worker de atualizacao nao iniciou (fase 'started' sem progresso). "
-        "Verifique se o PowerShell consegue gravar em "
-        f"{log_dir or 'logDir'} e se update_ops_console.ps1 -Apply sobe."
+        f"Consulte {_console_update_worker_log_path(config)}. "
+        f"O diretorio de logs configurado e {log_dir or 'logDir'}."
     )
     failed = {
         "ok": False,
@@ -3094,7 +3098,12 @@ def _maybe_fail_stuck_console_update(
     return failed
 
 
-def _spawn_detached_powershell(script: Path, args: list[str]) -> None:
+def _spawn_detached_powershell(
+    script: Path,
+    args: list[str],
+    *,
+    worker_log_path: Path | None = None,
+) -> int:
     cmd = [
         "powershell.exe",
         "-NoProfile",
@@ -3106,21 +3115,50 @@ def _spawn_detached_powershell(script: Path, args: list[str]) -> None:
     ]
     creationflags = 0
     if sys.platform == "win32":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
-            subprocess, "DETACHED_PROCESS", 0
-        )
+        # DETACHED_PROCESS drops redirected standard handles on Windows. The
+        # worker then runs without its captured diagnostics. CREATE_NO_WINDOW
+        # keeps the process hidden while preserving stdout/stderr redirection.
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if worker_log_path is None:
+        log_dir = None
+        for index, value in enumerate(args[:-1]):
+            if value.lower() == "-logdir":
+                log_dir = Path(args[index + 1])
+                break
+        if log_dir is None:
+            log_dir = script.parent.parent / "logs"
+        worker_log_path = log_dir / "console-update-worker.log"
+
     # Preserve OPS_MACHINE_CONFIG so Get-PplidLogDir in the worker matches
     # the Python server's local/prod baseDir (especially -Local mode).
     env = os.environ.copy()
-    subprocess.Popen(
-        cmd,
-        creationflags=creationflags,
-        close_fds=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-        cwd=str(script.parent),
-    )
+    worker_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with worker_log_path.open("a", encoding="utf-8", errors="replace") as worker_log:
+        worker_log.write(
+            "\n[{timestamp}] launch parentPid={parent_pid} user={user} "
+            "script={script} cwd={cwd} args={args}\n".format(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                parent_pid=os.getpid(),
+                user="\\".join(
+                    value for value in (os.environ.get("USERDOMAIN"), os.environ.get("USERNAME"))
+                    if value
+                ) or os.environ.get("USERNAME") or "unknown",
+                script=script.resolve(),
+                cwd=script.parent,
+                args=subprocess.list2cmdline(args),
+            )
+        )
+        worker_log.flush()
+        process = subprocess.Popen(
+            cmd,
+            creationflags=creationflags,
+            close_fds=True,
+            stdout=worker_log,
+            stderr=subprocess.STDOUT,
+            env=env,
+            cwd=str(script.parent),
+        )
+    return int(process.pid)
 
 
 _CONSOLE_UPDATE_APPLY_LOCK = threading.Lock()
@@ -3210,11 +3248,27 @@ def _apply_console_update_locked(config: dict[str, Any]) -> dict[str, Any]:
         log_dir = config.get("logDir")
         if log_dir:
             args.extend(["-LogDir", str(log_dir)])
-        _spawn_detached_powershell(script, args)
+        worker_pid = _spawn_detached_powershell(script, args)
+        append_console_update_log(
+            config,
+            f"Worker PowerShell iniciado (PID {worker_pid}); saida em "
+            f"{_console_update_worker_log_path(config)}.",
+            phase="worker_started",
+        )
     except OSError as exc:
         _clear_console_update_lock(config)
-        result = {"ok": False, "error": str(exc), "previousSha": previous_sha, "targetSha": target_sha}
+        result = {
+            "ok": False,
+            "phase": "failed",
+            "accepted": False,
+            "applied": False,
+            "restarting": False,
+            "error": f"Nao foi possivel iniciar o worker PowerShell: {exc}",
+            "previousSha": previous_sha,
+            "targetSha": target_sha,
+        }
         _write_console_update_result(config, result)
+        append_console_update_log(config, result["error"], level="ERROR", phase="failed")
         return result
 
     return {
@@ -3226,4 +3280,5 @@ def _apply_console_update_locked(config: dict[str, Any]) -> dict[str, Any]:
         "targetSha": target_sha,
         "branch": status.get("branch"),
         "startedAt": started_at,
+        "workerPid": worker_pid,
     }

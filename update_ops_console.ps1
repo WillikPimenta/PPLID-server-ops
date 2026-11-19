@@ -1,6 +1,7 @@
 param(
     [switch]$CheckOnly,
     [switch]$Apply,
+    [switch]$Diagnose,
     [switch]$RestartOnly,
     [string]$OpsRepoDir = "",
     [string]$ConfigPath = "",
@@ -10,7 +11,76 @@ param(
 
 $ErrorActionPreference = "Stop"
 $env:GIT_TERMINAL_PROMPT = "0"
-. (Join-Path $PSScriptRoot "lib\paths.ps1")
+$pathsScript = Join-Path $PSScriptRoot "lib\paths.ps1"
+try {
+    . $pathsScript
+} catch {
+    if ($Diagnose) {
+        Write-Output ((@{
+            ok = $false
+            phase = "diagnose"
+            script = $PSCommandPath
+            pathsScript = $pathsScript
+            error = $_.Exception.Message
+        }) | ConvertTo-Json -Compress -Depth 4)
+        exit 1
+    }
+    throw
+}
+
+if ($Diagnose) {
+    $diagnosticLogDir = if ($LogDir) { $LogDir } else { Get-PplidLogDir }
+    $writeProbe = Join-Path $diagnosticLogDir ("console-update-diagnostic-{0}.tmp" -f [guid]::NewGuid().ToString("N"))
+    $diagnosticOpsRepoDir = ""
+    $diagnosticOpsConsoleDir = ""
+    $diagnosticConfigPath = ""
+    try {
+        $diagnosticOpsRepoDir = if ($OpsRepoDir) { $OpsRepoDir } else { Get-PplidOpsDir -ScriptRoot $PSScriptRoot }
+        $diagnosticOpsConsoleDir = Get-PplidOpsConsoleDir -ScriptRoot $PSScriptRoot
+        $diagnosticConfigPath = if ($ConfigPath) { $ConfigPath } else { Get-PplidEnvConfigPath -ScriptRoot $PSScriptRoot }
+        if (-not (Test-Path $diagnosticLogDir)) {
+            New-Item -ItemType Directory -Path $diagnosticLogDir -Force | Out-Null
+        }
+        [System.IO.File]::WriteAllText($writeProbe, "diagnostic")
+        Remove-Item -LiteralPath $writeProbe -Force
+        $payload = @{
+            ok = $true
+            phase = "diagnose"
+            identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            powershell = $PSVersionTable.PSVersion.ToString()
+            script = $PSCommandPath
+            pathsScript = $pathsScript
+            opsRepoDir = $diagnosticOpsRepoDir
+            opsConsoleDir = $diagnosticOpsConsoleDir
+            configPath = $diagnosticConfigPath
+            logDir = $diagnosticLogDir
+            logDirWritable = $true
+            message = "Diagnostico concluido sem executar git pull ou reiniciar o console."
+        }
+        Write-Output ($payload | ConvertTo-Json -Compress -Depth 4)
+        exit 0
+    } catch {
+        if (Test-Path $writeProbe) {
+            Remove-Item -LiteralPath $writeProbe -Force -ErrorAction SilentlyContinue
+        }
+        $payload = @{
+            ok = $false
+            phase = "diagnose"
+            identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            powershell = $PSVersionTable.PSVersion.ToString()
+            script = $PSCommandPath
+            pathsScript = $pathsScript
+            opsRepoDir = $diagnosticOpsRepoDir
+            opsConsoleDir = $diagnosticOpsConsoleDir
+            configPath = $diagnosticConfigPath
+            logDir = $diagnosticLogDir
+            logDirWritable = $false
+            error = $_.Exception.Message
+        }
+        Write-Output ($payload | ConvertTo-Json -Compress -Depth 4)
+        exit 1
+    }
+}
 
 function Write-UpdateJson {
     param([hashtable]$Payload)

@@ -155,9 +155,11 @@ def test_apply_console_update_spawns_worker(tmp_path: Path):
     }
     with patch.object(so, "check_console_update", return_value=status):
         with patch.object(so, "_spawn_detached_powershell") as spawn:
+            spawn.return_value = 4321
             result = so.apply_console_update(config)
     assert result["ok"] is True
     assert result["restarting"] is True
+    assert result["workerPid"] == 4321
     spawn.assert_called_once()
     script_arg, args = spawn.call_args[0]
     assert Path(script_arg).name == "update_ops_console.ps1"
@@ -168,6 +170,32 @@ def test_apply_console_update_spawns_worker(tmp_path: Path):
     assert saved is not None
     assert saved.get("phase") == "started"
     assert saved.get("targetSha") == "def5678"
+
+
+def test_spawn_detached_powershell_captures_worker_output(tmp_path: Path):
+    logs = tmp_path / "logs"
+    script = tmp_path / "ops" / "update_ops_console.ps1"
+    script.parent.mkdir(parents=True)
+    script.write_text("# stub", encoding="utf-8")
+    process = type("Process", (), {"pid": 2468})()
+
+    with patch.object(so.subprocess, "Popen", return_value=process) as popen:
+        pid = so._spawn_detached_powershell(
+            script,
+            ["-Apply", "-OpsRepoDir", str(script.parent), "-LogDir", str(logs)],
+        )
+
+    assert pid == 2468
+    kwargs = popen.call_args.kwargs
+    assert kwargs["stdout"] is not so.subprocess.DEVNULL
+    assert kwargs["stderr"] == so.subprocess.STDOUT
+    assert not (
+        kwargs["creationflags"] & getattr(so.subprocess, "DETACHED_PROCESS", 0)
+    )
+    assert kwargs["cwd"] == str(script.parent)
+    worker_log = logs / "console-update-worker.log"
+    assert worker_log.is_file()
+    assert "launch parentPid=" in worker_log.read_text(encoding="utf-8")
 
 
 def test_console_update_result_roundtrip(tmp_path: Path):
