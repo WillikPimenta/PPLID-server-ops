@@ -42,6 +42,7 @@
   const TAB_LABELS = {
     summary: "Resumo",
     availability: "Disponibilidade",
+    congestion: "Congestionamento",
     incidents: "Incidentes",
     latency: "Latência",
     syncs: "Syncs",
@@ -1178,6 +1179,9 @@
     const compact = opts?.compact === true;
     const tabLabel = opts?.tabLabel || "Resumo";
     const tab = opts?.tab || "summary";
+    if (tab === "congestion") return OC.renderOpsHero({
+      title: "Congestionamento", subtitle: "Investigue fila, ocupação das threads e requisições demoradas com evidências locais.", compact: true, stats: [],
+    });
     if (tab === "availability") return OC.renderOpsHero({
       title: "Disponibilidade",
       subtitle: "Acompanhe a confiabilidade dos ambientes e investigue o histórico de falhas.",
@@ -1344,6 +1348,7 @@
   }
 
   function renderMetaBar(config, warnings) {
+    if (OC.monitorState.activeTab === "congestion") return "";
     const refreshed = OC.monitorState.lastRefreshedAt ? OC.formatDate(OC.monitorState.lastRefreshedAt) : "—";
     const collector = config?.collectorStatus || {};
     const collectorClass = collector.status === "ok" ? "ok" : collector.status === "stale" ? "warn" : "unknown";
@@ -1393,6 +1398,7 @@
   }
 
   OC.renderMonitoringFilters = function renderMonitoringFilters() {
+    if (OC.monitorState.activeTab === "congestion") return "";
     const activeTab = OC.monitorState.activeTab || "summary";
     const showCategories = activeTab === "summary";
     const showLatencyWindow = activeTab === "latency";
@@ -3020,6 +3026,7 @@
             <div class="monitor-log-detail-actions">
               <button type="button" class="btn btn-secondary btn-sm" data-log-copy="line" data-log-key="${OC.escapeHtml(key)}">${logIcon("copy")}Copiar linha</button>
               <button type="button" class="btn btn-secondary btn-sm" data-log-copy="detail" data-log-key="${OC.escapeHtml(key)}">${logIcon("copy")}Copiar detalhes</button>
+              ${line.stream === 'queue' ? `<a class="btn btn-secondary btn-sm" href="${OC.escapeHtml(OC.congestionLogLink?.(line) || '')}">Ver congestionamento</a>` : ''}
               <button type="button" class="btn btn-ghost btn-sm" data-log-related="${OC.escapeHtml(key)}">${logIcon("related")}Buscar semelhantes</button>
             </div>
           </div>`
@@ -3469,7 +3476,7 @@
         (outage && item.ongoing ? Date.now() : Math.max(eventAt, Number.isFinite(lastEvidence) ? lastEvidence : eventAt)) + 5 * 60000);
       const canExtract = !demo && Number.isFinite(eventAt) && eventAt < logUntil;
       const extract = canExtract ? `<button type="button" class="btn btn-secondary btn-sm" data-availability-event-log data-log-env="${escape(item.env)}" data-log-at="${escape(new Date(eventAt).toISOString())}" data-log-since="${escape(new Date(logSince).toISOString())}" data-log-until="${escape(new Date(logUntil).toISOString())}" aria-label="Extrair log de ${escape(title)} em ${escape(item.env)}, ${escape(date(item.startedAt))}" title="Baixar eventos, sondagens e logs com até 5 minutos de contexto antes e depois">Extrair log</button>` : `<span>${demo ? 'Dados simulados' : 'Horário indisponível'}</span>`;
-      return `<tr><td class="av-event-date">${escape(date(item.startedAt))}</td><td><span class="av-env-tag">${escape(item.env)}</span></td><td><div class="av-event-title"><i class="av-event-dot av-tone-${tone}"></i><strong>${eventTitle}</strong></div><small>${escape(detail)}</small></td><td><span class="av-event-status av-tone-${tone}">${escape(status)}</span></td><td class="av-event-duration">${duration}</td><td class="av-event-log-action">${extract}</td></tr>`;
+      return `<tr><td class="av-event-date">${escape(date(item.startedAt))}</td><td><span class="av-env-tag">${escape(item.env)}</span></td><td><div class="av-event-title"><i class="av-event-dot av-tone-${tone}"></i><strong>${eventTitle}</strong></div><small>${escape(detail)}</small></td><td><span class="av-event-status av-tone-${tone}">${escape(status)}</span></td><td class="av-event-duration">${duration}</td><td class="av-event-log-action">${extract}${canExtract ? `<a class="btn btn-ghost btn-sm" href="${OC.buildAppPath('monitoring',null,{tab:'congestion',query:{env:item.env,since:new Date(logSince).toISOString(),until:new Date(logUntil).toISOString()}})}">Congestionamento</a>` : ''}</td></tr>`;
     }).join("");
     return `<div class="availability-view">
       <div class="av-toolbar"><div class="av-period-control" role="group" aria-label="Período de disponibilidade">${controls}</div><div class="av-toolbar-actions">
@@ -3510,6 +3517,8 @@
     const since = OC.currentRoute?.query?.since || "";
 
     switch (tab) {
+      case "congestion":
+        return OC.renderCongestion?.() || "Carregando congestionamento…";
       case "availability":
         return renderAvailabilityView(payload.availabilityByEnv, payload.availabilityCurrentByEnv);
       case "summary": {
@@ -3936,6 +3945,7 @@
   function bindMonitoringInteractions(root) {
     OC.bindBackNavigation(root);
     OC.bindAvailabilityDetails?.(root);
+    OC.bindCongestion?.(root);
     OC.bindAvailabilityExports?.(root);
     OC.bindAvailabilityEventLogs?.(root);
     bindApiRouteDetailRows(root);
@@ -4598,6 +4608,22 @@
 
   OC.refreshMonitoring = async function refreshMonitoring(options = {}) {
     if (OC.currentRoute?.view !== "monitoring") return;
+    if (OC.currentRoute?.tab === "congestion") {
+      if (OC._monitorRefreshInFlight) {
+        OC._monitorAbortController?.abort();
+        OC._monitorRefreshGeneration++;
+        OC._monitorRefreshInFlight = false;
+        OC._monitorRefreshPending = false;
+      }
+      loadPrefs();
+      OC.monitorState.activeTab = "congestion";
+      try {
+        return await OC.refreshCongestion(options);
+      } finally {
+        setMonitoringBusy(false);
+      }
+    }
+    OC.cancelCongestion?.();
 
     const force = options.force === true;
     if (OC._monitorRefreshInFlight) {
@@ -5110,6 +5136,7 @@
     if (tab === "apis") {
       ms = currentApiSubTab() === "live" ? MONITOR_APIS_LIVE_REFRESH_MS : MONITOR_APIS_REFRESH_MS;
     } else if (tab === "logs") ms = MONITOR_LOGS_REFRESH_MS;
+    else if (tab === "congestion") ms = 5000;
     OC.monitorTimer = setInterval(() => {
       if (!OC._monitorRefreshInFlight) OC.refreshMonitoring({ incremental: tab === "logs" });
     }, ms);

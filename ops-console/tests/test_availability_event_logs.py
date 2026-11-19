@@ -157,28 +157,8 @@ def test_queue_source_uses_configured_local_path():
     assert ('backend', 'queue', Path('custom/queue.log')) in custom
 
 
-def test_queue_ingestion_preserves_complete_lines_and_separate_clock():
-    event = '2026-11-18T12:00:00Z WARNING waitress.queue {"event_at":"2026-11-18T12:00:00Z","pid":99}\n'
-    source = Path('queue-ingestion-contract.log')
-    key = str(source.resolve())
+def test_queue_ingestion_is_owned_by_dedicated_collector():
     store = SimpleNamespace(append_service_log=Mock())
-    monitoring._SERVICE_LOG_FILE_OFFSETS.pop(key, None)
-    content = event.encode()
-    def ingest():
-        with patch.object(monitoring, '_service_log_sources', return_value=[('backend', 'queue', source)]), \
-             patch.object(Path, 'is_file', return_value=True), patch.object(Path, 'exists', return_value=True), \
-             patch.object(Path, 'stat', return_value=SimpleNamespace(st_size=len(content))), \
-             patch.object(Path, 'open', side_effect=lambda *a, **kw: io.BytesIO(content)), \
-             patch.object(monitoring, '_utc_now_iso', return_value='2026-11-18T13:00:00Z'):
-            return monitoring._ingest_service_log_files({}, 'MAIN', store, Path('unused'))
-    try:
-        assert len(ingest()) == 1
-        content += event.encode() + b'partial'
-        rows = ingest()
-        assert len(rows) == 1
-        assert rows[0]['line'] == event.strip()
-        assert rows[0]['logged_at'] == '2026-11-18T13:00:00Z'
-        content += b' completed\n'
-        assert ingest()[0]['line'] == 'partial completed'
-    finally:
-        monitoring._SERVICE_LOG_FILE_OFFSETS.pop(key, None)
+    with patch.object(monitoring, '_service_log_sources', return_value=[('backend', 'queue', Path('queue.log'))]):
+        assert monitoring._ingest_service_log_files({}, 'MAIN', store, Path('unused')) == []
+    store.append_service_log.assert_not_called()

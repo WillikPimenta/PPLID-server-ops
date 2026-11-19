@@ -129,7 +129,7 @@
       if (button.dataset.logBound) return;
       button.dataset.logBound = '1';
       button.addEventListener('click', async () => {
-        if (button.disabled || OC.monitorState.availabilityDemo) return;
+        if (button.disabled || (OC.monitorState.availabilityDemo && OC.monitorState.activeTab !== "congestion")) return;
         const requestKey = JSON.stringify([button.dataset.logEnv, button.dataset.logAt, button.dataset.logSince, button.dataset.logUntil]);
         if (eventLogRequests.has(requestKey)) return;
         eventLogRequests.add(requestKey);

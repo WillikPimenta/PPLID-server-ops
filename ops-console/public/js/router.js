@@ -3,7 +3,7 @@
   window.OpsConsole = window.OpsConsole || {};
   const OC = window.OpsConsole;
 
-  OC.MONITOR_TABS = ["summary", "availability", "incidents", "latency", "syncs", "apis", "logs"];
+  OC.MONITOR_TABS = ["summary", "availability", "congestion", "incidents", "latency", "syncs", "apis", "logs"];
 
   OC.currentRoute = { view: "deploy", env: "DEV" };
 

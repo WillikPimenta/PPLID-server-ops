@@ -65,7 +65,7 @@ test("SLI usa os totais da janela e identifica falta de dados", () => {
 test("demonstração cria cenários isolados para os três ambientes e períodos", () => {
   const start = source.indexOf("  OC.buildAvailabilityDemo =");
   const end = source.indexOf("\n  function renderTabContent(", start);
-  const OC = { monitorState: { selectedEnvs: ["DEV"], availabilityWindow: "30d", availabilityDemo: true }, escapeHtml: String, formatDate: String };
+  const OC = { monitorState: { selectedEnvs: ["DEV"], availabilityWindow: "30d", availabilityDemo: true }, escapeHtml: String, formatDate: String, buildAppPath: (_v,_e,opts) => '/monitoring/'+opts.tab };
   const context = { OC };
   vm.runInNewContext(source.slice(start, end) + "\nthis.render = renderAvailabilityView;", context);
   for (const period of ["24h", "7d", "30d"]) {
@@ -93,7 +93,7 @@ test("rota dedicada resolve disponibilidade", () => {
 test('estado atual não é determinado pelo histórico e dados atuais antigos ficam sem confirmação', () => {
   const start = source.indexOf('  function renderAvailabilityView(');
   const end = source.indexOf('\n  function renderTabContent(', start);
-  const OC = { monitorState: { selectedEnvs: ['DEV'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String };
+  const OC = { monitorState: { selectedEnvs: ['DEV'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String, buildAppPath: (_v,_e,opts) => '/monitoring/'+opts.tab };
   const context = { OC };
   vm.runInNewContext(source.slice(start, end) + '\nthis.render = renderAvailabilityView;', context);
   const history = { DEV: { window: '24h', health: { uptimePct: 0, samples: 5 }, timeline: [{ kind: 'outage', ongoing: true }] } };
@@ -108,7 +108,7 @@ test('estado atual não é determinado pelo histórico e dados atuais antigos fi
 test('coverage bars distinguish partial, missing and predecessor evidence and show diagnostics', () => {
   const start = source.indexOf('  function renderAvailabilityView(');
   const end = source.indexOf('\n  function renderTabContent(', start);
-  const OC = { monitorState: { selectedEnvs: ['DEV'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String };
+  const OC = { monitorState: { selectedEnvs: ['DEV'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String, buildAppPath: (_v,_e,opts) => '/monitoring/'+opts.tab };
   const context = { OC };
   vm.runInNewContext(source.slice(start, end) + '\nthis.render = renderAvailabilityView;', context);
   const history = [
@@ -130,7 +130,7 @@ test('coverage bars distinguish partial, missing and predecessor evidence and sh
 test('a consolidated deploy incident opens its interval with recovery context', () => {
   const start = source.indexOf('  function renderAvailabilityView(');
   const end = source.indexOf('\n  function renderTabContent(', start);
-  const OC = { monitorState: { selectedEnvs: ['MAIN'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String };
+  const OC = { monitorState: { selectedEnvs: ['MAIN'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String, buildAppPath: (_v,_e,opts) => '/monitoring/'+opts.tab };
   const context = { OC };
   vm.runInNewContext(source.slice(start, end) + '\nthis.render = renderAvailabilityView;', context);
   const html = context.render({ MAIN: { window: '24h', health: {}, timeline: [{ kind: 'outage',

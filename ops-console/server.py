@@ -2253,6 +2253,28 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(series)
                 return
+            if sub in ("congestion", "congestion-detail"):
+                import server_congestion
+
+                try:
+                    if sub == "congestion":
+                        result = server_congestion.overview(
+                            self.config, env_name,
+                            since=(query.get('since') or [None])[0], until=(query.get('until') or [None])[0],
+                            window=(query.get('window') or ['24h'])[0],
+                            limit=(query.get('limit') or ['100'])[0], offset=(query.get('offset') or ['0'])[0],
+                        )
+                    else:
+                        result = server_congestion.detail(
+                            self.config, env_name, episode_id=(query.get('episode_id') or [''])[0],
+                            limit=(query.get('limit') or ['100'])[0], offset=(query.get('offset') or ['0'])[0],
+                            snapshot_id=(query.get('snapshot_id') or [None])[0],
+                        )
+                except ValueError as exc:
+                    self._send_json({'error': str(exc)}, status=400)
+                    return
+                self._send_json(result)
+                return
             if sub == "availability-current":
                 self._send_json(server_monitoring.build_monitoring_availability_current(self.config, env_name))
                 return
