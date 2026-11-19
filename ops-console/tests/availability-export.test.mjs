@@ -199,7 +199,7 @@ test('simulated events cannot request production logs', async () => {
 });
 
 test('events without a deployment expose log extraction with five minutes of context', () => {
-  const OC = { ENV_ORDER: ['MAIN'], monitorState: { selectedEnvs: ['MAIN'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String };
+  const OC = { ENV_ORDER: ['MAIN'], monitorState: { selectedEnvs: ['MAIN'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String, buildAppPath: (_v,_e,opts) => '/monitoring/'+opts.tab };
   const context = { OC };
   const start = monitoring.indexOf('  function renderAvailabilityView(');
   const end = monitoring.indexOf('\n  function renderTabContent(', start);

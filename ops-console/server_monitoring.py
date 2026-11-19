@@ -1426,6 +1426,8 @@ def _ingest_service_log_files(
     """Lê novos bytes dos logs em disco e grava em service_log_lines. Retorna linhas novas."""
     ingested: list[dict[str, Any]] = []
     for service, stream, path in _service_log_sources(config, env_name):
+        if stream == "queue":
+            continue  # Dedicated local collector owns this stream and its checkpoints.
         if not path.is_file():
             continue
         key = str(path.resolve()) if path.exists() else str(path)
@@ -1887,6 +1889,9 @@ def start_monitoring_collector(config: dict[str, Any]) -> None:
     _COLLECTOR_CONFIG = config
     _COLLECTOR_STOP.clear()
     _ensure_availability_collector(config)
+    import server_congestion
+
+    server_congestion.start(config, _COLLECTOR_STOP)
     if _COLLECTOR_THREAD and _COLLECTOR_THREAD.is_alive():
         if not (_COLLECTOR_WATCHDOG_THREAD and _COLLECTOR_WATCHDOG_THREAD.is_alive()):
             _COLLECTOR_WATCHDOG_THREAD = threading.Thread(
@@ -2780,6 +2785,14 @@ def build_monitoring_availability_event_log(
             report.append('Nenhum log de serviço armazenado neste intervalo.')
     except Exception as exc:
         report.append(f'Fonte indisponível: {exc}')
+    report += ['', 'Diagnósticos estruturados de congestionamento',
+               'Seleção pelo horário original do evento; cópia normalizada, com ingestão separada. Retenção de sete dias e orçamento de armazenamento.']
+    try:
+        import server_congestion
+
+        report += server_congestion.export_evidence(config, env_name, start, end)
+    except Exception as exc:
+        report.append(f'Fonte estruturada indisponível: {type(exc).__name__}')
     report += ['', 'Arquivos de serviços disponíveis',
                'Busca histórica em cada arquivo configurado, com limite de 32 MiB e 10000 linhas por arquivo.',
                'Horários sem fuso nos arquivos usam o fuso do servidor. Inclui rotações queue .1/.2/.3; demais arquivos rotacionados ou removidos não são recuperados por esta busca.']

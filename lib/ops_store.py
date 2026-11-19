@@ -5,6 +5,7 @@ WAL mode — concurrent readers do not block writers.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_DB_PATH = Path(r"C:\PPLID\ops\data\ops-store.db")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _local = threading.local()
 
@@ -178,20 +179,62 @@ def _get_schema_version(conn: sqlite3.Connection) -> int:
     return 0
 
 
+SCHEMA_V3_SQL = """
+CREATE TABLE IF NOT EXISTS congestion_snapshots (
+ id TEXT PRIMARY KEY, environment TEXT NOT NULL, pid INTEGER NOT NULL,
+ event_at TEXT NOT NULL, ingested_at TEXT NOT NULL, state TEXT NOT NULL,
+ episode_id TEXT, payload TEXT NOT NULL, payload_bytes INTEGER NOT NULL, raw_log_id INTEGER,
+ pending INTEGER NOT NULL DEFAULT 0, running INTEGER NOT NULL DEFAULT 0, threads INTEGER NOT NULL DEFAULT 0,
+ partial INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS congestion_snapshot_time ON congestion_snapshots(environment,event_at,id);
+CREATE INDEX IF NOT EXISTS congestion_retention ON congestion_snapshots(event_at,id);
+CREATE INDEX IF NOT EXISTS congestion_storage ON congestion_snapshots(payload_bytes);
+CREATE INDEX IF NOT EXISTS congestion_snapshot_env ON congestion_snapshots(environment);
+CREATE INDEX IF NOT EXISTS congestion_enabled ON congestion_snapshots(environment,pid,event_at) WHERE state='enabled';
+CREATE INDEX IF NOT EXISTS congestion_latest ON congestion_snapshots(environment,event_at DESC,
+ CASE state WHEN 'enabled' THEN 0 WHEN 'congestion_start' THEN 1 WHEN 'congestion_ongoing' THEN 2 ELSE 3 END DESC,id DESC);
+CREATE INDEX IF NOT EXISTS congestion_transitions ON congestion_snapshots(episode_id,event_at,id)
+ WHERE state IN ('congestion_start','recovered');
+CREATE INDEX IF NOT EXISTS congestion_snapshot_process ON congestion_snapshots(environment,pid,event_at,id);
+CREATE INDEX IF NOT EXISTS congestion_snapshot_episode ON congestion_snapshots(episode_id,event_at,pending,running,threads,id);
+CREATE TABLE IF NOT EXISTS congestion_episodes (
+ id TEXT PRIMARY KEY, environment TEXT NOT NULL, pid INTEGER NOT NULL, session TEXT NOT NULL,
+ start_at TEXT NOT NULL, last_at TEXT NOT NULL, end_at TEXT,
+ start_known INTEGER NOT NULL, max_pending INTEGER NOT NULL, max_running INTEGER NOT NULL,
+ snapshot_count INTEGER NOT NULL, partial INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS congestion_episode_time ON congestion_episodes(environment,start_at,id);
+CREATE TABLE IF NOT EXISTS congestion_process (
+ environment TEXT NOT NULL, pid INTEGER NOT NULL, last_at TEXT NOT NULL,
+ session TEXT NOT NULL, open_episode TEXT, PRIMARY KEY(environment,pid));
+CREATE TABLE IF NOT EXISTS congestion_checkpoints (
+ environment TEXT NOT NULL, identity TEXT NOT NULL, path TEXT NOT NULL,
+ offset INTEGER NOT NULL, prefix TEXT NOT NULL, prefix_len INTEGER NOT NULL,
+ last_seen TEXT NOT NULL, skipping INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(environment,identity));
+CREATE TABLE IF NOT EXISTS congestion_collection (
+ environment TEXT PRIMARY KEY, polled_at TEXT, sources TEXT NOT NULL DEFAULT '[]',
+ invalid_lines INTEGER NOT NULL DEFAULT 0, dropped_records INTEGER NOT NULL DEFAULT 0,
+ error TEXT, pending_import INTEGER NOT NULL DEFAULT 0);
+"""
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     current = _get_schema_version(conn)
     if current < 2:
         conn.executescript(SCHEMA_V2_SQL)
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?)",
-            (str(SCHEMA_VERSION),),
+            ("2",),
         )
+
+    if current < 3:
+        conn.executescript(SCHEMA_V3_SQL)
 
 
 def init_store(db_path: Path | None = None) -> Path:
     path = resolve_db_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with get_connection(path) as conn:
+    with closing(get_connection(path)) as conn, conn:
         conn.executescript(SCHEMA_SQL)
         _migrate_schema(conn)
         conn.execute(
