@@ -119,8 +119,19 @@ function Invoke-GitInRepo {
         [string]$RepoDir,
         [string[]]$GitArgs
     )
-    $output = & git -C $RepoDir @GitArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    # Windows PowerShell 5.1 can turn native stderr (Git's normal "From ..."
+    # fetch progress included) into a terminating NativeCommandError when the
+    # caller uses ErrorActionPreference=Stop. Capture it as output, then rely
+    # on Git's exit code to decide whether the command failed.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & git -C $RepoDir @GitArgs 2>&1
+        $gitExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($gitExitCode -ne 0) {
         $text = ($output | Out-String).Trim()
         throw "git $($GitArgs -join ' ') falhou: $text"
     }
