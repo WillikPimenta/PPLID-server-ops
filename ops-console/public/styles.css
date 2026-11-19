@@ -127,6 +127,8 @@
 .av-event-status { display: inline-block; padding: 4px 7px; border-radius: 5px; color: var(--theme-text-secondary); background: var(--theme-bg-muted); white-space: nowrap; font-size: 10px; }
 .av-event-status.av-tone-deploy { background: #4875b912; color: #4875b9; }
 .av-event-duration { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.av-event-log-action { width: 1%; white-space: nowrap; }
+.av-event-log-action > span { font-size: 11px; color: var(--theme-text-muted); }
 .av-empty-events { padding: 26px 24px 30px; border-top: 1px solid var(--theme-border); }
 .av-empty-events strong { font-size: 14px; font-weight: 550; }
 .av-empty-events p, .av-table-note { color: var(--theme-text-muted); font-size: 12px; margin: 7px 0 0; }

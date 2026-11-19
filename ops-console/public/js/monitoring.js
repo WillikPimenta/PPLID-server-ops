@@ -3462,7 +3462,14 @@
       const inspectable = item.deploy && Number.isFinite(Date.parse(item.startedAt));
       const eventUntil = inspectable ? new Date(Math.min(Date.now(), Date.parse(item.finishedAt || item.lastFailureAt || item.startedAt) + 120000)).toISOString() : null;
       const eventTitle = inspectable ? `<button type="button" class="av-event-inspect" data-availability-env="${escape(item.env)}" data-availability-since="${escape(item.startedAt)}" data-availability-until="${escape(eventUntil)}" aria-label="Investigar indisponibilidade associada ao deploy ${escape(item.deploy.runId)}">${escape(title)}</button>` : escape(title);
-      return `<tr><td class="av-event-date">${escape(date(item.startedAt))}</td><td><span class="av-env-tag">${escape(item.env)}</span></td><td><div class="av-event-title"><i class="av-event-dot av-tone-${tone}"></i><strong>${eventTitle}</strong></div><small>${escape(detail)}</small></td><td><span class="av-event-status av-tone-${tone}">${escape(status)}</span></td><td class="av-event-duration">${duration}</td></tr>`;
+      const eventAt = Date.parse(item.startedAt);
+      const logSince = eventAt - 5 * 60000;
+      const lastEvidence = Date.parse(item.finishedAt || item.lastFailureAt || item.startedAt);
+      const logUntil = Math.min(Date.now(), logSince + 30 * 86400000,
+        (outage && item.ongoing ? Date.now() : Math.max(eventAt, Number.isFinite(lastEvidence) ? lastEvidence : eventAt)) + 5 * 60000);
+      const canExtract = !demo && Number.isFinite(eventAt) && eventAt < logUntil;
+      const extract = canExtract ? `<button type="button" class="btn btn-secondary btn-sm" data-availability-event-log data-log-env="${escape(item.env)}" data-log-at="${escape(new Date(eventAt).toISOString())}" data-log-since="${escape(new Date(logSince).toISOString())}" data-log-until="${escape(new Date(logUntil).toISOString())}" aria-label="Extrair log de ${escape(title)} em ${escape(item.env)}, ${escape(date(item.startedAt))}" title="Baixar eventos, sondagens e logs com até 5 minutos de contexto antes e depois">Extrair log</button>` : `<span>${demo ? 'Dados simulados' : 'Horário indisponível'}</span>`;
+      return `<tr><td class="av-event-date">${escape(date(item.startedAt))}</td><td><span class="av-env-tag">${escape(item.env)}</span></td><td><div class="av-event-title"><i class="av-event-dot av-tone-${tone}"></i><strong>${eventTitle}</strong></div><small>${escape(detail)}</small></td><td><span class="av-event-status av-tone-${tone}">${escape(status)}</span></td><td class="av-event-duration">${duration}</td><td class="av-event-log-action">${extract}</td></tr>`;
     }).join("");
     return `<div class="availability-view">
       <div class="av-toolbar"><div class="av-period-control" role="group" aria-label="Período de disponibilidade">${controls}</div><div class="av-toolbar-actions">
@@ -3479,7 +3486,7 @@
       <div class="av-environments">${rows}</div>
       <div class="av-legend"><span><i class="av-tone-ok"></i>Sem falhas observadas</span><span><i class="av-tone-down"></i>Com falhas</span><span><i class="av-tone-none"></i>Sem coleta</span><span><i class="av-tone-partial"></i>Coleta parcial</span><span class="av-legend-note">Cada faixa representa um intervalo do período selecionado.</span></div>
       <section class="av-events"><header><div><h3>Eventos no período</h3><p>Incidentes e deploys na mesma linha do tempo.</p></div><span>${allEvents.length} registro${allEvents.length === 1 ? "" : "s"}</span></header>
-      ${events ? `<div class="av-table-scroll"><table><thead><tr><th>Horário</th><th>Ambiente</th><th>Evento</th><th>Estado</th><th>Duração</th></tr></thead><tbody>${events}</tbody></table></div>${allEvents.length > 20 || envs.some(env => dataByEnv?.[env]?.timelineTruncated) ? '<p class="av-table-note">Exibindo os eventos mais recentes do período.</p>' : ""}` : `<div class="av-empty-events"><strong>${hasData ? "Nenhum evento registrado" : "O histórico aparecerá após as primeiras coletas"}</strong><p>${hasData ? "Sem incidentes ou deploys registrados no período selecionado." : "Use a demonstração para explorar os indicadores e os cenários de falha."}</p></div>`}</section>
+      ${events ? `<div class="av-table-scroll"><table><thead><tr><th>Horário</th><th>Ambiente</th><th>Evento</th><th>Estado</th><th>Duração</th><th>Logs</th></tr></thead><tbody>${events}</tbody></table></div>${allEvents.length > 20 || envs.some(env => dataByEnv?.[env]?.timelineTruncated) ? '<p class="av-table-note">Exibindo os eventos mais recentes do período.</p>' : ""}` : `<div class="av-empty-events"><strong>${hasData ? "Nenhum evento registrado" : "O histórico aparecerá após as primeiras coletas"}</strong><p>${hasData ? "Sem incidentes ou deploys registrados no período selecionado." : "Use a demonstração para explorar os indicadores e os cenários de falha."}</p></div>`}</section>
       <details class="av-method"><summary>Como interpretar estes indicadores</summary><p><strong>Requisições:</strong> respostas não 5xx / requisições registradas no backend. Falhas anteriores à chegada ao backend não entram nesta conta.</p><p><strong>Health check:</strong> sondagens bem-sucedidas / sondagens coletadas. A cobertura indica quanto do período foi observado; faixas hachuradas indicam coleta parcial. Cobertura e tempo sem cobertura usam a mesma duração observada. Cada nova sondagem registra sua frequência; amostras antigas mantêm a referência de 60 segundos. A tolerância de agendamento é de até 2 segundos, somente entre sondagens consecutivas. Lacunas maiores continuam sem cobertura.</p><p>O SLI de 7 e 30 dias exige confirmação da janela pela fonte. Dados de 24 horas sem confirmação devem ser tratados como referência preliminar. Retenção padrão: 30 dias.</p></details>
     </div>`;
   }
@@ -3930,6 +3937,7 @@
     OC.bindBackNavigation(root);
     OC.bindAvailabilityDetails?.(root);
     OC.bindAvailabilityExports?.(root);
+    OC.bindAvailabilityEventLogs?.(root);
     bindApiRouteDetailRows(root);
     bindApiRouteTableSort(root);
     root.querySelectorAll("[data-availability-window]").forEach(button => {

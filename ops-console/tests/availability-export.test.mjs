@@ -137,3 +137,79 @@ test("empty event exports report the absence of records without creating a downl
   assert.equal(notices.length, 1);
   assert.match(notices[0][0], /Não há registros/);
 });
+
+function eventLogContext(fetch) {
+  const OC = { ENV_ORDER: ['MAIN', 'DEV', 'HOM'], monitorState: {} };
+  const notices = [], downloads = [], revoked = [];
+  OC.toast = (...args) => notices.push(args);
+  const listeners = [];
+  const button = { dataset: { logEnv: 'MAIN', logAt: '2026-11-18T12:00:00.000Z',
+    logSince: '2026-11-18T11:55:00.000Z', logUntil: '2026-11-18T12:05:00.000Z' },
+    textContent: 'Extrair log', disabled: false, addEventListener: (_, handler) => listeners.push(handler) };
+  const link = { click() { downloads.push({ href: this.href, download: this.download }); }, remove() {} };
+  vm.runInNewContext(source, { window: { OpsConsole: OC, setTimeout: fn => fn() }, fetch, URLSearchParams,
+    URL: { createObjectURL: () => 'blob:event-log', revokeObjectURL: url => revoked.push(url) },
+    document: { body: { appendChild() {} }, createElement: () => link } });
+  const root = { querySelectorAll: () => [button] };
+  OC.bindAvailabilityEventLogs(root);
+  OC.bindAvailabilityEventLogs(root);
+  assert.equal(listeners.length, 1);
+  return { OC, button, click: () => listeners[0](), notices, downloads, revoked };
+}
+
+test('event log download uses the exact MAIN interval and releases its button and URL', async () => {
+  let finish, calls = 0;
+  const context = eventLogContext((url, options) => {
+    calls++;
+    const parsed = new URL(url, 'http://localhost');
+    assert.equal(parsed.pathname, '/api/v1/monitoring/MAIN/availability-event-log');
+    assert.equal(parsed.searchParams.get('since'), '2026-11-18T11:55:00.000Z');
+    assert.equal(parsed.searchParams.get('until'), '2026-11-18T12:05:00.000Z');
+    assert.equal(options.credentials, 'same-origin');
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const first = context.click();
+  await context.click();
+  assert.equal(calls, 1);
+  assert.equal(context.button.disabled, true);
+  finish({ ok: true, blob: async () => ({}) });
+  await first;
+  assert.match(context.downloads[0].download, /pplid-main-evento-.*\.log$/);
+  assert.equal(context.button.disabled, false);
+  assert.equal(context.button.textContent, 'Extrair log');
+  assert.deepEqual(context.revoked, ['blob:event-log']);
+});
+
+test('failed log extraction shows the server error without downloading and can retry', async () => {
+  const context = eventLogContext(async () => ({ ok: false, status: 401, json: async () => ({ error: 'Sessão expirada' }) }));
+  await context.click();
+  assert.equal(context.downloads.length, 0);
+  assert.match(context.notices[0][0], /Sessão expirada/);
+  assert.equal(context.button.disabled, false);
+  await context.click();
+  assert.equal(context.notices.length, 2);
+});
+
+test('simulated events cannot request production logs', async () => {
+  const context = eventLogContext(() => { throw new Error('Unexpected request'); });
+  context.OC.monitorState.availabilityDemo = true;
+  await context.click();
+  assert.equal(context.notices.length, 0);
+  assert.equal(context.downloads.length, 0);
+});
+
+test('events without a deployment expose log extraction with five minutes of context', () => {
+  const OC = { ENV_ORDER: ['MAIN'], monitorState: { selectedEnvs: ['MAIN'], availabilityWindow: '24h' }, escapeHtml: String, formatDate: String };
+  const context = { OC };
+  const start = monitoring.indexOf('  function renderAvailabilityView(');
+  const end = monitoring.indexOf('\n  function renderTabContent(', start);
+  vm.runInNewContext(monitoring.slice(start, end) + '\nthis.render = renderAvailabilityView;', context);
+  const html = context.render({ MAIN: { window: '24h', health: {}, timeline: [
+    { kind: 'outage', startedAt: '2020-01-01T12:00:00Z', finishedAt: '2020-01-01T12:03:00Z', uncertain: true },
+  ] } });
+  assert.match(html, /data-availability-event-log/);
+  assert.match(html, /data-log-env="MAIN"/);
+  assert.match(html, /data-log-since="2020-01-01T11:55:00.000Z"/);
+  assert.match(html, /data-log-until="2020-01-01T12:08:00.000Z"/);
+  assert.match(html, /Extrair log/);
+});

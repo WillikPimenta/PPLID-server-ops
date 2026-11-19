@@ -1,6 +1,7 @@
-/* global window, document, Blob, URL */
+/* global window, document, Blob, URL, fetch */
 (function () {
   const OC = window.OpsConsole = window.OpsConsole || {};
+  const eventLogRequests = new Set();
 
   function snapshot() {
     const state = OC.monitorState;
@@ -117,6 +118,49 @@
         } catch (error) {
           OC.toast?.(`Não foi possível exportar: ${error.message}`, "error");
         } finally {
+          if (url) window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
+      });
+    });
+  };
+
+  OC.bindAvailabilityEventLogs = function bindAvailabilityEventLogs(root) {
+    root.querySelectorAll('[data-availability-event-log]').forEach(button => {
+      if (button.dataset.logBound) return;
+      button.dataset.logBound = '1';
+      button.addEventListener('click', async () => {
+        if (button.disabled || OC.monitorState.availabilityDemo) return;
+        const requestKey = JSON.stringify([button.dataset.logEnv, button.dataset.logAt, button.dataset.logSince, button.dataset.logUntil]);
+        if (eventLogRequests.has(requestKey)) return;
+        eventLogRequests.add(requestKey);
+        const label = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Extraindo…';
+        let url;
+        try {
+          const { logEnv: env, logAt: at, logSince: since, logUntil: until } = button.dataset;
+          if (!OC.ENV_ORDER.includes(env)) throw new Error('Ambiente inválido.');
+          const query = new URLSearchParams({ at, since, until });
+          const response = await fetch(`/api/v1/monitoring/${encodeURIComponent(env)}/availability-event-log?${query}`, { credentials: 'same-origin' });
+          if (!response.ok) {
+            const failure = await response.json().catch(() => ({}));
+            throw new Error(failure.error || `Falha ao extrair log (HTTP ${response.status}).`);
+          }
+          const file = await response.blob();
+          url = URL.createObjectURL(file);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = `pplid-${env.toLowerCase()}-evento-${at.replace(/[:.]/g, '-')}.log`;
+          link.hidden = true;
+          document.body.appendChild(link);
+          try { link.click(); } finally { link.remove(); }
+          OC.toast?.('Log do evento extraído com sondagens e fontes disponíveis.', 'success');
+        } catch (error) {
+          OC.toast?.(`Não foi possível extrair o log: ${error.message}`, 'error');
+        } finally {
+          eventLogRequests.delete(requestKey);
+          button.disabled = false;
+          button.textContent = label;
           if (url) window.setTimeout(() => URL.revokeObjectURL(url), 1000);
         }
       });

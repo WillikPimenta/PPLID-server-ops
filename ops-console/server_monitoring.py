@@ -2681,13 +2681,103 @@ def build_monitoring_availability(
 def build_monitoring_availability_detail(
     config: dict[str, Any], env_name: str, *, since: str, until: str
 ) -> dict[str, Any]:
+    start, end = _availability_interval(since, until)
+    return _build_availability_window(config, env_name, start, end, window='custom', include_api=False)
+
+
+def _availability_interval(since: str, until: str) -> tuple[datetime, datetime]:
     start, end = _parse_iso_dt(since), _parse_iso_dt(until)
     if not start or not end or not start.tzinfo or not end.tzinfo:
         raise ValueError('Informe início e fim com fuso horário')
     start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
     if end <= start or end - start > timedelta(days=30) or end > datetime.now(timezone.utc) + timedelta(seconds=5):
         raise ValueError('O intervalo deve estar no passado e ter duração de até 30 dias')
-    return _build_availability_window(config, env_name, start, end, window='custom', include_api=False)
+    return start, end
+
+
+def _availability_file_log_excerpt(path: Path, start: datetime, end: datetime,
+                                   *, max_bytes: int = 32 * 1024 * 1024,
+                                   max_lines: int = 10_000) -> tuple[list[str], str]:
+    """Stream historical evidence, keeping stack traces with their timestamp."""
+    rows, stamp, scanned = [], None, 0
+    timestamp = re.compile(r'^\[?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)')
+    try:
+        with path.open('rb') as source:
+            while raw := source.readline(max_bytes - scanned + 1):
+                scanned += len(raw)
+                if scanned > max_bytes:
+                    return rows, f'Leitura parcial: limite de {max_bytes} bytes.'
+                line = raw.decode('utf-8-sig', errors='replace').rstrip('\r\n')
+                match = timestamp.match(line)
+                if match:
+                    stamp = _parse_iso_dt(match[1].replace(',', '.'))
+                    if stamp and not stamp.tzinfo:
+                        stamp = stamp.replace(tzinfo=_local_tzinfo())
+                if stamp and start <= stamp < end:
+                    if len(rows) >= max_lines:
+                        return rows, f'Extração parcial: limite de {max_lines} linhas.'
+                    rows.append(line)
+        return rows, 'Leitura concluída. Linhas sem horário só acompanham uma linha anterior com data.'
+    except FileNotFoundError:
+        return rows, 'Arquivo não encontrado.'
+    except OSError as exc:
+        return rows, f'Falha de leitura: {exc}'
+
+
+def build_monitoring_availability_event_log(
+    config: dict[str, Any], env_name: str, *, since: str, until: str, event_at: str
+) -> tuple[bytes, str, str]:
+    start, end = _availability_interval(since, until)
+    selected = _parse_iso_dt(event_at)
+    if not selected or not selected.tzinfo or not start <= selected < end:
+        raise ValueError('O horário do evento deve estar dentro do intervalo, com fuso horário')
+    env_name = env_name.upper()
+    since, until = start.isoformat(timespec='milliseconds'), end.isoformat(timespec='milliseconds')
+    store, db_path = _import_ops_store(), resolve_ops_store_path(config)
+    report = [f'Log do evento de disponibilidade — {env_name}',
+              f'Evento selecionado (UTC): {selected.astimezone(timezone.utc).isoformat()}',
+              f'Intervalo de contexto (UTC): {since} até {until} (fim exclusivo)',
+              f'Extraído em: {_utc_now_iso()}',
+              'O intervalo inclui contexto antes e depois do evento; não representa sua duração confirmada.',
+              'Ausência de logs não comprova ausência de falha. Lacunas da coleta permanecem sem confirmação.', '']
+    with store.get_connection(db_path) as conn:
+        events = conn.execute(
+            "SELECT * FROM monitor_events WHERE environment=? AND category IN ('availability','health') AND julianday(recorded_at)>=julianday(?) AND julianday(recorded_at)<julianday(?) ORDER BY julianday(recorded_at), id LIMIT 1001",
+            (env_name, since, until)).fetchall()
+        probes = conn.execute(
+            "SELECT recorded_at, metric_key, value, labels_json FROM monitor_samples WHERE environment=? AND metric_key IN ('health_reachable','health_latency_ms','backend_port_up','frontend_port_up') AND julianday(recorded_at)>=julianday(?) AND julianday(recorded_at)<julianday(?) ORDER BY julianday(recorded_at), id LIMIT 10001",
+            (env_name, since, until)).fetchall()
+    report += ['Eventos registrados pelo monitoramento']
+    report += [f"[{row['recorded_at']}] [{row['severity']}] {row['title']}\n{dict(row).get('detail') or ''}" for row in events[:1000]] or ['Nenhum evento registrado neste intervalo.']
+    if len(events) > 1000:
+        report.append('Lista parcial: primeiros 1000 eventos.')
+    report += ['', 'Sondagens e portas', 'health_reachable/backend_port_up/frontend_port_up: 1=sucesso, 0=falha; health_latency_ms em milissegundos.']
+    report += [f"[{row['recorded_at']}] {row['metric_key']}={row['value']} {row['labels_json'] or ''}" for row in probes[:10000]] or ['Nenhuma sondagem registrada neste intervalo; cobertura não confirmada.']
+    if len(probes) > 10000:
+        report.append('Lista parcial: primeiras 10000 medições.')
+    report += ['', 'Logs de serviços armazenados no banco']
+    try:
+        logs = store.query_service_log_lines(env_name, since=since.replace('+00:00', 'Z'),
+                                             until=until.replace('+00:00', 'Z'), limit=10000, db_path=db_path)
+        if len(logs) >= 10000:
+            report.append('Extração possivelmente parcial: limite de 10000 logs armazenados.')
+        logs = [row for row in logs if (at := _parse_iso_dt(row.get('logged_at'))) is not None
+                and start <= (at if at.tzinfo else at.replace(tzinfo=timezone.utc)) < end]
+        for row in sorted(logs, key=lambda item: str(item.get('logged_at') or '')):
+            report.append(f"[{row.get('logged_at')}] [{row.get('service')}/{row.get('stream')}] {row.get('line') or ''}")
+        if not logs:
+            report.append('Nenhum log de serviço armazenado neste intervalo.')
+    except Exception as exc:
+        report.append(f'Fonte indisponível: {exc}')
+    report += ['', 'Arquivos de serviços disponíveis',
+               'Busca histórica em cada arquivo configurado, com limite de 32 MiB e 10000 linhas por arquivo.',
+               'Horários sem fuso nos arquivos usam o fuso do servidor. Arquivos rotacionados/removidos não são recuperados por esta busca.']
+    for service, stream, path in _service_log_sources(config, env_name):
+        lines, status = _availability_file_log_excerpt(path, start, end)
+        report += ['', f'{service}/{stream} — {path.name}', status]
+        report += lines or ['Nenhuma linha com horário correspondente disponível.']
+    filename = f'pplid-{env_name.lower()}-evento-{selected.astimezone(timezone.utc).strftime("%Y%m%d-%H%M%S")}.log'
+    return ('\n'.join(report) + '\n').encode('utf-8-sig'), 'text/plain; charset=utf-8', filename
 
 
 def _group_deploy_availability(incidents, events, deploys, observations, now):

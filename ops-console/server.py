@@ -2256,6 +2256,17 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             if sub == "availability-current":
                 self._send_json(server_monitoring.build_monitoring_availability_current(self.config, env_name))
                 return
+            if sub == "availability-event-log":
+                try:
+                    body, content_type, filename = server_monitoring.build_monitoring_availability_event_log(
+                        self.config, env_name, since=(query.get('since') or [''])[0],
+                        until=(query.get('until') or [''])[0], event_at=(query.get('at') or [''])[0],
+                    )
+                except ValueError as exc:
+                    self._send_json({'error': str(exc)}, status=400)
+                    return
+                self._send_attachment_bytes(body, content_type, filename)
+                return
             if sub == "availability-detail":
                 try:
                     detail = server_monitoring.build_monitoring_availability_detail(
