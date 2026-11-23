@@ -16,9 +16,9 @@ das execuções demoradas. Espera, execução e acumulado são separados.
 
 Ao inspecionar um episódio ou snapshot, o acompanhamento automático é pausado.
 Marcar Acompanhar novos registros retoma a seleção da observação mais recente.
-A atualização ocorre a cada cinco segundos enquanto a aba está visível e
+A atualização ocorre a cada quinze segundos enquanto a aba está visível e
 o acompanhamento está ativo. Atualizar permite uma consulta manual pausada.
-Novos eventos podem levar aproximadamente dois ciclos (coleta + tela) para
+Novos eventos podem levar aproximadamente vinte segundos (coleta + tela) para
 aparecer; importação inicial pendente acrescenta atraso informado na tela.
 
 Há atalhos nos eventos de disponibilidade e nos detalhes dos logs backend/queue.
@@ -58,6 +58,44 @@ Um coletor daemon separado lê somente os arquivos locais a cada cinco
 segundos, independentemente das consultas de saúde, PostgreSQL ou métricas
 da aplicação. O coletor antigo deixa de ingerir queue; o novo mantém esse
 stream disponível no console sem duas ingestões concorrentes.
+
+A leitura é limitada a 1 MiB por ambiente em cada ciclo. Importações maiores
+continuam nos ciclos seguintes e permanecem sinalizadas como pendentes.
+O schema é preparado uma vez por identidade do banco no processo do coletor.
+A manutenção de retenção roda no máximo uma vez por minuto em situação normal;
+o orçamento é verificado antecipadamente com os bytes de novas ingestões,
+disparando limpeza imediata quando necessário. O contador em memória somente
+avança após o commit. Reinícios reconciliam o total novamente; alterações por
+outros processos são reconciliadas na próxima manutenção. A expiração por idade
+pode levar até um minuto adicional. O orçamento não limita o arquivo SQLite,
+seus índices, WAL, nem os arquivos de log originais.
+
+O gráfico usa cache compartilhado entre leitores deste processo, por até quinze
+segundos, com limite de 32 entradas e 4 MiB de conteúdo serializado. Alterações
+nos metadados do episódio, inclusive retenção e novos snapshots, mudam a chave.
+Leitores concorrentes da mesma chave reutilizam o cálculo. Páginas de snapshots,
+seleção e estado do coletor continuam consultados no banco. Episódios pequenos
+consultam somente os pontos exatos, sem calcular a agregação descartada.
+
+A tela evita recarregar detalhes de um episódio inalterado durante o
+acompanhamento. Atualizar força nova consulta. Falhas aplicam espera progressiva
+de 15, 30, 60 e até 120 segundos às tentativas automáticas; a consulta manual
+continua disponível. Aba oculta e acompanhamento pausado continuam sem polling.
+
+Comparação local com 120960 snapshots fictícios no mesmo banco, sem tracemalloc:
+
+============================== ========= =========
+Operação                       Antes     Depois
+============================== ========= =========
+Primeiro detalhe               183,33 ms 178,98 ms
+Detalhe repetido (mediana)      185,66 ms   7,88 ms
+Coleta ociosa (mediana)          99,56 ms  22,41 ms
+============================== ========= =========
+
+As duas versões preservaram 302 pontos, o pico de 80 e a recuperação.
+O ganho do cache depende de reutilização antes da expiração ou de novos eventos.
+O experimento não mede a instrumentação do backend, RSS, volume real de logs,
+nem garante esses tempos em produção. Não houve acesso ao servidor operacional.
 
 As fontes são logDir/<repoName>.waitress.queue.log e suas três rotações.
 queueDiagnosticsLog no objeto de configuração de cada ambiente substitui o

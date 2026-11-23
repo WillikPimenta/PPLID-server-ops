@@ -48,6 +48,8 @@ test("feature loader preserves dependency order and reuses shared scripts", asyn
     "/js/availability-detail.js",
     "/js/availability-export.js",
     "/js/monitor-drawer.js",
+    "/js/congestion-fixtures.js",
+    "/js/congestion.js",
   ]);
 
   await window.OpsConsole.ensureFeature("deployDetails");

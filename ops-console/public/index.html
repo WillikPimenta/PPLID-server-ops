@@ -10,7 +10,7 @@
         document.documentElement.setAttribute("data-theme", t === "dark" ? "dark" : "light");
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=20261119-event-logs" />
+    <link rel="stylesheet" href="/styles.css?v=20261123-monitoring-sidebar" />
   </head>
   <body>
     <div class="app-shell">
@@ -128,36 +128,37 @@
                   </span>
                   <span>Host</span>
                 </a>
-                <a class="sidebar-link" href="/monitoring/incidents" data-sidebar-view="incidents" title="Incidentes">
-                  <span class="sidebar-link-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M10.3 4.2 2.7 18a2 2 0 0 0 1.75 3h15.1a2 2 0 0 0 1.75-3L13.7 4.2a2 2 0 0 0-3.4 0Z" />
-                      <path d="M12 9v5M12 18h.01" stroke-width="2.2" />
-                    </svg>
-                  </span>
-                  <span>Incidentes</span>
+                <span class="sidebar-section-title">Monitoramento</span>
+                <a class="sidebar-link" href="/monitoring/summary" data-sidebar-view="summary" title="Resumo">
+                  <span class="sidebar-link-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 9v12"/></svg></span>
+                  <span>Resumo</span>
                 </a>
                 <a class="sidebar-link" href="/monitoring/availability" data-sidebar-view="availability" title="Disponibilidade">
-                  <span class="sidebar-link-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="m8 12 3 3 5-6" /></svg>
-                  </span>
+                  <span class="sidebar-link-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg></span>
                   <span>Disponibilidade</span>
                 </a>
-                <a class="sidebar-link" href="/monitoring/latency" data-sidebar-view="performance" title="Desempenho">
-                  <span class="sidebar-link-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M3 12h4l2.5-6 5 12 2.5-6h4" />
-                    </svg>
-                  </span>
-                  <span>Desempenho</span>
+                <a class="sidebar-link" href="/monitoring/congestion" data-sidebar-view="congestion" title="Congestionamento">
+                  <span class="sidebar-link-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M4 12h12M4 19h8"/><path d="m17 15 4 4-4 4"/></svg></span>
+                  <span>Congestionamento</span>
+                </a>
+                <a class="sidebar-link" href="/monitoring/incidents" data-sidebar-view="incidents" title="Incidentes">
+                  <span class="sidebar-link-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 10 18H2Z"/><path d="M12 9v5M12 18h.01"/></svg></span>
+                  <span>Incidentes</span>
+                </a>
+                <a class="sidebar-link" href="/monitoring/latency" data-sidebar-view="latency" title="Latência">
+                  <span class="sidebar-link-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg></span>
+                  <span>Latência</span>
+                </a>
+                <a class="sidebar-link" href="/monitoring/syncs" data-sidebar-view="syncs" title="Syncs">
+                  <span class="sidebar-link-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7a9 9 0 0 0-15-2L2 8m0-5v5h5M4 17a9 9 0 0 0 15 2l3-3m0 5v-5h-5"/></svg></span>
+                  <span>Syncs</span>
+                </a>
+                <a class="sidebar-link" href="/monitoring/apis" data-sidebar-view="apis" title="APIs">
+                  <span class="sidebar-link-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m8 6-6 6 6 6m8-12 6 6-6 6M14 4l-4 16"/></svg></span>
+                  <span>APIs</span>
                 </a>
                 <a class="sidebar-link" href="/monitoring/logs" data-sidebar-view="logs" title="Logs">
-                  <span class="sidebar-link-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M6 3h9l3 3v15H6z" />
-                      <path d="M14 3v4h4M9 12h6M9 16h6" />
-                    </svg>
-                  </span>
+                  <span class="sidebar-link-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l3 3v15H6zM14 3v4h4M9 12h6M9 16h6"/></svg></span>
                   <span>Logs</span>
                 </a>
                 <a class="sidebar-link" href="/monitoring/tv?v=20260914-layout-v6" target="_blank" rel="noopener" title="Abrir painel para TV">
@@ -289,12 +290,12 @@
     <div id="monitor-api-route-modal-host" aria-live="polite"></div>
 
     <script src="/js/utils.js?v=20261118-overview"></script>
-    <script src="/js/feature-loader.js?v=20261119-congestion-history"></script>
+    <script src="/js/feature-loader.js?v=20261123-monitoring-sidebar"></script>
     <script src="/js/ops-ui.js"></script>
     <script src="/js/status.js"></script>
     <script src="/js/actions.js?v=20261118-overview"></script>
     <script src="/js/console-update.js?v=20261119-console-update"></script>
-    <script src="/js/router.js?v=20261119-congestion-history"></script>
+    <script src="/js/router.js?v=20261123-monitoring-sidebar"></script>
     <script src="/js/history.js"></script>
     <script src="/js/render.js?v=20261118-overview"></script>
     <script src="/js/app.js?v=20261118-overview"></script>

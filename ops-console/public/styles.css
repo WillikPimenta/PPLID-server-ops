@@ -6319,6 +6319,8 @@ body.is-locked .auth-mode-banner {
   background: var(--theme-bg-elevated);
   box-shadow: var(--shadow-sm);
   z-index: 40;
+  max-height: calc(100dvh - var(--header-height) - 2rem);
+  overflow-y: auto;
 }
 
 .sidebar-top {
@@ -6408,6 +6410,15 @@ body.is-locked .auth-mode-banner {
   flex-direction: column;
   gap: var(--spacing-1);
 }
+
+.sidebar-section-title {
+  margin: 16px 12px 6px;
+  color: var(--theme-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.app-sidebar.is-collapsed .sidebar-section-title { display: none; }
 
 .sidebar-link {
   display: grid;
@@ -6771,7 +6782,9 @@ body.is-locked .auth-mode-banner {
     bottom: 0;
     left: 0;
     width: min(18rem, 86vw);
-    min-height: 100vh;
+    min-height: 0;
+    height: 100dvh;
+    max-height: 100dvh;
     border-radius: 0 var(--border-radius-2xl) var(--border-radius-2xl) 0;
     transform: translateX(-105%);
     transition: transform var(--transition-fast);
@@ -6781,6 +6794,7 @@ body.is-locked .auth-mode-banner {
   .sidebar-collapse { display: none; }
   .app-sidebar.is-collapsed .sidebar-toolbar { justify-content: flex-start; }
   .app-sidebar.is-collapsed .sidebar-title,
+  .app-sidebar.is-collapsed .sidebar-section-title,
   .app-sidebar.is-collapsed .sidebar-link > span:last-child,
   .app-sidebar.is-collapsed .sidebar-footer > span:last-child { display: initial; }
   .app-sidebar.is-collapsed .sidebar-footer { justify-content: flex-start; }

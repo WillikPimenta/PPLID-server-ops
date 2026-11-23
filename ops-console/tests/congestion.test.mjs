@@ -102,8 +102,8 @@ test('the dedicated tab bypasses generic Django metric refresh and is loaded by 
   assert.match(readFileSync(new URL('../public/js/router.js',import.meta.url),'utf8'),/"congestion"/);
   assert.match(readFileSync(new URL('../public/js/feature-loader.js',import.meta.url),'utf8'),/congestion.js\?v=/);
   const index=readFileSync(new URL('../public/index.html',import.meta.url),'utf8');
-  assert.match(index,/router.js\?v=20261119-congestion-history/);
-  assert.match(index,/feature-loader.js\?v=20261119-congestion-history/);
+  assert.match(index,/router.js\?v=20261123-monitoring-sidebar/);
+  assert.match(index,/feature-loader.js\?v=20261123-monitoring-sidebar/);
   const window={OpsConsole:{ENV_ORDER:['MAIN','DEV','HOM']}};
   vm.runInNewContext(readFileSync(new URL('../public/js/router.js',import.meta.url),'utf8'),{window,URLSearchParams});
   const route=window.OpsConsole.parseRoute('/monitoring/congestion?env=HOM');
@@ -157,4 +157,78 @@ test('switching to demo invalidates a real request before it can request episode
   assert.equal(pending.length,1);
   assert.match(S.episodeId,/^demo-/);
   assert.equal(S.error,'');
+});
+
+test('period summary scopes counts to loaded episodes and never treats missing ends as active queues',()=>{
+  const {OC,S}=setup();
+  const fixture=OC.buildCongestionDemo({env:'MAIN',window:'24h',anchor:Date.now(),scenario:'partial'});
+  S.overview={...fixture.overview,next_offset:100};
+  const html=OC.renderCongestionContent();
+  assert.match(html,/Resumo desta página de episódios/);
+  assert.match(html,/<strong>2<\/strong><span>Episódios carregados/);
+  assert.match(html,/<strong>35<\/strong><span>Maior fila observada/);
+  assert.match(html,/<strong>1<\/strong><span>Sem fim registrado/);
+  assert.match(html,/Sem fim registrado não significa fila ativa/);
+  S.overview.episodes=[];
+  assert.match(OC.renderCongestionContent(),/<strong>—<\/strong><span>Maior fila observada/);
+});
+
+test('route ranking groups listed executions, sorts by maximum duration and escapes routes',()=>{
+  const {OC,S}=setup();
+  const snap={...sample(),slow_executions_partial:true,slow_executions:[
+    {id:'a',method:'GET',route:'/slow/<img>/',duration_ms:12000,wait_ms:30},
+    {id:'b',method:'GET',route:'/other/',duration_ms:9000,wait_ms:0},
+    {id:'c',method:'GET',route:'/slow/<img>/',duration_ms:10000,wait_ms:40},
+  ]};
+  S.overview={latest:snap,episodes:[],collection:{},coverage:{}};
+  S.detail={episode:{pid:1,start_at:snap.event_at,last_at:snap.event_at},snapshots:[snap],series:[]};
+  const html=OC.renderCongestionContent();
+  const ranking=html.slice(html.indexOf('<ol class="cg-route-list">'),html.indexOf('</ol>'));
+  assert.ok(ranking.indexOf('/slow/&lt;img&gt;/')<ranking.indexOf('/other/'));
+  assert.match(ranking,/2 execuções listadas · espera máxima 40 ms/);
+  assert.match(ranking,/>12 s<\/strong>/);
+  assert.doesNotMatch(ranking,/<img>/);
+  assert.match(html,/Snapshot selecionado · lista parcial/);
+});
+
+test('capacity reference is omitted across collection gaps',()=>{
+  const {OC}=setup();
+  const points=[{at:'2026-11-19T19:56:36Z',running:16,threads:16},
+    {at:'2026-11-19T19:56:41Z',running:13,threads:16}];
+  assert.match(OC.congestionChart(points,'running','Threads',5),/class="cg-capacity"/);
+  points[1].at='2026-11-19T20:00:00Z';
+  assert.doesNotMatch(OC.congestionChart(points,'running','Threads',5),/class="cg-capacity"/);
+});
+
+test('periodic refresh reuses unchanged episode details; manual refresh still reloads',async()=>{
+  const urls=[];
+  let fixture;
+  const {OC,S}=setup(async url=>{
+    urls.push(url);
+    const payload=url.includes('congestion-detail') ? fixture.details.get('demo-sustained') : fixture.overview;
+    return {ok:true,json:async()=>JSON.parse(JSON.stringify(payload))};
+  });
+  fixture=OC.buildCongestionDemo({env:'MAIN',window:'24h',anchor:Date.now(),scenario:'sustained'});
+  await OC.refreshCongestion({force:true});
+  assert.equal(urls.length,2);
+  await OC.refreshCongestion();
+  assert.equal(urls.length,3);
+  assert.equal(S.detail.selected.id,S.detail.latest_snapshot.id);
+  fixture.overview.episodes[0].snapshot_count++;
+  await OC.refreshCongestion();
+  assert.equal(urls.length,5);
+  await OC.refreshCongestion({force:true});
+  assert.equal(urls.length,7);
+});
+
+test('failed refreshes back off while manual refresh remains available',async()=>{
+  let requests=0;
+  const {OC,S}=setup(async()=>{requests++;throw Error('unavailable');});
+  await OC.refreshCongestion({force:true});
+  assert.ok(S.retryAt>Date.now());
+  await OC.refreshCongestion();
+  assert.equal(requests,1);
+  await OC.refreshCongestion({force:true});
+  assert.equal(requests,2);
+  assert.equal(S.failures,2);
 });

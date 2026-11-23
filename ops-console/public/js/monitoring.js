@@ -402,10 +402,6 @@
 
     root.classList.toggle("is-monitor-loading", isBusy);
     root.setAttribute("aria-busy", isBusy ? "true" : "false");
-    root.querySelectorAll("[data-monitor-tab]").forEach((tab) => {
-      tab.classList.toggle("is-loading", isBusy && tab.classList.contains("is-active"));
-    });
-
     const current = root.querySelector(".monitor-loading-feedback");
     if (!isBusy) {
       current?.remove();
@@ -424,14 +420,6 @@
     }
     const text = feedback.querySelector("span:last-child");
     if (text && (message || !text.textContent)) text.textContent = message || "Atualizando dados…";
-  }
-
-  function setSelectedMonitoringTab(root, activeTab) {
-    root.querySelectorAll("[data-monitor-tab]").forEach((tab) => {
-      const active = tab.getAttribute("data-monitor-tab") === activeTab;
-      tab.classList.toggle("is-active", active);
-      tab.setAttribute("aria-selected", active ? "true" : "false");
-    });
   }
 
   function refreshFromMonitoringControl(message) {
@@ -1457,14 +1445,10 @@
     </section>`;
   };
 
-  function renderTabBar(activeTab) {
-    const tabs = Object.entries(TAB_LABELS)
-      .map(
-        ([key, label]) =>
-          `<button type="button" role="tab" class="monitor-tab ${key === activeTab ? "is-active" : ""}" data-monitor-tab="${key}" aria-selected="${key === activeTab ? "true" : "false"}" aria-controls="monitor-tab-panel">${OC.escapeHtml(label)}</button>`
-      )
-      .join("");
-    return `<nav class="monitor-tabs" role="tablist" aria-label="Visões de monitoramento">${tabs}</nav>`;
+  function renderMonitorControls(config, warnings = [], includeMeta = true) {
+    const filters = OC.renderMonitoringFilters();
+    const meta = includeMeta ? renderMetaBar(config, warnings) : "";
+    return filters || meta ? `<div class="monitor-control-surface">${filters}${meta}</div>` : "";
   }
 
   function renderStatusOverview(overviews, uptimeByEnv) {
@@ -4031,26 +4015,6 @@
         refreshFromMonitoringControl("Aplicando filtro de categorias…");
       });
     });
-    root.querySelectorAll("[data-monitor-tab]").forEach((el) => {
-      el.addEventListener("click", () => {
-        const tab = el.getAttribute("data-monitor-tab");
-        if (!tab || tab === OC.monitorState.activeTab) return;
-        setSelectedMonitoringTab(root, tab);
-        setMonitoringBusy(true, `Carregando ${TAB_LABELS[tab] || tab}…`);
-        const query = { ...(OC.currentRoute.query || {}) };
-        delete query.env; // visão multi-ambiente; ?env= só via foco explícito
-        // since/filtro de horário só permanece se o usuário ficou em Logs e veio de drill-down
-        if (tab !== "logs") delete query.since;
-        if (tab === "apis") {
-          const section = currentApiSubTab();
-          if (section === "live") query.section = "live";
-          else delete query.section;
-        } else {
-          delete query.section;
-        }
-        OC.navigate("monitoring", null, { tab, query });
-      });
-    });
     root.querySelectorAll("[data-monitor-api-subtab]").forEach((el) => {
       el.addEventListener("click", () => {
         const next = normalizeApiSubTab(el.getAttribute("data-monitor-api-subtab"));
@@ -4465,11 +4429,8 @@
       tabLabel: TAB_LABELS[activeTab] || activeTab,
       tab: activeTab,
     })}
-    <div class="monitor-control-surface">
-      ${renderTabBar(activeTab)}
-      ${OC.renderMonitoringFilters()}
-    </div>
-    <div class="monitor-tab-panel" id="monitor-tab-panel" role="tabpanel"><div class="loading-inline"><div class="loading-spinner loading-spinner-sm"></div> Carregando monitoramento…</div></div>`;
+    ${renderMonitorControls(null, [], false)}
+    <div class="monitor-tab-panel" id="monitor-tab-panel" data-monitor-view="${activeTab}" role="region" aria-label="${OC.escapeHtml(TAB_LABELS[activeTab] || activeTab)}"><div class="loading-inline"><div class="loading-spinner loading-spinner-sm"></div> Carregando monitoramento…</div></div>`;
     bindMonitoringInteractions(root);
   };
 
@@ -4497,7 +4458,7 @@
       options.partial === true &&
       panel &&
       root.querySelector(".ops-hero") &&
-      root.querySelector("[data-monitor-tab]");
+      panel.getAttribute("data-monitor-view") === activeTab;
 
     if (canPartial) {
       OC.updateAlertCountInPlace?.(kpis.alertCount);
@@ -4509,8 +4470,6 @@
           tab: activeTab,
         });
       }
-      const tabs = root.querySelector(".monitor-tabs");
-      if (tabs) tabs.outerHTML = renderTabBar(activeTab);
       const meta = root.querySelector(".monitor-meta-wrap");
       if (meta) meta.outerHTML = renderMetaBar(payload?.config, warnings);
       const filters = root.querySelector(".monitor-filter-panel");
@@ -4529,12 +4488,8 @@
       tabLabel: TAB_LABELS[activeTab] || activeTab,
       tab: activeTab,
     })}
-    <div class="monitor-control-surface">
-      ${renderTabBar(activeTab)}
-      ${OC.renderMonitoringFilters()}
-      ${renderMetaBar(payload?.config, warnings)}
-    </div>
-    <div class="monitor-tab-panel" id="monitor-tab-panel" role="tabpanel">${renderTabContent(activeTab, payload, overviews, slos)}</div>`;
+    ${renderMonitorControls(payload?.config, warnings)}
+    <div class="monitor-tab-panel" id="monitor-tab-panel" data-monitor-view="${activeTab}" role="region" aria-label="${OC.escapeHtml(TAB_LABELS[activeTab] || activeTab)}">${renderTabContent(activeTab, payload, overviews, slos)}</div>`;
 
     bindMonitoringInteractions(root);
     restoreApiSpikeDrill();
@@ -5136,7 +5091,7 @@
     if (tab === "apis") {
       ms = currentApiSubTab() === "live" ? MONITOR_APIS_LIVE_REFRESH_MS : MONITOR_APIS_REFRESH_MS;
     } else if (tab === "logs") ms = MONITOR_LOGS_REFRESH_MS;
-    else if (tab === "congestion") ms = 5000;
+    else if (tab === "congestion") ms = 15000;
     OC.monitorTimer = setInterval(() => {
       if (!OC._monitorRefreshInFlight) OC.refreshMonitoring({ incremental: tab === "logs" });
     }, ms);

@@ -366,10 +366,7 @@
     OC.updateSidebarActive = function updateSidebarActive() {
       let active = OC.currentRoute?.view || "deploy";
       if (active === "monitoring") {
-        if (OC.currentRoute?.tab === "incidents") active = "incidents";
-        else if (OC.currentRoute?.tab === "availability") active = "availability";
-        else if (OC.currentRoute?.tab === "logs") active = "logs";
-        else active = "performance";
+        active = OC.MONITOR_TABS.includes(OC.currentRoute?.tab) ? OC.currentRoute.tab : "summary";
       }
       document.querySelectorAll("[data-sidebar-view]").forEach((link) => {
         const selected = link.getAttribute("data-sidebar-view") === active;

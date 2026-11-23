@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
+from collections import OrderedDict
 import hashlib
 import json
 import logging
@@ -15,8 +16,15 @@ import time
 LOG = logging.getLogger('ops.congestion')
 STATES = {'enabled', 'congestion_start', 'congestion_ongoing', 'recovered'}
 MAX_LINE = 256 * 1024
-READ_BUDGET = 4 * 1024 * 1024
+READ_BUDGET = 1024 * 1024
 PAGE_BUDGET = 4 * 1024 * 1024
+MAINTENANCE_SECONDS = 60
+SERIES_CACHE_SECONDS = 15
+SERIES_CACHE_BYTES = 4 * 1024 * 1024
+_maintenance = OrderedDict()
+_series_cache = OrderedDict()
+_series_cache_lock = threading.Lock()
+_series_locks = [threading.Lock() for _ in range(4)]
 _thread = None
 _start_lock = threading.Lock()
 _collect_lock = threading.Lock()
@@ -189,6 +197,7 @@ def _read_source(conn, env, path, budget, now):
     touched = {}
     invalid = 0
     consumed = 0
+    inserted_bytes = 0
     try:
         with path.open('rb') as stream:
             from os import fstat
@@ -231,6 +240,7 @@ def _read_source(conn, env, path, budget, now):
                         touched[pid] = min(touched.get(pid, stamp), stamp)
                         # One owner writes the original local evidence to the existing log stream.
                         safe_line = f'{stamp} WARNING waitress.queue {decoded[2]}'
+                        inserted_bytes += len(decoded[2].encode()) + len(safe_line.encode())
                         log_id = conn.execute('INSERT INTO service_log_lines(environment,service,stream,line,logged_at) VALUES(?,?,?,?,?)',
                                               (env, 'backend', 'queue', safe_line, iso(now))).lastrowid
                         conn.execute('UPDATE congestion_snapshots SET raw_log_id=?,payload_bytes=payload_bytes+? WHERE id=?',
@@ -248,7 +258,7 @@ def _read_source(conn, env, path, budget, now):
         status['status'] = 'missing'
     except OSError:
         status['status'] = 'unreadable'
-    return status, consumed, invalid, touched
+    return status, consumed, invalid, touched, inserted_bytes
 
 
 def _update_processes(conn, env, pids):
@@ -312,7 +322,15 @@ def collect_once(config):
     try:
         opts = settings(config)
         store, db = dependencies(config)
-        store.init_store(db)
+        # Initialize once per database identity, rather than executing DDL each tick.
+        path = Path(db)
+        identity = (str(path.resolve()), path.stat().st_ino) if path.exists() else None
+        previous = _maintenance.get(identity) if identity else None
+        if previous is None:
+            store.init_store(db)
+            identity = (str(path.resolve()), path.stat().st_ino)
+        monotonic = time.monotonic()
+        added_bytes = 0
         now = utcnow()
         with connection(store, db) as conn:
             for env in ('MAIN', 'DEV', 'HOM'):
@@ -324,7 +342,8 @@ def collect_once(config):
                         if budget <= 0:
                             statuses.append({'file': path.name, 'status': 'waiting', 'remaining_bytes': None})
                             continue
-                        status, used, errors, touched = _read_source(conn, env, path, budget, now)
+                        status, used, errors, touched, added = _read_source(conn, env, path, budget, now)
+                        added_bytes += added
                         statuses.append(status)
                         invalid += errors
                         budget -= used
@@ -336,7 +355,18 @@ def collect_once(config):
                     sources=excluded.sources,invalid_lines=invalid_lines+excluded.invalid_lines,error=NULL,
                     pending_import=excluded.pending_import''',
                     (env, iso(now), json.dumps(statuses), invalid, int(any(row['status'] in ('importing', 'waiting') for row in statuses))))
-            purge(conn, now, opts['budget'])
+            # Reconcile once a minute; enforce the storage budget immediately if
+            # newly inserted bytes could exceed it. Only publish state on commit.
+            if previous is None or monotonic >= previous['due'] or previous['bytes'] + added_bytes > opts['budget']:
+                total = purge(conn, now, opts['budget'])
+                due = monotonic + MAINTENANCE_SECONDS
+            else:
+                total = previous['bytes'] + added_bytes
+                due = previous['due']
+        _maintenance[identity] = {'bytes': total, 'due': due}
+        _maintenance.move_to_end(identity)
+        while len(_maintenance) > 8:
+            _maintenance.popitem(last=False)
     finally:
         _collect_lock.release()
 
@@ -440,6 +470,59 @@ def overview(config, env, *, since=None, until=None, window='24h', limit=100, of
             'next_offset': offset + limit if len(episode_rows) > limit else None}
 
 
+def _query_series(conn, episode):
+    episode_id = episode['id']
+    # Bucket in SQLite so even a seven-day episode does not fill Python memory.
+    seconds = max(0.001, (parse_time(episode['last_at']) - parse_time(episode['start_at'])).total_seconds())
+    width = max(1, math.ceil(seconds / 300))
+    # For a small episode expose every real point, including 71ms transitions.
+    if episode['snapshot_count'] <= 500:
+        series = [{'at': row['event_at'], 'last_at': row['event_at'], 'samples': 1, 'snapshot_id': row['id'],
+                   'state': row['state'], 'running':row['running'], 'pending':row['pending'], 'threads':row['threads']}
+                  for row in conn.execute("SELECT id,event_at,state,running,pending,threads FROM congestion_snapshots WHERE episode_id=? ORDER BY event_at,CASE state WHEN 'enabled' THEN 0 WHEN 'congestion_start' THEN 1 WHEN 'congestion_ongoing' THEN 2 ELSE 3 END,id", (episode_id,))]
+    else:
+        series = conn.execute('''SELECT MIN(event_at) AS at,MAX(event_at) AS last_at,COUNT(*) AS samples,
+            MAX(running) AS running, MIN(running) AS running_min,
+            MAX(pending) AS pending, MIN(pending) AS pending_min,
+            MAX(threads) AS threads,
+            MIN(id) AS snapshot_id FROM congestion_snapshots WHERE episode_id=?
+            GROUP BY CAST((julianday(event_at)-julianday(?))*86400/? AS INTEGER) ORDER BY at''',
+            (episode_id, episode['start_at'], width)).fetchall()
+        series = [{**dict(row), 'aggregated': True, 'snapshot_id': None} for row in series]
+        for row in conn.execute("SELECT * FROM congestion_snapshots WHERE episode_id=? AND state IN ('congestion_start','recovered') ORDER BY event_at,id", (episode_id,)):
+            payload = json.loads(row['payload'])
+            series.append({'at': row['event_at'], 'last_at': row['event_at'], 'samples': 1, 'snapshot_id': row['id'],
+                           'state': row['state'], 'running': payload['running_requests'],
+                           'pending': payload['pending_requests'], 'threads': payload['threads']})
+        series.sort(key=lambda point: (point['at'], bool(point.get('aggregated'))))
+    return [dict(row) for row in series]
+
+
+def _cached_series(conn, db, episode):
+    # Immutable episode metadata invalidates the chart on append or retention.
+    # Cache only the compact chart, never snapshot pages or collection health.
+    key = (str(Path(db).resolve()), tuple(episode))
+    lock = _series_locks[hash(key) % len(_series_locks)]
+    with lock:
+        with _series_cache_lock:
+            cached = _series_cache.get(key)
+            if cached and cached[0] > time.monotonic():
+                _series_cache.move_to_end(key)
+                return json.loads(cached[1])
+        series = _query_series(conn, episode)
+        serialized = json.dumps(series, separators=(',', ':'))
+        size = len(serialized.encode())
+        if size <= SERIES_CACHE_BYTES:
+            with _series_cache_lock:
+                now = time.monotonic()
+                for expired in [item for item, value in _series_cache.items() if value[0] <= now]:
+                    del _series_cache[expired]
+                _series_cache[key] = (now + SERIES_CACHE_SECONDS, serialized, size)
+                while len(_series_cache) > 32 or sum(value[2] for value in _series_cache.values()) > SERIES_CACHE_BYTES:
+                    _series_cache.popitem(last=False)
+        return series
+
+
 def detail(config, env, *, episode_id, limit=100, offset=0, snapshot_id=None):
     limit, offset = _page(limit, offset)
     store, db = dependencies(config)
@@ -463,29 +546,7 @@ def detail(config, env, *, episode_id, limit=100, offset=0, snapshot_id=None):
             selected = conn.execute('SELECT * FROM congestion_snapshots WHERE episode_id=? AND id=?', (episode_id, snapshot_id)).fetchone()
             if not selected:
                 raise ValueError('Snapshot não encontrado neste episódio')
-        # Bucket in SQLite so even a seven-day episode does not fill Python memory.
-        seconds = max(0.001, (parse_time(episode['last_at']) - parse_time(episode['start_at'])).total_seconds())
-        width = max(1, math.ceil(seconds / 300))
-        series = conn.execute('''SELECT MIN(event_at) AS at,MAX(event_at) AS last_at,COUNT(*) AS samples,
-            MAX(running) AS running, MIN(running) AS running_min,
-            MAX(pending) AS pending, MIN(pending) AS pending_min,
-            MAX(threads) AS threads,
-            MIN(id) AS snapshot_id FROM congestion_snapshots WHERE episode_id=?
-            GROUP BY CAST((julianday(event_at)-julianday(?))*86400/? AS INTEGER) ORDER BY at''',
-            (episode_id, episode['start_at'], width)).fetchall()
-        # For a small episode expose every real point, including 71ms transitions.
-        if episode['snapshot_count'] <= 500:
-            series = [{'at': row['event_at'], 'last_at': row['event_at'], 'samples': 1, 'snapshot_id': row['id'],
-                       'state': row['state'], 'running':row['running'], 'pending':row['pending'], 'threads':row['threads']}
-                      for row in conn.execute("SELECT id,event_at,state,running,pending,threads FROM congestion_snapshots WHERE episode_id=? ORDER BY event_at,CASE state WHEN 'enabled' THEN 0 WHEN 'congestion_start' THEN 1 WHEN 'congestion_ongoing' THEN 2 ELSE 3 END,id", (episode_id,))]
-        else:
-            series = [{**dict(row), 'aggregated': True, 'snapshot_id': None} for row in series]
-            for row in conn.execute("SELECT * FROM congestion_snapshots WHERE episode_id=? AND state IN ('congestion_start','recovered') ORDER BY event_at,id", (episode_id,)):
-                payload = json.loads(row['payload'])
-                series.append({'at': row['event_at'], 'last_at': row['event_at'], 'samples': 1, 'snapshot_id': row['id'],
-                               'state': row['state'], 'running': payload['running_requests'],
-                               'pending': payload['pending_requests'], 'threads': payload['threads']})
-            series.sort(key=lambda point: (point['at'], bool(point.get('aggregated'))))
+        series = _cached_series(conn, db, episode)
         enabled = conn.execute("SELECT payload FROM congestion_snapshots WHERE id=? AND state='enabled'", (episode['session'],)).fetchone()
     return {'environment': env, 'episode': _episode(episode), 'snapshots': [_snapshot(row) for row in rows[:limit]],
             'latest_snapshot': _snapshot(latest) if latest else None,

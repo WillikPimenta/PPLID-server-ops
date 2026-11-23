@@ -21,6 +21,8 @@ def evidence(tmp_path, monkeypatch):
     config = {'logDir': str(tmp_path), 'MAIN': {'repoName': 'PPLID_MAIN', 'enabled': True}, 'HOM': {'enabled': False}}
     monkeypatch.setattr(cg, 'dependencies', lambda config: (ops_store, db))
     monkeypatch.setattr(cg, 'settings', lambda config: {'enabled': True, 'budget': 256 * 1024 * 1024, 'days': 7})
+    monkeypatch.setattr(cg, '_maintenance', cg.OrderedDict())
+    monkeypatch.setattr(cg, '_series_cache', cg.OrderedDict())
     return config, db, tmp_path / 'PPLID_MAIN.waitress.queue.log'
 
 
@@ -317,3 +319,95 @@ def test_snapshot_pages_respect_byte_budget_without_losing_records(evidence, mon
         seen += [row['id'] for row in page['snapshots']]
         offset=page['next_offset']
     assert len(seen)==len(set(seen))==8
+
+
+def test_idle_ticks_initialize_once_and_run_retention_once_per_minute(evidence):
+    config, db, _ = evidence
+    with patch.object(cg.time, 'monotonic', return_value=100) as clock, \
+         patch.object(ops_store, 'init_store', wraps=ops_store.init_store) as initialize, \
+         patch.object(cg, 'purge', wraps=cg.purge) as purge:
+        cg.collect_once(config)
+        clock.return_value = 159
+        cg.collect_once(config)
+        assert initialize.call_count == purge.call_count == 1
+        clock.return_value = 160
+        cg.collect_once(config)
+        assert purge.call_count == 2 and initialize.call_count == 1
+
+
+def test_budget_is_enforced_before_scheduled_cleanup(evidence, monkeypatch):
+    config, db, file = evidence
+    at = stamp()
+    monkeypatch.setattr(cg, 'settings', lambda _: {'enabled': True, 'budget': 1800})
+    file.write_text(event('congestion_start', at), encoding='utf-8')
+    with patch.object(cg.time, 'monotonic', return_value=100), patch.object(cg, 'purge', wraps=cg.purge) as purge:
+        cg.collect_once(config)
+        with file.open('a', encoding='utf-8') as output:
+            output.write(event('recovered', at + timedelta(seconds=1)))
+        cg.collect_once(config)
+        assert purge.call_count == 2
+    with cg.connection(ops_store, db) as conn:
+        assert conn.execute('SELECT COALESCE(SUM(payload_bytes),0) FROM congestion_snapshots').fetchone()[0] <= 1800
+
+
+def test_failed_commit_does_not_publish_maintenance_state(evidence):
+    config, db, file = evidence
+    file.write_text(event('congestion_start', stamp()), encoding='utf-8')
+    with patch.object(cg, 'purge', side_effect=RuntimeError('rollback')):
+        with pytest.raises(RuntimeError):
+            cg.collect_once(config)
+    assert not cg._maintenance
+    cg.collect_once(config)
+    assert cg.overview(config, 'MAIN')['coverage']['snapshots'] == 1
+
+
+def test_chart_cache_invalidates_on_append_and_retention_and_returns_isolated_results(evidence):
+    config, db, file = evidence
+    at = stamp()
+    file.write_text(event('congestion_start', at), encoding='utf-8')
+    cg.collect_once(config)
+    episode_id = cg.overview(config, 'MAIN')['episodes'][0]['id']
+    with patch.object(cg, '_query_series', wraps=cg._query_series) as query:
+        first = cg.detail(config, 'MAIN', episode_id=episode_id)
+        first['series'][0]['pending'] = 999
+        assert cg.detail(config, 'MAIN', episode_id=episode_id)['series'][0]['pending'] == 1
+        assert query.call_count == 1
+        with file.open('a', encoding='utf-8') as output:
+            output.write(event('recovered', at + timedelta(seconds=1), pending_requests=0))
+        cg.collect_once(config)
+        assert len(cg.detail(config, 'MAIN', episode_id=episode_id)['series']) == 2
+        assert query.call_count == 2
+        with cg.connection(ops_store, db) as conn:
+            budget=conn.execute('SELECT payload_bytes FROM congestion_snapshots ORDER BY event_at DESC LIMIT 1').fetchone()[0]+1
+            cg.purge(conn, cg.utcnow(), budget)
+        assert len(cg.detail(config, 'MAIN', episode_id=episode_id)['series']) == 1
+        assert query.call_count == 3
+
+
+def test_chart_cache_is_shared_between_concurrent_readers_and_has_memory_limit(evidence, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    config, _, file = evidence
+    file.write_text(event('congestion_start', stamp()), encoding='utf-8')
+    cg.collect_once(config)
+    episode_id = cg.overview(config, 'MAIN')['episodes'][0]['id']
+    with patch.object(cg, '_query_series', wraps=cg._query_series) as query:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            responses=list(pool.map(lambda _: cg.detail(config, 'MAIN', episode_id=episode_id), range(8)))
+        assert query.call_count == 1
+        assert all(response['series'] == responses[0]['series'] for response in responses)
+    cg._series_cache.clear()
+    monkeypatch.setattr(cg, 'SERIES_CACHE_BYTES', 1)
+    cg.detail(config, 'MAIN', episode_id=episode_id)
+    assert not cg._series_cache
+
+
+def test_chart_cache_expires(evidence):
+    config, _, file = evidence
+    file.write_text(event('congestion_start', stamp()), encoding='utf-8')
+    cg.collect_once(config)
+    episode_id = cg.overview(config, 'MAIN')['episodes'][0]['id']
+    with patch.object(cg.time, 'monotonic', return_value=100) as clock, patch.object(cg, '_query_series', wraps=cg._query_series) as query:
+        cg.detail(config, 'MAIN', episode_id=episode_id)
+        clock.return_value = 100 + cg.SERIES_CACHE_SECONDS
+        cg.detail(config, 'MAIN', episode_id=episode_id)
+        assert query.call_count == 2
