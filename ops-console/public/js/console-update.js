@@ -710,8 +710,9 @@
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
       try {
         const health = await OC.fetchJson("/api/v1/auth/status", { timeoutMs: 3000 });
-        if (sawDown) return true;
-        if (previousInstanceId && health?.serverInstanceId && health.serverInstanceId !== previousInstanceId) return true;
+        if (previousInstanceId && health?.serverInstanceId) {
+          if (health.serverInstanceId !== previousInstanceId) return true;
+        } else if (sawDown) return true;
         // Ainda não reiniciou: servidor continua respondendo.
         OC.consoleUpdateState.activityLabel =
           "Aguardando reinício do processo (servidor ainda ativo)…";
@@ -725,8 +726,10 @@
 
     if (sawDown) {
       try {
-        await OC.fetchJson("/api/v1/auth/status", { timeoutMs: 3000 });
-        return true;
+        const health = await OC.fetchJson("/api/v1/auth/status", { timeoutMs: 3000 });
+        return previousInstanceId
+          ? Boolean(health?.serverInstanceId && health.serverInstanceId !== previousInstanceId)
+          : true;
       } catch {
         return false;
       }
@@ -991,20 +994,11 @@
         return;
       }
 
-      if (!after.updateAvailable && after.ok) {
-        clearLastError();
-        endActivity();
-        renderConsoleUpdateBar(after, "idle");
-        OC.showToast?.("Atualização aplicada. Recarregando…", "success");
-        window.location.reload();
-        return;
-      }
-
       const failMsg =
         extractErrorMessage(after) ||
         (restartState === "still-up"
-          ? "O processo de atualização terminou, mas o console não reiniciou e a versão continua atrasada."
-          : "O console não respondeu após o reinício e a versão continua atrasada.");
+          ? "O código foi atualizado, mas o reinício do Console não foi confirmado. Consulte os logs da atualização."
+          : "O Console não respondeu após o reinício. Consulte os logs da atualização.");
       setLastError(failMsg, { phase: "restart" });
       endActivity();
       renderConsoleUpdateBar(after, "idle");

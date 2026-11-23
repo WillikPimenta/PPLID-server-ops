@@ -340,16 +340,48 @@ if ($CheckOnly) {
     }
 }
 
-if ($RestartOnly) {
+function Invoke-ConsoleUpdateRestart {
+    # This worker is already detached from the HTTP server. Keep the restart
+    # here so its output and failures remain in console-update-worker.log.
     if ($DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
     $script:consoleCodeApplied = $true
     Stop-IfConsoleUpdateCancelled
-    $restartArgs = @("-Restart")
+    $restartArgs = @{ Restart = $true; OpsDir = $opsConsoleDir }
     if ($ConfigPath -and (Test-Path $ConfigPath)) {
-        $restartArgs += @("-ConfigPath", $ConfigPath)
+        $restartArgs.ConfigPath = $ConfigPath
     }
+    Write-ConsoleUpdateLog -Message "Executando reinicio do processo do Console." -Phase "restarting"
+    $global:LASTEXITCODE = 0
     & (Join-Path $PSScriptRoot "start_ops_console.ps1") @restartArgs
-    exit $LASTEXITCODE
+    if ($LASTEXITCODE -ne 0) { throw "Reinicio do Console falhou (exit code $LASTEXITCODE)." }
+    $result = @{}
+    if (Test-Path $resultPath) {
+        $previous = Get-Content $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($property in $previous.PSObject.Properties) { $result[$property.Name] = $property.Value }
+    }
+    $result.ok = $true
+    $result.applied = $true
+    $result.restarting = $false
+    $result.phase = "done"
+    $result.finishedAt = (Get-Date).ToUniversalTime().ToString("o")
+    Write-ApplyResult -Payload $result
+    Write-ConsoleUpdateLog -Message "Console reiniciado com sucesso." -Phase "done"
+    Clear-ConsoleUpdateLock
+}
+
+if ($RestartOnly) {
+    try {
+        Invoke-ConsoleUpdateRestart
+        exit 0
+    } catch {
+        Write-ConsoleUpdateLog -Message $_.Exception.Message -Level "ERROR" -Phase "failed"
+        Write-ApplyResult -Payload @{
+            ok = $false; applied = $true; restarting = $false
+            phase = "failed"; error = $_.Exception.Message
+        }
+        Clear-ConsoleUpdateLock
+        exit 1
+    }
 }
 
 if ($Apply) {
@@ -557,7 +589,6 @@ if ($Apply) {
     }
     # A cancellation accepted just before the phase transition must still win.
     Stop-IfConsoleUpdateCancelled
-    Clear-ConsoleUpdateLock
     Write-ApplyResult -Payload @{
         ok = $true
         applied = $true
@@ -571,27 +602,14 @@ if ($Apply) {
     }
     Write-ConsoleUpdateLog -Message "Código aplicado; solicitando reinício do Console." -Phase "restarting"
 
-    $workerArgs = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", (Join-Path $PSScriptRoot "update_ops_console.ps1"),
-        "-RestartOnly",
-        "-OpsRepoDir", $OpsRepoDir,
-        "-DelaySeconds", "2",
-        "-LogDir", $resolvedLogDir
-    )
-    if ($ConfigPath -and (Test-Path $ConfigPath)) {
-        $workerArgs += @("-ConfigPath", $ConfigPath)
-    }
-
-    Start-Process -FilePath "powershell.exe" -ArgumentList $workerArgs -WindowStyle Hidden
+    Invoke-ConsoleUpdateRestart
     exit 0
     } catch {
         Write-ConsoleUpdateLog -Message $_.Exception.Message -Level "ERROR" -Phase "failed"
         Clear-ConsoleUpdateLock
         Write-ApplyResult -Payload @{
             ok = $false
-            applied = $false
+            applied = [bool]$script:consoleCodeApplied
             restarting = $false
             phase = "failed"
             error = $_.Exception.Message

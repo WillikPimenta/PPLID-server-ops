@@ -172,6 +172,22 @@ test('fast console restart is detected by the server instance identifier', async
   assert.equal(polls, 2);
 });
 
+test('a transient network failure does not confirm restart of the same server instance', async () => {
+  const source = read('console-update.js');
+  const start = source.indexOf('  async function waitForConsoleRestart(');
+  const end = source.indexOf('\n  OC.refreshConsoleUpdateBar =', start);
+  let polls = 0;
+  const OC = { consoleUpdateState: {}, fetchJson: async () => {
+    polls++;
+    if (polls === 1) throw new Error('temporary network failure');
+    return { serverInstanceId: polls === 2 ? 'old' : 'new' };
+  } };
+  const context = { OC, Date, Promise, setTimeout: fn => fn(), RESTART_TIMEOUT_MS: 180000, POLL_INTERVAL_MS: 1, beginActivity() {}, renderConsoleUpdateBar() {} };
+  vm.runInNewContext(source.slice(start, end) + '\nthis.restart = waitForConsoleRestart;', context);
+  assert.equal(await context.restart('old'), true);
+  assert.equal(polls, 3);
+});
+
 test('automatic version checks back off after failure without losing the last status', async () => {
   const source = read('console-update.js');
   const fetchStart = source.indexOf('  OC.fetchConsoleUpdateStatus =');

@@ -190,7 +190,11 @@ function Ensure-AutomationRuntime {
     }
 }
 
-Ensure-AutomationRuntime -PythonExe $pythonExe -OpsConsoleDir $OpsDir -EnvConfigPath $ConfigPath
+# The update worker already prepares changed dependencies. A restart must not
+# wait for an unrelated automation bootstrap before it can replace the server.
+if (-not $Restart) {
+    Ensure-AutomationRuntime -PythonExe $pythonExe -OpsConsoleDir $OpsDir -EnvConfigPath $ConfigPath
+}
 
 $consolePort = 5190
 if ($Port -gt 0) {
@@ -217,6 +221,7 @@ if ($existingPid) {
             Write-Warning "Nao foi possivel encerrar PID ${existingPid}: $_"
         }
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            Clear-NetstatSnapshot
             $existingPid = Get-PortListenOwnerPid -Port $consolePort
             if (-not $existingPid -or -not (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
                 $existingPid = $null
@@ -256,17 +261,30 @@ try {
     $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
-    [System.Diagnostics.Process]::Start($startInfo) | Out-Null
-    Start-Sleep -Seconds 2
+    $serverProcess = [System.Diagnostics.Process]::Start($startInfo)
+    $listening = $false
+    for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        Start-Sleep -Milliseconds 500
+        if ($serverProcess.HasExited) {
+            throw "Processo do Ops Console encerrou durante a inicializacao (exit code $($serverProcess.ExitCode))."
+        }
+        Clear-NetstatSnapshot
+        # Windows venv launchers can delegate to a child Python process.
+        # The previous listener was stopped and the port released above.
+        if (Test-PortListening -Port $consolePort) {
+            $listening = $true
+            break
+        }
+    }
 
-    if (Test-PortListening -Port $consolePort) {
+    if ($listening) {
         $lan = if ($Local) { "127.0.0.1" } else {
             $machine = Get-PplidMachineConfig
             if ($machine.lanIp) { $machine.lanIp } elseif ($cfg.lanIp) { $cfg.lanIp } else { Get-LanIPv4 }
         }
         Write-Host "Ops Console ativo: http://${lan}:$consolePort"
     } else {
-        Write-Warning "Processo iniciado, mas porta $consolePort ainda nao responde. Verifique logs."
+        throw "Processo iniciado, mas porta $consolePort nao respondeu em 30 segundos. Verifique logs."
     }
 } finally {
     Pop-Location
