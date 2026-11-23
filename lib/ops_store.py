@@ -11,7 +11,7 @@ import os
 import sqlite3
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +102,8 @@ CREATE TABLE IF NOT EXISTS monitor_samples (
 );
 CREATE INDEX IF NOT EXISTS idx_monitor_samples_query
     ON monitor_samples(environment, metric_key, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_monitor_samples_retention
+ON monitor_samples(recorded_at, id);
 
 CREATE TABLE IF NOT EXISTS monitor_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -559,6 +561,20 @@ def append_service_log(
         return int(cur.lastrowid)
 
 
+def append_service_logs_batch(rows: list[dict[str, Any]], *, db_path: Path | None = None) -> int:
+    """Commit a file slice once; the collector advances its cursor on success."""
+    if not rows:
+        return 0
+    values = [(row['environment'].upper(), row['service'].lower(), row['stream'].lower(),
+               row['line'], row['logged_at']) for row in rows]
+    with closing(get_connection(db_path)) as conn, conn:
+        conn.execute('PRAGMA busy_timeout=250')
+        conn.executemany(
+            'INSERT INTO service_log_lines(environment,service,stream,line,logged_at) VALUES(?,?,?,?,?)', values)
+        conn.commit()
+    return len(values)
+
+
 def tail_service_logs(
     environment: str,
     service: str,
@@ -756,7 +772,8 @@ def insert_monitor_samples_batch(
         labels_json = json.dumps(labels, ensure_ascii=False) if labels else None
         recorded_at = str(sample.get("recorded_at") or default_ts)
         rows.append((environment, metric_key, float(sample["value"]), labels_json, recorded_at))
-    with get_connection(db_path) as conn:
+    with closing(get_connection(db_path)) as conn, conn:
+        conn.execute("PRAGMA busy_timeout=1000")
         conn.executemany(
             """
             INSERT INTO monitor_samples(environment, metric_key, value, labels_json, recorded_at)
@@ -1063,17 +1080,21 @@ def aggregate_monitor_samples(
 
 
 def purge_monitor_data(retention_days: int = 7, *, db_path: Path | None = None) -> dict[str, int]:
-    with get_connection(db_path) as conn:
-        d1 = conn.execute(
-            "DELETE FROM monitor_samples WHERE recorded_at < datetime('now', ?)",
-            (f"-{retention_days} days",),
-        ).rowcount
-        d2 = conn.execute(
-            "DELETE FROM monitor_events WHERE recorded_at < datetime('now', ?)",
-            (f"-{retention_days} days",),
-        ).rowcount
-        conn.commit()
-    return {"monitor_samples": d1, "monitor_events": d2}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    result = {}
+    with closing(get_connection(db_path)) as conn:
+        conn.execute('PRAGMA busy_timeout=250')
+        for table in ('monitor_samples', 'monitor_events'):
+            result[table] = 0
+            while True:
+                # Constant table names; release the SQLite write lock per batch.
+                with conn:
+                    deleted = conn.execute(f'DELETE FROM {table} WHERE id IN (SELECT id FROM {table} WHERE recorded_at < ? LIMIT 1000)',
+                                           (cutoff,)).rowcount
+                result[table] += deleted
+                if deleted < 1000:
+                    break
+    return result
 
 
 def purge_old_logs(retention_days: int = 90, *, db_path: Path | None = None) -> dict[str, int]:
