@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -191,6 +192,65 @@ def probe_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
         }
 
 
+_METRICS_READ_CACHE = OrderedDict()
+_METRICS_READ_CACHE_LOCK = threading.Lock()
+_METRICS_READ_PENDING = {}
+
+
+def _fetch_backend_monitoring_json(url: str, *, timeout: float, ttl: float = 5.0) -> dict[str, Any]:
+    """Coalesce readers and cool down failures, including timed out requests.
+
+    A client timeout cannot cancel a request already executing in Waitress.
+    Waiting before retrying keeps dashboard polling from accumulating work.
+    """
+    with _METRICS_READ_CACHE_LOCK:
+        cached = _METRICS_READ_CACHE.get(url)
+        if cached and cached[0] > time.monotonic():
+            _METRICS_READ_CACHE.move_to_end(url)
+            return json.loads(cached[1])
+        pending = _METRICS_READ_PENDING.get(url)
+        owner = pending is None and len(_METRICS_READ_PENDING) < 64
+        if owner:
+            pending = _METRICS_READ_PENDING[url] = threading.Event()
+    if not owner:
+        if pending and pending.wait(0.1):
+            with _METRICS_READ_CACHE_LOCK:
+                cached = _METRICS_READ_CACHE.get(url)
+            if cached and cached[0] > time.monotonic():
+                return json.loads(cached[1])
+        return {"error": "Consulta de metricas ja em andamento", "retryAfterSec": 2}
+    try:
+        try:
+            request = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            payload = {"error": f"HTTP {exc.code}", "reachable": False}
+            try:
+                payload["detail"] = exc.read(200).decode("utf-8", errors="replace")
+            except Exception:
+                pass
+        except Exception as exc:  # noqa: BLE001
+            payload = {"error": str(exc), "reachable": False}
+        error = bool(payload.get("error"))
+        if error:
+            payload["retryAfterSec"] = 30
+        serialized = json.dumps(payload)
+        if len(serialized.encode()) <= 4 * 1024 * 1024:
+            with _METRICS_READ_CACHE_LOCK:
+                now = time.monotonic()
+                for expired in [key for key, value in _METRICS_READ_CACHE.items() if value[0] <= now]:
+                    del _METRICS_READ_CACHE[expired]
+                _METRICS_READ_CACHE[url] = (now + (30 if error else ttl), serialized)
+                while len(_METRICS_READ_CACHE) > 64 or sum(len(row[1].encode()) for row in _METRICS_READ_CACHE.values()) > 4 * 1024 * 1024:
+                    _METRICS_READ_CACHE.popitem(last=False)
+        return payload
+    finally:
+        with _METRICS_READ_CACHE_LOCK:
+            _METRICS_READ_PENDING.pop(url, None)
+            pending.set()
+
+
 def fetch_backend_api_metrics(
     config: dict[str, Any], env_name: str, window: str = "24h", *, since: str | None = None,
     until: str | None = None, timeout: float | None = None,
@@ -208,14 +268,8 @@ def fetch_backend_api_metrics(
     if since and until:
         params.update({"since": since, "until": until})
     url = f"http://127.0.0.1:{port}/api/v1/ops-metrics/summary/?{urllib.parse.urlencode(params)}"
-    try:
-        request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        return {"error": f"HTTP {exc.code}", "reachable": False}
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc), "reachable": False}
+    return _fetch_backend_monitoring_json(url, timeout=timeout)
+
 
 
 def fetch_backend_api_samples_around(
@@ -242,19 +296,8 @@ def fetch_backend_api_samples_around(
         }
     )
     url = f"http://127.0.0.1:{port}/api/v1/ops-metrics/around/?{params}"
-    try:
-        request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="replace")[:200]
-        except Exception:
-            pass
-        return {"error": f"HTTP {exc.code}", "detail": body, "reachable": False}
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc), "reachable": False}
+    return _fetch_backend_monitoring_json(url, timeout=timeout)
+
 
 
 def fetch_backend_api_route_samples(
@@ -284,19 +327,8 @@ def fetch_backend_api_route_samples(
     if since and until:
         params += "&" + urllib.parse.urlencode({"since": since, "until": until})
     url = f"http://127.0.0.1:{port}/api/v1/ops-metrics/route-samples/?{params}"
-    try:
-        request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="replace")[:200]
-        except Exception:
-            pass
-        return {"error": f"HTTP {exc.code}", "detail": body, "reachable": False}
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc), "reachable": False}
+    return _fetch_backend_monitoring_json(url, timeout=timeout)
+
 
 
 def fetch_backend_api_recent_samples(
@@ -317,24 +349,14 @@ def fetch_backend_api_recent_samples(
         {
             "window": window,
             "limit": max(1, min(100, int(limit or 50))),
+            "includeCount": "0",  # The live feed needs a page, not a full-window COUNT.
         }
     )
     if since and until:
         params += "&" + urllib.parse.urlencode({"since": since, "until": until})
     url = f"http://127.0.0.1:{port}/api/v1/ops-metrics/recent-samples/?{params}"
-    try:
-        request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="replace")[:200]
-        except Exception:
-            pass
-        return {"error": f"HTTP {exc.code}", "detail": body, "reachable": False}
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc), "reachable": False}
+    return _fetch_backend_monitoring_json(url, timeout=timeout)
+
 
 
 def fetch_backend_api_inflight(
@@ -348,20 +370,7 @@ def fetch_backend_api_inflight(
     if not port:
         return {"error": "Porta backend nao configurada"}
     url = f"http://127.0.0.1:{port}/api/v1/ops-metrics/in-flight/"
-    try:
-        request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="replace")[:200]
-        except Exception:
-            pass
-        return {"error": f"HTTP {exc.code}", "detail": body, "reachable": False}
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc), "reachable": False}
-
+    return _fetch_backend_monitoring_json(url, timeout=timeout, ttl=1.0)
 
 _API_WINDOW_DELTAS = {
     "1h": timedelta(hours=1),
@@ -394,7 +403,17 @@ def _metric_user_id_from_pk(raw: str) -> int | None:
     return (int.from_bytes(digest, "big") & 0x7FFF_FFFF) or 1
 
 
+_PG_REQUESTER_MAPS = OrderedDict()
+_PG_REQUESTER_MAP_LOCK = threading.Lock()
+
+
 def _build_requester_map_from_pg(conn) -> dict[int, str]:
+    info = conn.info
+    key = (str(info.host), int(info.port), str(info.dbname), str(info.user))
+    with _PG_REQUESTER_MAP_LOCK:
+        cached = _PG_REQUESTER_MAPS.get(key)
+        if cached and cached[0] > time.monotonic():
+            return dict(cached[1])
     requester_map: dict[int, str] = {}
     try:
         with conn.cursor() as cur:
@@ -414,7 +433,14 @@ def _build_requester_map_from_pg(conn) -> dict[int, str]:
                 full = f"{fn} {ln}".strip()
                 requester_map[metric_id] = full or (username or "").strip() or "Usuário desconhecido"
     except Exception:
-        return {}
+        # Let the caller close/roll back this connection; do not query again
+        # inside an aborted transaction or without the original time limits.
+        raise
+    with _PG_REQUESTER_MAP_LOCK:
+        _PG_REQUESTER_MAPS[key] = (time.monotonic() + 300, dict(requester_map))
+        _PG_REQUESTER_MAPS.move_to_end(key)
+        while len(_PG_REQUESTER_MAPS) > 8:
+            _PG_REQUESTER_MAPS.popitem(last=False)
     return requester_map
 
 
@@ -460,6 +486,9 @@ def fetch_route_samples_from_postgres(
         _logger.debug("route samples postgres fallback unavailable: %s", exc)
         return None
     try:
+        with conn.cursor() as limits:
+            limits.execute("SET LOCAL statement_timeout = '2000ms'")
+            limits.execute("SET LOCAL lock_timeout = '250ms'")
         requester_map = _build_requester_map_from_pg(conn)
         with conn.cursor() as cur:
             cur.execute(
@@ -471,29 +500,16 @@ def fetch_route_samples_from_postgres(
                 (since_dt, until_dt, method, route),
             )
             sample_count = int(cur.fetchone()[0])
-            try:
-                cur.execute(
-                    """
-                    SELECT recorded_at, status_code, duration_ms, user_id, request_params, error_reason
-                    FROM ops_api_request_metric
-                    WHERE recorded_at >= %s AND recorded_at < %s AND method = %s AND route = %s
-                    ORDER BY recorded_at DESC
-                    LIMIT %s
-                    """,
-                    (since_dt, until_dt, method, route, bounded_limit),
-                )
-            except Exception:
-                conn.rollback()
-                cur.execute(
-                    """
-                    SELECT recorded_at, status_code, duration_ms, user_id, request_params
-                    FROM ops_api_request_metric
-                    WHERE recorded_at >= %s AND recorded_at < %s AND method = %s AND route = %s
-                    ORDER BY recorded_at DESC
-                    LIMIT %s
-                    """,
-                    (since_dt, until_dt, method, route, bounded_limit),
-                )
+            cur.execute(
+                """
+                SELECT recorded_at, status_code, duration_ms, user_id, request_params
+                FROM ops_api_request_metric
+                WHERE recorded_at >= %s AND recorded_at < %s AND method = %s AND route = %s
+                ORDER BY recorded_at DESC
+                LIMIT %s
+                """,
+                (since_dt, until_dt, method, route, bounded_limit),
+            )
             rows = cur.fetchall()
     except Exception as exc:  # noqa: BLE001
         _logger.debug("route samples postgres query failed: %s", exc)
@@ -548,6 +564,9 @@ def fetch_recent_samples_from_postgres(
         _logger.debug("recent samples postgres fallback unavailable: %s", exc)
         return None
     try:
+        with conn.cursor() as limits:
+            limits.execute("SET LOCAL statement_timeout = '2000ms'")
+            limits.execute("SET LOCAL lock_timeout = '250ms'")
         requester_map = _build_requester_map_from_pg(conn)
         with conn.cursor() as cur:
             cur.execute(
@@ -559,29 +578,16 @@ def fetch_recent_samples_from_postgres(
                 (since_dt, until_dt),
             )
             sample_count = int(cur.fetchone()[0])
-            try:
-                cur.execute(
-                    """
-                    SELECT recorded_at, method, route, status_code, duration_ms, user_id, error_reason
-                    FROM ops_api_request_metric
-                    WHERE recorded_at >= %s AND recorded_at < %s
-                    ORDER BY recorded_at DESC
-                    LIMIT %s
-                    """,
-                    (since_dt, until_dt, bounded_limit),
-                )
-            except Exception:
-                conn.rollback()
-                cur.execute(
-                    """
-                    SELECT recorded_at, method, route, status_code, duration_ms, user_id
-                    FROM ops_api_request_metric
-                    WHERE recorded_at >= %s AND recorded_at < %s
-                    ORDER BY recorded_at DESC
-                    LIMIT %s
-                    """,
-                    (since_dt, until_dt, bounded_limit),
-                )
+            cur.execute(
+                """
+                SELECT recorded_at, method, route, status_code, duration_ms, user_id
+                FROM ops_api_request_metric
+                WHERE recorded_at >= %s AND recorded_at < %s
+                ORDER BY recorded_at DESC
+                LIMIT %s
+                """,
+                (since_dt, until_dt, bounded_limit),
+            )
             rows = cur.fetchall()
     except Exception as exc:  # noqa: BLE001
         _logger.debug("recent samples postgres query failed: %s", exc)
@@ -935,28 +941,16 @@ def _collect_api_metrics(config: dict[str, Any], env_name: str, ops_store, db_pa
             }
         )
     if avg_ms is not None:
-        ops_store.insert_monitor_sample(
-            env_name,
-            "api_avg_ms",
-            float(avg_ms),
-            labels={"window": "1h", "requests": requests, "topRoutes": top_routes},
-            db_path=db_path,
-        )
-    ops_store.insert_monitor_sample(
-        env_name,
-        "api_5xx",
-        float(errors_5xx or 0),
-        labels={"window": "1h"},
-        db_path=db_path,
-    )
+        samples = [{"environment": env_name, "metric_key": "api_avg_ms", "value": float(avg_ms),
+                    "labels": {"window": "1h", "requests": requests, "topRoutes": top_routes}}]
+    else:
+        samples = []
+    samples.append({"environment": env_name, "metric_key": "api_5xx", "value": float(errors_5xx or 0),
+                    "labels": {"window": "1h"}})
     if active_users_now is not None:
-        ops_store.insert_monitor_sample(
-            env_name,
-            "api_active_users_5m",
-            float(active_users_now or 0),
-            labels={"windowMinutes": int(active_users.get("windowMinutes") or 5)},
-            db_path=db_path,
-        )
+        samples.append({"environment": env_name, "metric_key": "api_active_users_5m", "value": float(active_users_now or 0),
+                        "labels": {"windowMinutes": int(active_users.get("windowMinutes") or 5)}})
+    ops_store.insert_monitor_samples_batch(samples, db_path=db_path)
 
 
 def _enrich_active_users_peak(config: dict[str, Any], env_name: str, data: dict[str, Any]) -> None:
@@ -970,15 +964,7 @@ def _enrich_active_users_peak(config: dict[str, Any], env_name: str, data: dict[
     try:
         ops_store = _import_ops_store()
         db_path = resolve_ops_store_path(config)
-        ops_store.init_store(db_path)
-        window_minutes = int(active_users.get("windowMinutes") or 5)
-        ops_store.insert_monitor_sample(
-            env_name,
-            "api_active_users_5m",
-            float(current or 0),
-            labels={"windowMinutes": window_minutes},
-            db_path=db_path,
-        )
+        # Reads do not create samples. The periodic collector owns persistence.
         retention_days = int(get_monitoring_settings(config).get("retentionDays") or 7)
         aggregate = ops_store.aggregate_monitor_samples(
             env_name,
@@ -1011,26 +997,18 @@ def _collect_postgres(config: dict[str, Any], env_name: str, ops_store, db_path:
 
     connections = metrics.get("connections") or {}
     total = float(connections.get("total") or 0)
-    ops_store.insert_monitor_sample(env_name, "pg_connections_total", total, db_path=db_path)
+    samples = [{"environment": env_name, "metric_key": "pg_connections_total", "value": total}]
     by_state = connections.get("byState") or {}
     for state, count in by_state.items():
-        ops_store.insert_monitor_sample(
-            env_name,
-            f"pg_connections_{state}",
-            float(count),
-            db_path=db_path,
-        )
+        samples.append({"environment": env_name, "metric_key": f"pg_connections_{state}", "value": float(count)})
 
     size_bytes = metrics.get("sizeBytes")
     if size_bytes is not None:
-        ops_store.insert_monitor_sample(
-            env_name, "pg_database_size_bytes", float(size_bytes), db_path=db_path
-        )
+        samples.append({"environment": env_name, "metric_key": "pg_database_size_bytes", "value": float(size_bytes)})
 
     locks = metrics.get("blockingLocks") or []
-    ops_store.insert_monitor_sample(
-        env_name, "pg_blocking_locks", float(len(locks)), db_path=db_path
-    )
+    samples.append({"environment": env_name, "metric_key": "pg_blocking_locks", "value": float(len(locks))})
+    ops_store.insert_monitor_samples_batch(samples, db_path=db_path)
     if locks:
         _record_event(
             ops_store,
@@ -1062,6 +1040,7 @@ def _is_errorish_log_line(line: str) -> bool:
 
 _LOG_LINE_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\]")
 _SERVICE_LOG_FILE_OFFSETS: dict[str, int] = {}
+_SERVICE_LOG_SKIPPING: set[str] = set()
 
 
 def _local_tzinfo():
@@ -1442,28 +1421,41 @@ def _ingest_service_log_files(
             offset = max(0, size - 64_000)
         if offset > size:
             offset = 0
+            _SERVICE_LOG_SKIPPING.discard(key)
         if offset == size:
             continue
         try:
             with path.open("rb") as fh:
                 fh.seek(offset)
-                chunk = fh.read()
+                # Bound each cycle even after a burst of application logging.
+                chunk = fh.read(256_000)
                 new_offset = fh.tell()
         except OSError:
             continue
-        text = chunk.decode("utf-8", errors="replace")
-        if offset > 0 and text and not text.startswith("\n") and (stream != 'queue' or initial_slice):
-            # descarta linha parcial no início do slice
-            nl = text.find("\n")
-            if nl >= 0:
-                text = text[nl + 1 :]
-        if stream == 'queue' and text and not text.endswith('\n'):
-            # A reporter write may be observed mid-line. Keep its unfinished
-            # bytes for the next tick instead of storing invalid JSON fragments.
-            tail = text.rsplit('\n', 1)[-1]
-            new_offset -= len(tail.encode('utf-8'))
-            text = text[:-len(tail)]
+        body = chunk
+        body_offset = offset
+        # Initial tail slices and explicitly oversized lines may start mid-line.
+        if key in _SERVICE_LOG_SKIPPING or (initial_slice and offset > 0):
+            newline = body.find(b'\n')
+            if newline < 0:
+                _SERVICE_LOG_FILE_OFFSETS[key] = new_offset
+                _SERVICE_LOG_SKIPPING.add(key)
+                continue
+            body = body[newline + 1:]
+            body_offset += newline + 1
+        skip_next = False
+        if body and not body.endswith(b'\n'):
+            newline = body.rfind(b'\n')
+            if newline < 0 and len(body) == 256_000:
+                # Skip every fragment of an oversized line, not just its head.
+                body = b''
+                skip_next = True
+            else:
+                body = body[:newline + 1]
+                new_offset = body_offset + newline + 1
+        text = body.decode('utf-8', errors='replace')
         now_iso = _utc_now_iso()
+        batch = []
         for raw in text.splitlines():
             line = raw.rstrip("\r")
             if not line.strip():
@@ -1472,26 +1464,26 @@ def _ingest_service_log_files(
             logged_at = now_iso if stream == 'queue' else (
                 ts.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z" if ts else now_iso
             )
-            try:
-                ops_store.append_service_log(
-                    env_name,
-                    service,
-                    stream,
-                    line,
-                    logged_at=logged_at,
-                    db_path=db_path,
-                )
-            except Exception:
-                continue
-            ingested.append(
+            batch.append(
                 {
+                    "environment": env_name,
                     "service": service,
                     "stream": stream,
                     "line": line,
                     "logged_at": logged_at,
                 }
             )
+        try:
+            ops_store.append_service_logs_batch(batch, db_path=db_path)
+        except Exception:
+            # Keep the offset for retry; failed writes must not lose evidence.
+            continue
+        ingested.extend({key: value for key, value in row.items() if key != 'environment'} for row in batch)
         _SERVICE_LOG_FILE_OFFSETS[key] = new_offset
+        if skip_next:
+            _SERVICE_LOG_SKIPPING.add(key)
+        else:
+            _SERVICE_LOG_SKIPPING.discard(key)
     return ingested
 
 
@@ -1741,13 +1733,31 @@ def _check_sync_anomalies(
         )
 
 
+_MONITOR_STORE_IDENTITIES = OrderedDict()
+_MONITOR_STORE_INIT_LOCK = threading.Lock()
+
+
+def _ensure_monitor_store(store, db_path: Path) -> None:
+    """Do schema work once per database identity, shared by collector threads."""
+    with _MONITOR_STORE_INIT_LOCK:
+        identity = (str(db_path.resolve()), db_path.stat().st_ino) if db_path.exists() else None
+        if identity is not None and identity in _MONITOR_STORE_IDENTITIES:
+            return
+        store.init_store(db_path)
+        if db_path.exists():
+            identity = (str(db_path.resolve()), db_path.stat().st_ino)
+            _MONITOR_STORE_IDENTITIES[identity] = True
+            while len(_MONITOR_STORE_IDENTITIES) > 8:
+                _MONITOR_STORE_IDENTITIES.popitem(last=False)
+
+
 def _collector_tick(config: dict[str, Any]) -> None:
     global _LAST_PURGE_AT, _LAST_COLLECTOR_TICK_AT
     settings = get_monitoring_settings(config)
     ops_store = _import_ops_store(config)
     db_path = resolve_ops_store_path(config)
     try:
-        ops_store.init_store(db_path)
+        _ensure_monitor_store(ops_store, db_path)
     except Exception as exc:  # noqa: BLE001
         _logger.warning("monitoring collector init_store failed: %s", exc)
 
@@ -1759,7 +1769,8 @@ def _collector_tick(config: dict[str, Any]) -> None:
             )
         except Exception as exc:  # noqa: BLE001
             _logger.warning("monitoring purge failed: %s", exc)
-        _LAST_PURGE_AT = now
+        else:
+            _LAST_PURGE_AT = now
 
     categories = settings.get("enabledCategories") or {}
     pg_interval = float(settings.get("pgSnapshotIntervalSec") or 300)
@@ -1831,7 +1842,7 @@ def _availability_tick(config: dict[str, Any]) -> None:
         return
     store = _import_ops_store(config)
     db_path = resolve_ops_store_path(config)
-    store.init_store(db_path)
+    _ensure_monitor_store(store, db_path)
     envs = [env for env in ENV_ORDER if isinstance(config.get(env), dict) and config[env].get("enabled", True)]
     # One slow environment cannot delay the other probes. The coordinator still
     # enforces its shared concurrency limit and single-flight per environment.
@@ -3919,6 +3930,9 @@ def build_monitoring_api_recent(
             "since": live.get("since"),
             "until": live.get("until"),
             "sampleCount": live.get("sampleCount", 0),
+            "sampleCountExact": live.get("sampleCountExact", True),
+            "returnedCount": len(live.get("samples") or []),
+            "hasMore": live.get("hasMore"),
             "sampling": live.get("sampling") or {},
             "samples": live.get("samples") or [],
             "source": "live",
