@@ -89,6 +89,13 @@
             <p id="lock-error" class="lock-error" role="alert" hidden></p>
             <button type="submit" class="btn btn-primary lock-submit">Desbloquear</button>
           </form>
+          <button type="button" id="btn-teams-recovery" class="btn btn-secondary hidden">Solicitar recuperacao pelo Teams</button>
+          <form id="teams-recovery-form" class="lock-form hidden">
+            <label for="teams-recovery-code">Codigo enviado ao Recovery OP</label>
+            <input id="teams-recovery-code" type="text" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" autocomplete="one-time-code" required />
+            <button type="submit" class="btn btn-primary">Validar codigo</button>
+          </form>
+          <p id="teams-recovery-status" role="status" aria-live="polite"></p>
         </div>
       </div>
 
@@ -298,6 +305,6 @@
     <script src="/js/router.js?v=20261123-monitoring-sidebar"></script>
     <script src="/js/history.js"></script>
     <script src="/js/render.js?v=20261118-overview"></script>
-    <script src="/js/app.js?v=20261118-overview"></script>
+    <script src="/js/app.js?v=20261124-teams-code"></script>
   </body>
 </html>

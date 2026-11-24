@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import server_ops
+import server_recovery
 import server_db
 import server_host
 import server_monitoring
@@ -65,9 +66,9 @@ def get_ops_console_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 def get_session_secret() -> str:
     secret = os.environ.get("OPS_SESSION_SECRET", "").strip()
-    if secret:
+    if len(secret) >= 32:
         return secret
-    return "pplid-ops-dev-change-me"
+    raise RuntimeError("OPS_SESSION_SECRET obrigatorio: minimo 32 caracteres")
 
 
 def sign_session_payload(payload: dict[str, Any]) -> str:
@@ -98,6 +99,14 @@ def parse_session_cookie(cookie_value: str | None) -> dict[str, Any] | None:
         payload = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, ValueError):
         return None
+    if payload.get("version") != 2 or payload.get("authSource") not in ("django", "recovery", "teams_recovery"):
+        return None
+    if payload.get("authSource") == "recovery":
+        recovery = read_recovery()
+        if not recovery or recovery.get("id") != payload.get("recoveryId"):
+            return None
+    if payload.get("authSource") == "teams_recovery" and not recovery_store().valid_session(payload.get("requestId", "")):
+        return None
     exp = payload.get("exp")
     if exp is not None and time.time() > float(exp):
         return None
@@ -116,7 +125,10 @@ def build_session_payload(
     locked: bool,
     config: dict[str, Any],
 ) -> dict[str, Any]:
+    recovery = read_recovery() if auth_source == "recovery" else None
     return {
+        "version": 2,
+        "recoveryId": recovery.get("id") if recovery else None,
         "username": username,
         "displayName": display_name,
         "authSource": auth_source,
@@ -130,24 +142,29 @@ def try_bootstrap_login(
     username: str,
     password: str,
 ) -> dict[str, Any] | None:
-    bootstrap = get_ops_console_settings(config).get("bootstrapAuth") or {}
-    if not bootstrap.get("enabled"):
-        return None
-    expected_user = (bootstrap.get("username") or "admin1").strip()
-    expected_pass = (
-        os.environ.get("OPS_BOOTSTRAP_PASSWORD", "").strip()
-        or bootstrap.get("password")
-        or ""
-    )
-    if secrets.compare_digest(username.strip(), expected_user) and secrets.compare_digest(
-        password, expected_pass
-    ):
-        return {
-            "username": expected_user,
-            "displayName": "Administrador (bootstrap)",
-            "authSource": "bootstrap",
-        }
+    recovery = read_recovery()
+    if recovery and secrets.compare_digest(username, "recovery") and secrets.compare_digest(hashlib.sha256(password.encode()).hexdigest(), recovery["passwordHash"]):
+        return {"username": "recovery", "displayName": "Recuperacao emergencial", "authSource": "recovery"}
     return None
+
+
+def read_recovery() -> dict[str, Any] | None:
+    try:
+        data = json.loads((OPS_REPO_ROOT / "data" / "emergency-access.json").read_text(encoding="utf-8"))
+        if data["expiresAt"] > time.time() and isinstance(data["passwordHash"], str):
+            return data
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def recovery_store():
+    return server_recovery.RecoveryStore(OPS_REPO_ROOT / "data" / "teams-recovery.sqlite3")
+
+
+def teams_recovery_settings():
+    webhook = os.environ.get("OPS_RECOVERY_TEAMS_WEBHOOK_URL", "").strip()
+    return os.environ.get("OPS_RECOVERY_TEAMS_ENABLED") == "true" and webhook.startswith("https://"), webhook
 
 
 def validate_django_login(
@@ -195,6 +212,9 @@ def validate_django_login(
     except (urllib.error.URLError, json.JSONDecodeError, OSError):
         return None
 
+    if "adm_portal" not in (data.get("access") or {}).get("roles", []):
+        return None
+
     display_name = data.get("display_name") or data.get("username") or username
     return {
         "username": data.get("username") or username,
@@ -204,10 +224,18 @@ def validate_django_login(
 
 
 def resolve_auth_backend(config: dict[str, Any]) -> str | None:
-    ops = get_ops_console_settings(config)
-    env_name = (ops.get("authEnv") or "MAIN").upper()
-    env_cfg = config.get(env_name, {})
-    return env_cfg.get("apiBaseUrl")
+    env_cfg = config.get("MAIN") or {}
+    explicit = env_cfg.get("apiBaseUrl")
+    if explicit:
+        return explicit.rstrip("/")
+    port = env_cfg.get("backendPort")
+    if port is None:
+        return None
+    try:
+        port = int(port)
+    except (ValueError, TypeError):
+        return None
+    return f"http://127.0.0.1:{port}" if 1 <= port <= 65535 else None
 
 
 def authenticate_unlock(
@@ -240,7 +268,8 @@ def auth_status_from_session(
             "user": None,
             "authSource": None,
             "idleLockMinutes": int(ops.get("idleLockMinutes", 15)),
-            "bootstrapEnabled": bool(bootstrap.get("enabled")),
+            "bootstrapEnabled": False,
+            "teamsRecoveryEnabled": teams_recovery_settings()[0],
         }
 
     locked = bool(session.get("locked", True))
@@ -253,7 +282,8 @@ def auth_status_from_session(
         },
         "authSource": session.get("authSource"),
         "idleLockMinutes": int(ops.get("idleLockMinutes", 15)),
-        "bootstrapEnabled": bool(bootstrap.get("enabled")),
+        "bootstrapEnabled": False,
+            "teamsRecoveryEnabled": teams_recovery_settings()[0],
     }
 
 
@@ -1298,7 +1328,56 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             locked=False,
             config=self.config,
         )
+        if session.get("authSource") == "teams_recovery":
+            payload["requestId"] = session.get("requestId")
+            payload["exp"] = session["exp"]
         self._send_json(auth_status_from_session(payload, self.config), set_session=payload)
+
+    def _handle_teams_recovery(self, action):
+        enabled, webhook = teams_recovery_settings()
+        if not enabled:
+            self._send_json({"error": "Recuperacao Teams nao configurada"}, status=503)
+            return
+        body = self._read_json_body()
+        if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+            self._send_json({"error": "Content-Type invalido"}, status=415)
+            return
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).netloc != self.headers.get("Host"):
+            self._send_json({"error": "Origem invalida"}, status=403)
+            return
+        store = recovery_store()
+        try:
+            if action != "request":
+                required = ("requestId", "browserToken", "code")
+                if any(not isinstance(body.get(key), str) or not body[key] or len(body[key]) > 512 for key in required):
+                    raise server_recovery.RecoveryError("Dados invalidos")
+            if action == "request":
+                username = body.get("username", "")
+                if not isinstance(username, str) or not username or len(username) > 80 or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@._-" for c in username):
+                    raise server_recovery.RecoveryError("Informe um usuario valido")
+                request = store.create(username, self.client_address[0])
+                try:
+                    server_recovery.send_request(webhook, request, username)
+                except Exception:
+                    store.cancel(request["id"])
+                    server_ops.audit_log(self.config, username, "recovery_delivery_failed", request["id"])
+                    self._send_json({"error": "Nao foi possivel enviar ao Teams"}, status=502)
+                    return
+                server_ops.audit_log(self.config, username, "recovery_requested", request["id"])
+                self._send_json({"requestId": request["id"], "browserToken": request["browserToken"]})
+            else:
+                result = store.consume(body["requestId"], body["browserToken"], body["code"])
+                if result["state"] == "approved":
+                    payload = build_session_payload(result["username"], result["username"] + " (emergencial)", "teams_recovery", False, self.config)
+                    payload.update(requestId=body["requestId"], exp=result["expires"])
+                    server_ops.audit_log(self.config, result["username"], "recovery_session_started", body["requestId"])
+                    self._send_json(auth_status_from_session(payload, self.config), set_session=payload)
+                else:
+                    server_ops.audit_log(self.config, "unknown", "recovery_code_rejected", body["requestId"])
+                    self._send_json(result, status=400)
+        except (server_recovery.RecoveryError, KeyError, TypeError, ValueError):
+            self._send_json({"error": "Solicitacao invalida, expirada ou limite de tentativas atingido"}, status=400)
 
     def _handle_auth_unlock(self) -> None:
         body = self._read_json_body()
@@ -1325,6 +1404,7 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             locked=False,
             config=self.config,
         )
+        server_ops.audit_log(self.config, auth["username"], "auth_login", auth["authSource"])
         status_payload = auth_status_from_session(payload, self.config)
         self._send_json(status_payload, set_session=payload)
 
@@ -1341,6 +1421,9 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
             locked=True,
             config=self.config,
         )
+        if session.get("authSource") == "teams_recovery":
+            payload["requestId"] = session.get("requestId")
+            payload["exp"] = session["exp"]
         self._send_json(auth_status_from_session(payload, self.config), set_session=payload)
 
     def _session_username(self) -> str:
@@ -1792,6 +1875,9 @@ class OpsConsoleHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path in ("/api/v1/auth/recovery/request", "/api/v1/auth/recovery/verify"):
+            self._handle_teams_recovery(path.rsplit("/", 1)[-1])
+            return
         if path == "/api/v1/auth/unlock":
             self._handle_auth_unlock()
             return
@@ -2549,6 +2635,7 @@ def run_server(host: str, port: int, config_path: Path) -> None:
     if not config_path.is_file():
         raise FileNotFoundError(f"Config nao encontrada: {config_path}")
 
+    get_session_secret()
     config = load_config(config_path)
     config["_configPath"] = str(config_path)
     OpsConsoleHandler.config = config

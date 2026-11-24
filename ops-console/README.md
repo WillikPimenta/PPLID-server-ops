@@ -110,7 +110,7 @@ Na primeira execução, o launcher cria automaticamente:
 
 O console local escuta somente em `127.0.0.1:5191`, portanto não conflita com a
 instância do servidor (`5190`) e não expõe a máquina na rede. Acesse
-`http://localhost:5191` (usuário inicial `admin1`, senha `admin`).
+`http://localhost:5191` com sua conta administrativa do MAIN.
 
 Essa instância é independente: ela monitora apenas os processos, arquivos e
 bancos configurados no computador local. Para mudar a porta ou os ambientes,
@@ -129,16 +129,7 @@ O console inicia **bloqueado** (`opsConsole.startLocked` em `env.config.json`). 
 
 ### Autenticação
 
-1. **Bootstrap (testes)** — se `bootstrapAuth.enabled: true`:
-   - Usuário: `admin1`
-   - Senha: `admin` (ou `OPS_BOOTSTRAP_PASSWORD` em `.env.local`)
-   - Banner *Modo teste (bootstrap)* no canto da tela.
-
-2. **Django (produção)** — valida contra o backend definido em `opsConsole.authEnv` (ex.: `MAIN` → porta 8000).
-
-Ordem: tenta bootstrap primeiro; se falhar, tenta Django.
-
-**Produção:** defina `bootstrapAuth.enabled: false` e use `OPS_SESSION_SECRET` forte em `.env.local` (copie de `.env.local.example`).
+O acesso exige RBAC `adm_portal` no MAIN. Consulte a secao de recuperacao ao final.
 
 ### APIs protegidas
 
@@ -281,3 +272,60 @@ Arquivos `.env` nunca são copiados para os bundles. O supervisor carrega o arqu
 autoritativo `deploy\<ENV>\shared\backend.env` do banco congelado no início do run.
 
 O arquivo `deploy-status.json` (em `C:\PPLID\logs\`) é atualizado pelos scripts de deploy e sync. O console cruza com `/api/v1/health/` de cada ambiente.
+
+
+### Acesso administrativo e recuperacao
+
+O login exige o perfil RBAC `adm_portal` no MAIN. Bootstrap legado foi removido.
+Configure `OPS_SESSION_SECRET` com pelo menos 32 caracteres aleatorios em `.env.local`
+antes de reiniciar. Sessoes anteriores sao invalidadas.
+
+No PowerShell do servidor, a partir da pasta `ops-console`:
+
+```powershell
+.\.venv\Scripts\python.exe tools/emergency_access.py enable --minutes 30
+.\.venv\Scripts\python.exe tools/emergency_access.py disable
+```
+
+A ativacao mostra uma senha aleatoria para o usuario `recovery`. O arquivo local
+armazena apenas seu hash; expira em no maximo 60 minutos. Expirar, desativar ou
+reativar revoga tambem sessoes emergenciais abertas, inclusive com heartbeat.
+Proteja a pasta `ops/data` com ACL para operadores autorizados e a conta do servico.
+Ativacoes sao registradas em `ops/data/emergency-access-audit.log`; logins e acoes
+usam a auditoria local do console, independente do Postgres.
+
+
+### Recuperacao por codigo no Teams
+
+O login normal continua exigindo `adm_portal` no MAIN. A recuperacao depende dos
+responsaveis com acesso ao canal Recovery OP, sem consultar Portal ou Postgres.
+O usuario informado e declaratorio: confirme a identidade do solicitante e o ID
+do pedido antes de entregar o codigo. Adicionar membros ao canal concede esse
+poder de recuperacao. O console nao registra quem entregou o codigo no Teams.
+
+No `.env.local`, configure `OPS_RECOVERY_TEAMS_WEBHOOK_URL` e
+`OPS_RECOVERY_TEAMS_ENABLED=true`. `OPS_SESSION_SECRET` deve ter ao menos 32
+caracteres aleatorios. Nenhuma URL de callback, SharePoint ou segredo adicional
+e necessario. Apenas saida HTTPS para o webhook. Reinicie o console para carregar.
+
+No Power Automate, no ramo False > For each, mantenha somente a acao original
+`Post card in a chat or channel`, com o conteudo dinamico do attachment atual.
+Exclua a acao adicionada `Post adaptive card and wait for a response`, que ainda
+contem o cartao fixo de teste. Salve o fluxo. O payload enviado pelo console ja
+contem o cartao completo, sem botoes de aprovacao.
+
+Na tela bloqueada: informe o usuario, clique em solicitar recuperacao e confira
+o ID do pedido com os responsaveis do canal. Digite o codigo de oito digitos no
+mesmo navegador. Nao recarregue a pagina antes de concluir. O codigo expira em
+10 minutos, bloqueia apos cinco erros e so funciona uma vez. A sessao dura
+30 minutos e o heartbeat nao estende esse prazo.
+
+O estado fica em `ops/data/teams-recovery.sqlite3` com hashes do segredo do
+navegador e do codigo (HMAC vinculado ao segredo do navegador). Solicitacao e
+consumo geram auditoria local. Existe limite por IP e global para solicitacoes.
+A recusa do Teams ou falha de entrega cancela o pedido. HTTP 202 confirma apenas
+que o webhook recebeu; verifique tambem o historico do fluxo e o canal.
+
+Rotas POST: `/api/v1/auth/recovery/request` e `/api/v1/auth/recovery/verify`.
+As rotas anteriores de callback/status foram removidas. A recuperacao local por
+PowerShell continua disponivel para indisponibilidade do Teams.
