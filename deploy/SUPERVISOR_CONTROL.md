@@ -64,7 +64,7 @@ controlado e reconexão das sessões em memória. Esse limite deliberado evita
 expulsar IDs antigos e executar novamente um retry tardio.
 
 Validação: `python -m unittest apps.automacoes.tests.test_supervisor_control -v`
-no backend (Windows, Django desnecessário para essa suite) e
+no backend (Windows, dependências Django da release e SQLite sintético) e
 `python -m pytest tests/bluegreen/test_background.py tests/bluegreen/test_worker_drain.py -q`
 em operações. Os testes usam processos e workers sintéticos, sem navegador,
 credenciais reais, banco corporativo ou trabalho externo.

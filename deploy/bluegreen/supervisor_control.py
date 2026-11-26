@@ -131,6 +131,7 @@ class CommandIdentityMiddleware:
         # not trust arbitrary serialized objects or caller-selected actor IDs.
         identity = supplied if supplied and len(supplied) <= 80 and supplied.isascii() else uuid.uuid4().hex
         actor = getattr(getattr(request, "user", None), "pk", None)
+        actor = str(actor) if actor is not None else None
         scoped = hashlib.sha256(_json([actor, request.method, request.path, identity])).hexdigest()
         marker = _request_id.set(scoped)
         generation_marker = _generation.set(request.headers.get("X-Pplid-Executor-Generation") or None)
@@ -160,7 +161,8 @@ class RemoteService:
             # the executor, after the ordinary HTTP permission checks.
             if "user" in kwargs:
                 actor = kwargs.pop("user")
-                kwargs["_actor_id"] = getattr(actor, "pk", None)
+                actor_id = getattr(actor, "pk", None)
+                kwargs["_actor_id"] = str(actor_id) if actor_id is not None else None
             key = _request_id.get()
             result = self.call(method, args, kwargs, command_id=(key + ":" + self.service + ":" + method) if key else None)
             return Path(result) if method == "log_file_path" and result is not None else result
