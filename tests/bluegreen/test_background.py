@@ -16,7 +16,8 @@ def install_synthetic_jobs(config, sha):
     backend = config.release(sha) / 'backend'
     settings = backend / 'config/settings.py'
     settings.write_text(settings.read_text() + "\nINSTALLED_APPS=['samplejobs']\n")
-    for relative in ('samplejobs', 'samplejobs/management', 'samplejobs/management/commands', 'apps', 'apps/automacoes'):
+    for relative in ('samplejobs', 'samplejobs/management', 'samplejobs/management/commands', 'apps', 'apps/automacoes',
+                     'apps/controle_sla', 'apps/controle_sla/services'):
         directory = backend / relative
         directory.mkdir(parents=True, exist_ok=True)
         (directory / '__init__.py').write_text('')
@@ -46,7 +47,34 @@ class Manager:
     def stop_all(self): raise AssertionError('Forced legacy stop must never be called by deploy')
 def get_robot_manager(): return Manager()
 ''')
+    (backend / 'apps/controle_sla/services/poller.py').write_text('''class Poller:
+    def status(self): return {'synthetic': True}
+def get_poller(): return Poller()
+''')
+    (backend / 'apps/automacoes/controle_sla_bridge.py').write_text('# Synthetic bridge; no browser jobs.\n')
     return backend
+
+
+def test_legacy_worker_contract_and_missing_control_bridge_are_refused(laboratory, make_release):
+    from deploy.bluegreen.worker_control import CONTRACT, controller
+    config, manager, _ = laboratory
+    sha = make_release(config, 'a')
+    release = config.release(sha)
+    contract_file = release / 'scripts/deploy/bluegreen-workers-contract.json'
+    legacy = dict(CONTRACT)
+    legacy.pop('supervisorControl')
+    atomic_json(contract_file, legacy)
+    with pytest.raises(RuntimeError, match='supervisor control'):
+        manager.prepare(sha)
+    atomic_json(contract_file, CONTRACT)
+    bridge = release / 'backend/apps/automacoes/supervisor_control.py'
+    original = bridge.read_text()
+    bridge.unlink()
+    with pytest.raises(RuntimeError, match='physical release file'):
+        controller(release, config.directory / 'worker-control')
+    bridge.write_text(original + '\n# incompatible implementation\n')
+    with pytest.raises(RuntimeError, match='supervisor control differs'):
+        controller(release, config.directory / 'worker-control')
 
 
 def test_background_singleton_identity_restart_and_web_isolation(laboratory, make_release):

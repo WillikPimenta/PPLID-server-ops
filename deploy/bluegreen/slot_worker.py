@@ -21,7 +21,8 @@ def write_json(path: Path, value: dict):
     os.replace(temporary, path)
 
 
-def load_environment(backend: Path, runtime: Path, *, web_only=True, worker_control=None, worker_owner=None):
+def load_environment(backend: Path, runtime: Path, *, web_only=True, worker_control=None, worker_owner=None,
+                     supervisor_control=None, environment=None):
     # django-environ is an existing application dependency. Its parser handles
     # quoted values consistently with the application itself.
     import environ
@@ -35,6 +36,11 @@ def load_environment(backend: Path, runtime: Path, *, web_only=True, worker_cont
         overrides += "PPLID_WORKER_CONTROL_DIR=" + str(worker_control) + "\n"
     if worker_owner:
         overrides += "PPLID_WORKER_OWNER=" + str(worker_owner) + "\n"
+    # Keep these in the snapshot too: application bootstrap rereads it.
+    if supervisor_control:
+        overrides += "PPLID_SUPERVISOR_CONTROL_FILE=" + str(supervisor_control) + "\n"
+    if environment:
+        overrides += "PPLID_ENVIRONMENT=" + str(environment) + "\n"
     snapshot.write_text(source.read_text(encoding="utf-8-sig") + overrides, encoding="utf-8")
     environ.Env.read_env(snapshot, overwrite=True)
     os.environ["PPLID_BACKEND_ENV_FILE"] = str(snapshot)
@@ -105,7 +111,8 @@ def initialize(spec: dict, *, prepare_static=False):
     sys.path.insert(0, str(backend))
     os.chdir(backend)
     load_environment(backend, Path(spec["stopFile"]).parent, worker_control=spec.get("workerControlDir"),
-                     worker_owner=spec.get("instanceId"))
+                     worker_owner=spec.get("instanceId"), supervisor_control=spec.get("supervisorControlFile"),
+                     environment=spec.get("environment"))
     os.environ["PPLID_ENVIRONMENT"] = spec["environment"]
     os.environ["PPLID_DEPLOYED_SHA_FILE"] = spec["shaFile"]
     # Never inherit a global deployment marker for candidate identity.

@@ -133,7 +133,13 @@ def application(environ, start_response):
         (protocol_dir.parent / '__init__.py').write_text('')
         (protocol_dir / '__init__.py').write_text('')
         shutil.copyfile(ROOT / 'deploy/bluegreen/worker_protocol.py', protocol_dir / 'worker_drain.py')
+        bridge = backend / 'apps/automacoes'
+        bridge.mkdir(parents=True)
+        (bridge.parent / '__init__.py').write_text('')
+        (bridge / '__init__.py').write_text('')
+        shutil.copyfile(ROOT / 'deploy/bluegreen/supervisor_control.py', bridge / 'supervisor_control.py')
         atomic_json(release / 'scripts/deploy/bluegreen-workers-contract.json', {
-            'schemaVersion': 1, 'admission': 'app.core.worker_drain', 'shutdown': 'drain-without-termination'})
+            'schemaVersion': 1, 'admission': 'app.core.worker_drain', 'shutdown': 'drain-without-termination',
+            'supervisorControl': 'account-json-v1'})
         return sha[:8]
     return make

@@ -23,7 +23,8 @@ def main():
     sys.path.insert(0, str(Path(spec["release"]) / "automacoes"))
     os.chdir(backend)
     load_environment(backend, args.spec.parent, web_only=False, worker_control=spec["workerControlDir"],
-                     worker_owner=spec['instanceId'])
+                     worker_owner=spec['instanceId'], supervisor_control=spec.get('supervisorControlFile'),
+                     environment=spec['environment'])
     os.environ["PPLID_ENVIRONMENT"] = spec["environment"]
     os.environ["DJANGO_SETTINGS_MODULE"] = "config.settings"
     # Existing apps use this heuristic. In this dedicated process it is
@@ -36,11 +37,15 @@ def main():
         control = drain.Controller(spec["workerControlDir"], spec['instanceId'])
         control.open(spec["instanceId"])
         startup_error = None
+        bridge = None
         try:
             import django
             django.setup()
             from django.core.management import call_command
             from django.db import close_old_connections
+            from supervisor_control import start_executor_control
+            bridge = start_executor_control(spec['supervisorControlFile'], spec['environment'],
+                                            spec['instanceId'], control.requested)
             write_json(Path(spec["readyFile"]), {"ready": True, "sha": spec["sha"],
                        "instanceId": spec["instanceId"], "pid": os.getpid()})
             while not Path(spec["stopFile"]).exists() and not control.requested():
@@ -60,6 +65,8 @@ def main():
             logging.exception('Background supervisor failed; closing admission and draining')
         finally:
             control.request(spec["instanceId"])
+            if bridge:
+                bridge.close()
         # All scheduler loops stop admitting cycles. Existing units and their
         # process leases stay alive until work and cleanup finish naturally.
         while True:

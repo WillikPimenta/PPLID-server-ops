@@ -75,11 +75,10 @@ class Manager:
             raise RuntimeError("Application web-only contract v1 is required")
         if not (release / "frontend/dist/index.html").is_file():
             raise RuntimeError("Missing frontend build")
-        if (self.config.directory / 'background.json').exists():
-            # A rollback must not reintroduce web entrypoints which ignore the
-            # shared admission gate while a cooperative worker record exists.
-            from .worker_control import controller
-            controller(release, self.config.directory / 'worker-control')
+        # Both initial activation and rollback require web facades that reach
+        # the independent executor; web-only flags alone are insufficient.
+        from .worker_control import controller
+        controller(release, self.config.directory / 'worker-control')
         return full
 
     def publish_assets(self, release: Path):
@@ -231,6 +230,7 @@ class Manager:
                 "shaFile": str(directory / "deployed.json"),
                 "trafficFile": str(self.config.directory / "traffic.json"),
                 "workerControlDir": str(self.config.directory / "worker-control"),
+                "supervisorControlFile": str(self.config.directory / "supervisor-control.json"),
                 "assetsDirectory": str(self.config.assets / "assets"),
                 "drainSeconds": self.config.timeouts["drainSeconds"]}
         atomic_json(Path(slot["shaFile"]), {"sha": sha, "shaFull": full_sha, "deployedSha": sha,
@@ -609,6 +609,7 @@ class Manager:
         directory = self.config.directory / "background" / instance
         directory.mkdir(parents=True, exist_ok=True)
         spec = {"release": str(release), "sha": sha, "environment": self.config.environment, "instanceId": instance,
+                "supervisorControlFile": str(self.config.directory / "supervisor-control.json"),
                 "protocol": "worker-drain-v1", "workerControlDir": str(self.config.directory / "worker-control"),
                 "stopFile": str(directory / "stop"), "shaFile": str(directory / "deployed.json"),
                 "readyFile": str(directory / "ready.json"), "stoppedFile": str(directory / "stopped.json"),

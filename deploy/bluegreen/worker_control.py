@@ -5,13 +5,14 @@ from pathlib import Path
 from .store import read_json
 from .worker_protocol import Controller
 
-CONTRACT = {'schemaVersion': 1, 'admission': 'app.core.worker_drain', 'shutdown': 'drain-without-termination'}
+CONTRACT = {'schemaVersion': 1, 'admission': 'app.core.worker_drain', 'shutdown': 'drain-without-termination',
+            'supervisorControl': 'account-json-v1'}
 
 
 def controller(release, directory):
     release = Path(release).resolve()
     if read_json(release / 'scripts/deploy/bluegreen-workers-contract.json') != CONTRACT:
-        raise RuntimeError('Cooperative worker drain contract v1 is required')
+        raise RuntimeError('Cooperative worker drain and supervisor control account-json-v1 contracts are required')
     source = release / 'automacoes/app/core/worker_drain.py'
     if not source.is_file() or source.is_symlink() or not source.resolve().is_relative_to(release):
         raise RuntimeError('Worker admission protocol must be a physical release file')
@@ -21,6 +22,11 @@ def controller(release, directory):
     normalize = lambda path: path.read_bytes().replace(b'\r\n', b'\n')
     if hashlib.sha256(normalize(source)).digest() != hashlib.sha256(normalize(canonical)).digest():
         raise RuntimeError('Application worker protocol differs from the reviewed ops version')
+    bridge = release / 'backend/apps/automacoes/supervisor_control.py'
+    if not bridge.is_file() or bridge.is_symlink() or not bridge.resolve().is_relative_to(release):
+        raise RuntimeError('Supervisor control must be a physical release file')
+    if hashlib.sha256(normalize(bridge)).digest() != hashlib.sha256(normalize(Path(__file__).with_name('supervisor_control.py'))).digest():
+        raise RuntimeError('Application supervisor control differs from the reviewed ops version')
     return Controller(directory)
 
 
