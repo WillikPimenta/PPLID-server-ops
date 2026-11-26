@@ -21,7 +21,7 @@ def write_json(path: Path, value: dict):
     os.replace(temporary, path)
 
 
-def load_environment(backend: Path, runtime: Path, *, web_only=True):
+def load_environment(backend: Path, runtime: Path, *, web_only=True, worker_control=None, worker_owner=None):
     # django-environ is an existing application dependency. Its parser handles
     # quoted values consistently with the application itself.
     import environ
@@ -30,6 +30,11 @@ def load_environment(backend: Path, runtime: Path, *, web_only=True):
     # Point it to an instance snapshot containing mandatory web-only overrides.
     snapshot = runtime / "backend.env"
     overrides = "\nPPLID_WEB_ONLY=1\nBI_SYNC_SCHEDULER_AUTOSTART=False\n" if web_only else "\nPPLID_WEB_ONLY=0\n"
+    overrides += "PPLID_SUPERVISOR_PID=" + ("0" if web_only else str(os.getpid())) + "\n"
+    if worker_control:
+        overrides += "PPLID_WORKER_CONTROL_DIR=" + str(worker_control) + "\n"
+    if worker_owner:
+        overrides += "PPLID_WORKER_OWNER=" + str(worker_owner) + "\n"
     snapshot.write_text(source.read_text(encoding="utf-8-sig") + overrides, encoding="utf-8")
     environ.Env.read_env(snapshot, overwrite=True)
     os.environ["PPLID_BACKEND_ENV_FILE"] = str(snapshot)
@@ -96,9 +101,11 @@ class WebApplication:
 
 def initialize(spec: dict, *, prepare_static=False):
     backend = Path(spec["release"]) / "backend"
+    sys.path.insert(0, str(Path(spec['release']) / 'automacoes'))
     sys.path.insert(0, str(backend))
     os.chdir(backend)
-    load_environment(backend, Path(spec["stopFile"]).parent)
+    load_environment(backend, Path(spec["stopFile"]).parent, worker_control=spec.get("workerControlDir"),
+                     worker_owner=spec.get("instanceId"))
     os.environ["PPLID_ENVIRONMENT"] = spec["environment"]
     os.environ["PPLID_DEPLOYED_SHA_FILE"] = spec["shaFile"]
     # Never inherit a global deployment marker for candidate identity.
@@ -177,17 +184,31 @@ def main():
         while not Path(spec["stopFile"]).exists():
             time.sleep(.1)
         draining.set()
-        deadline = time.monotonic() + spec["drainSeconds"]
-        while time.monotonic() < deadline:
+        control = None
+        if spec.get('workerControlDir') and (Path(spec['workerControlDir']) / 'state.json').exists():
+            # Close only this web instance's admissions. Other slots and the
+            # independent supervisor continue accepting their own work.
+            from worker_protocol import Controller
+            control = Controller(spec['workerControlDir'], spec['instanceId'])
+        retired = False
+        while True:
             with wrapped.lock:
                 active = wrapped.active + frontend.active
-            if not active:
+            try:
+                if control and not retired:
+                    control.retire(spec['instanceId'])
+                    retired = True
+                own_units = [unit for unit in control.status()['units'] if unit['group'] == spec['instanceId']] if control else []
+            except Exception:
+                # An unreadable lease is not proof of completion.
+                time.sleep(.2)
+                continue
+            if not active and not own_units:
                 # Graceful process exit after application iterables are closed.
                 server.close()
                 frontend_server.close()
                 os._exit(0)
             time.sleep(.1)
-        # Keep serving the existing work; the manager reports the timeout.
     threading.Thread(target=retire, daemon=True).start()
     server.run()
 

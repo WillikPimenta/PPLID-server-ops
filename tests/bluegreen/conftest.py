@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import socket
 import sys
+import shutil
+import secrets
 import time
 import venv
 
@@ -24,7 +26,16 @@ def unused_ports(count):
     streams = [socket.socket() for _ in range(count)]
     try:
         for stream in streams:
-            stream.bind(("127.0.0.1", 0))
+            # Keep future slot ports outside Windows' outbound dynamic pool.
+            # A port obtained with bind(0) can become a health-check/client
+            # source port before a later candidate is launched (WinError 10013).
+            for attempt in range(100):
+                try:
+                    stream.bind(("127.0.0.1", 12000 + secrets.randbelow(20000)))
+                    break
+                except OSError:
+                    if attempt == 99:
+                        raise
         return [stream.getsockname()[1] for stream in streams]
     finally:
         for stream in streams:
@@ -117,5 +128,12 @@ def application(environ, start_response):
         atomic_json(release / "meta.json", {"sha": sha[:8], "shaFull": sha, "built": True})
         atomic_json(release / "scripts/deploy/bluegreen-contract.json", {
             "schemaVersion": 1, "webOnlyFlag": "PPLID_WEB_ONLY", "backgroundWorkers": "independent"})
+        protocol_dir = release / 'automacoes/app/core'
+        protocol_dir.mkdir(parents=True)
+        (protocol_dir.parent / '__init__.py').write_text('')
+        (protocol_dir / '__init__.py').write_text('')
+        shutil.copyfile(ROOT / 'deploy/bluegreen/worker_protocol.py', protocol_dir / 'worker_drain.py')
+        atomic_json(release / 'scripts/deploy/bluegreen-workers-contract.json', {
+            'schemaVersion': 1, 'admission': 'app.core.worker_drain', 'shutdown': 'drain-without-termination'})
         return sha[:8]
     return make

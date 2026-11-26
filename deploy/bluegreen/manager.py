@@ -75,6 +75,11 @@ class Manager:
             raise RuntimeError("Application web-only contract v1 is required")
         if not (release / "frontend/dist/index.html").is_file():
             raise RuntimeError("Missing frontend build")
+        if (self.config.directory / 'background.json').exists():
+            # A rollback must not reintroduce web entrypoints which ignore the
+            # shared admission gate while a cooperative worker record exists.
+            from .worker_control import controller
+            controller(release, self.config.directory / 'worker-control')
         return full
 
     def publish_assets(self, release: Path):
@@ -225,6 +230,7 @@ class Manager:
                 "createdAt": utc(), "stopFile": str(directory / "stop"),
                 "shaFile": str(directory / "deployed.json"),
                 "trafficFile": str(self.config.directory / "traffic.json"),
+                "workerControlDir": str(self.config.directory / "worker-control"),
                 "assetsDirectory": str(self.config.assets / "assets"),
                 "drainSeconds": self.config.timeouts["drainSeconds"]}
         atomic_json(Path(slot["shaFile"]), {"sha": sha, "shaFull": full_sha, "deployedSha": sha,
@@ -570,29 +576,43 @@ class Manager:
                 raise RuntimeError("Traffic is active but current junction reconciliation failed; run recover")
 
     def workers_start(self, sha):
+        from .worker_control import controller, verify_stopped
         if self.config.bg.get("workersOwnershipConfirmed") is not True:
             raise RuntimeError("Confirm independent worker ownership in the migration runbook before starting business jobs")
         path = self.config.directory / "background.json"
         if path.exists():
             previous = read_json(path)
+            if previous.get('protocol') != 'worker-drain-v1':
+                raise RuntimeError('Legacy worker record requires an explicit reviewed migration')
             self.reconcile_background_process(previous)
             if previous.get("process") and processes.owned(previous["process"]):
-                if previous["sha"] != sha or Path(previous["stopFile"]).exists():
+                if (previous["sha"] != sha or previous.get('phase') == 'draining'
+                        or Path(previous["stopFile"]).exists()):
                     raise RuntimeError("Stop the owned background supervisor before changing its release")
                 self.wait_background(previous)
+                admission = controller(previous['release'], previous['workerControlDir']).status()
+                if admission['phase'] != 'open' or admission['instanceId'] != previous['instanceId']:
+                    raise RuntimeError('Background admission is closed; finish its shutdown before restarting')
                 previous["phase"] = "running"
                 atomic_json(path, previous)
                 return previous
             if previous.get("phase") != "stopped":
                 raise RuntimeError("Background exit is unconfirmed; inspect orphan jobs before replacing business workers")
+            verify_stopped(previous)
         release = self.config.release(sha)
         self.contract(release, sha)
+        control = controller(release, self.config.directory / "worker-control")
+        if self.config.state_path.exists():
+            for slot in self.read()['slots'].values():
+                controller(slot['release'], self.config.directory / 'worker-control')
         instance = uuid.uuid4().hex
         directory = self.config.directory / "background" / instance
         directory.mkdir(parents=True, exist_ok=True)
         spec = {"release": str(release), "sha": sha, "environment": self.config.environment, "instanceId": instance,
+                "protocol": "worker-drain-v1", "workerControlDir": str(self.config.directory / "worker-control"),
                 "stopFile": str(directory / "stop"), "shaFile": str(directory / "deployed.json"),
-                "readyFile": str(directory / "ready.json")}
+                "readyFile": str(directory / "ready.json"), "stoppedFile": str(directory / "stopped.json"),
+                "drainStatusFile": str(directory / "drain-status.json")}
         spec_path = directory / "spec.json"
         atomic_json(spec_path, spec)
         python = str(release / "backend/.venv/Scripts/python.exe")
@@ -603,6 +623,7 @@ class Manager:
                                      creationflags=subprocess.CREATE_NO_WINDOW)
         if checked.returncode:
             raise RuntimeError("Background schema preflight failed; no business jobs started")
+        control.initialize(instance)
         # Durable launch intent allows recovery of the lost PID-write window.
         record = {**spec, "process": None, "phase": "starting", "startedAt": utc()}
         atomic_json(path, record)
@@ -673,14 +694,28 @@ class Manager:
         return state
 
     def workers_stop(self):
+        from .worker_control import controller, verify_stopped
         path = self.config.directory / "background.json"
         record = read_json(path)
         self.reconcile_background_process(record)
         if record.get("phase") == "stopped":
+            verify_stopped(record)
             return record
-        if not record.get("process") or not processes.owned(record["process"]):
+        # A crash after a clean receipt but before saving the journal is safe
+        # to reconcile; an arbitrary dead PID is never confirmation of drain.
+        if record.get("stoppedFile") and Path(record["stoppedFile"]).exists():
+            verify_stopped(record)
+        elif not record.get("process") or not processes.owned(record["process"]):
             raise RuntimeError("Cannot confirm background shutdown; inspect orphan jobs before restarting")
-        processes.stop(record["process"], Path(record["stopFile"]), self.config.timeouts["commandSeconds"])
+        if record.get("protocol") != "worker-drain-v1":
+            raise RuntimeError("Legacy supervisor cannot drain cooperatively; explicit migration required")
+        control = controller(record["release"], record["workerControlDir"])
+        control.request(record["instanceId"])
+        record["phase"] = "draining"
+        atomic_json(path, record)
+        if record.get("process"):
+            processes.stop(record["process"], Path(record["stopFile"]), self.config.timeouts["commandSeconds"])
+        verify_stopped(record)
         record["stoppedAt"] = utc()
         record["phase"] = "stopped"
         atomic_json(path, record)

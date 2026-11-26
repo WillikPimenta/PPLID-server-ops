@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import secrets
 import socket
 import subprocess
 import sys
@@ -30,7 +31,13 @@ def free_ports(count):
     streams = [socket.socket() for _ in range(count)]
     try:
         for stream in streams:
-            stream.bind(('127.0.0.1', 0))
+            for attempt in range(100):
+                try:
+                    stream.bind(('127.0.0.1', 12000 + secrets.randbelow(20000)))
+                    break
+                except OSError:
+                    if attempt == 99:
+                        raise
         return [stream.getsockname()[1] for stream in streams]
     finally:
         for stream in streams:

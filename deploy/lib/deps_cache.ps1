@@ -7,6 +7,7 @@ function Get-PplidDepsFingerprintFromDir {
     $parts = @()
     foreach ($rel in @(
         "backend\requirements.txt",
+        "backend\requirements.deploy.constraints.txt",
         "frontend\package-lock.json",
         "frontend\package.json",
         "automacoes\pyproject.toml"
@@ -342,8 +343,14 @@ function Invoke-PplidPipInstall {
     )
 
     Initialize-PplidPipCache | Out-Null
-    $pipArgs = @("-m", "pip", "install") + $Args + @("--progress-bar", "off")
-    $cmdDisplay = "pip install " + ($Args -join " ")
+    $backendPath = Split-Path (Split-Path (Split-Path $VenvPython -Parent) -Parent) -Parent
+    $constraintsFile = Join-Path $backendPath 'requirements.deploy.constraints.txt'
+    $constraintArgs = @()
+    if (Test-Path -LiteralPath $constraintsFile) {
+        $constraintArgs = @('--constraint', $constraintsFile)
+    }
+    $pipArgs = @("-m", "pip", "install") + $constraintArgs + $Args + @("--progress-bar", "off")
+    $cmdDisplay = "pip install " + (($constraintArgs + $Args) -join " ")
 
     if ($Environment -and $RunId) {
         Write-DeployLogInfo -Environment $Environment -RunId $RunId -Message "Running: $cmdDisplay" -LogName $LogName
@@ -357,7 +364,7 @@ function Invoke-PplidPipInstall {
     New-Item -ItemType File -Path $stderrFile -Force | Out-Null
     $proc = Start-Process -FilePath $VenvPython -ArgumentList $pipArgs `
         -RedirectStandardOutput $outputFile -RedirectStandardError $stderrFile `
-        -NoNewWindow -PassThru
+        -WindowStyle Hidden -PassThru
 
     $lineOffset = 0
     $errOffset = 0
