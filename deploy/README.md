@@ -1,5 +1,9 @@
 # Pipeline de deploy Railway-like
 
+## Blue-green opt-in
+
+O modo legado continua sendo o padrão. A implementação por slots, seus limites, os comandos de laboratório e o procedimento de ativação estão em [BLUEGREEN.md](BLUEGREEN.md). Resultados e pendências: [VALIDACAO_BLUEGREEN.md](VALIDACAO_BLUEGREEN.md). Não ativar apenas alterando portas.
+
 ## Portas por ambiente
 
 | Ambiente | Branch | Backend | Frontend | PostgreSQL |
