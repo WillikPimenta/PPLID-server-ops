@@ -137,6 +137,8 @@ Não marcar a confirmação de ownership como forma de contornar uma verificaç�
 
 ## Primeira ativação autorizada
 
+O inventário e a limitação concreta de parada dos robôs estão em [INVENTARIO_WORKERS_BLUEGREEN.md](INVENTARIO_WORKERS_BLUEGREEN.md). O supervisor usa um diretório exclusivo por instância e readiness vinculado a SHA, instance ID e processo proprietário. Um novo start após parada confirmada cria outra instância; saída inesperada bloqueia substituição automática para evitar jobs duplicados. O readiness comprova conclusão dos hooks de Django, não saúde individual dos robôs.
+
 1. Homologar a aplicação, banco, sessões, rotas, carga e workers em ambiente isolado.
 2. Publicar as mudanças compatíveis dos dois repositórios conforme o fluxo normal da equipe; ainda em modo legado.
 3. Provisionar Caddy e configuração local, confirmar permissões e portas.
@@ -164,6 +166,8 @@ Se a etapa de liberação dos listeners legados ainda não tiver um procedimento
 7. Restaurar os gatilhos.
 
 ## Reprodução dos testes
+
+A revisão de prontidão e os bloqueios atuais estão em [PRONTIDAO_PRODUCAO_BLUEGREEN.md](PRONTIDAO_PRODUCAO_BLUEGREEN.md). Há dois harnesses adicionais, executados no laboratório: `python -m deploy.bluegreen.readiness_build --help` para build real de commit limpo com PostgreSQL descartável, e `python -m deploy.bluegreen.readiness_smoke --help` para promoção/rollback entre duas releases construídas, incluindo navegador opcional. Eles aceitam somente seus diretórios de laboratório, não a instalação em `C:\PPLID`. A retenção dos diretórios preserva evidências e consome disco; não confundir o esquema sintético preparado pelo smoke com migração online de produção.
 
 ```powershell
 python deploy/bluegreen/install_caddy.py .local/bluegreen-tools/caddy-2.11.9

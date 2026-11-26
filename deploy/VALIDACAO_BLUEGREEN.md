@@ -1,5 +1,7 @@
 # Validação do deploy blue-green
 
+> Revisão posterior do mesmo dia: correções, builds limpos e cobertura ampliada estão em [PRONTIDAO_PRODUCAO_BLUEGREEN.md](PRONTIDAO_PRODUCAO_BLUEGREEN.md). O total consolidado passou a 85 casos distintos aprovados. Os números de 65 casos e o laboratório com checkout sujo abaixo são evidências históricas da implementação inicial. A decisão de produção continua **NÃO LIBERADO**, pelos requisitos concretos abertos no relatório mais recente.
+
 Data: 26/11/2026. Ambiente: Windows, PowerShell 5.1.26100.9711, Python 3.12.4, conta sem administrador (`IsAdministrator=False`), Caddy oficial 2.11.9 Windows amd64.
 
 ## Resultado e escopo
@@ -91,29 +93,29 @@ Essas 605 migrações ocorreram em banco novo e isolado. Não comprovam compatib
 | T04 | Aprovado | Slots reais A/B com releases e portas distintas. |
 | T05 | Aprovado no laboratório | Retirada de slot inativo preserva o ativo. |
 | T06 | Aprovado | Identidade de PID divergente não autoriza encerramento. |
-| T07 | Parcial | Falha de preparação coberta por fronteira de subprocesso; candidata quebrada testada de fato. Falta build completo de nova versão em ambiente de homologação. |
+| T07 | Aprovado para build local; piloto pendente | Dois commits limpos passaram pelo pipeline real em venvs novas e PostgreSQL descartável. Candidata quebrada preserva a ativa. Falta piloto no servidor. |
 | T08 | Aprovado nos casos cobertos | Readiness/identidade e falha de startup bloqueiam publicação. |
 | T09 | Aprovado por contrato/verificação | SHA e instance ID conferidos antes/depois da troca. |
-| T10 | Parcial | 11 alternâncias sem falha de sonda; faltam carga representativa e meta formal de p95. |
+| T10 | Parcial | Alternâncias e ensaio curto com 150 clientes sintéticos: 11.151 requisições, zero erros. Faltam carga corporativa prolongada e comparação de p95 com baseline. |
 | T11 | Aprovado | Streaming iniciado antes da troca concluiu. |
-| T12 | Parcial | POST, corpo, cookies e streaming cobertos; falta matriz de upload/download volumosos e keep-alive prolongado. |
+| T12 | Parcial | POST, cookies, streaming, sessões persistentes e transferências HTTP de 6 MiB cobertos. Faltam endpoints de arquivos reais, limites máximos e keep-alive prolongado. |
 | T13 | Pendente/avaliar aplicabilidade | Não foi localizado uso de WebSocket/EventSource no código pesquisado; exports HTTP em streaming existem. Não foi homologado WebSocket em Waitress/WSGI. |
-| T14 | Aprovado nos ensaios HTTP e navegador | Login, sessão, CSRF, troca, rollback e logout no PPLID copiado e no Edge headless. |
-| T15 | Parcial | Chunk antigo preservado após terceira release; falta concluir o ensaio de navegação/lazy loading real. |
-| T16 | Pendente | Cliente antigo com contrato de API de release nova funcionalmente diferente. |
+| T14 | Aprovado nos ensaios HTTP e navegador | Login, sessão, CSRF, troca, rollback e logout no Edge, inclusive entre dois commits limpos diferentes. |
+| T15 | Parcial | Chunk antigo preservado após terceira release e chunks de duas releases limpas conferidos por hash. Falta navegação/lazy loading funcional completa. |
+| T16 | Parcial | Aba e sessão antigas atravessaram troca entre commits funcionais distintos nos endpoints de autenticação. Falta matriz dos demais contratos de API. |
 | T17 | Parcial | Roteamento e readiness públicos reais aprovados; falta matriz funcional de `/falhas/` com dados de homologação e clientes de rede. |
 | T18 | Aprovado nos casos cobertos | Reversão após cancelamento/observação e rollback aquecido. Tempo sob carga real pendente. |
 | T19 | Aprovado | Configuração inválida recusada e anterior preservada. |
-| T20 | Parcial | Intenção interrompida e queda do proxy cobertas; falta matar orquestrador em todos os pontos, incluindo build e launch de workers. |
+| T20 | Parcial | Intenção interrompida, queda do proxy e interrupção antes de gravar PID e antes/depois da troca aprovadas. Faltam todas as fronteiras de build e launch de workers de negócio. |
 | T21 | Aprovado nos casos cobertos | JSON corrompido bloqueia operação; gate com intenção é reconciliado. |
 | T22 | Aprovado para o mutex | Conflito entre processos Python e PowerShell comprovado. |
-| T23 | Parcial | Ações usam o mutex comum e operações legadas perigosas foram bloqueadas; falta stress concorrente de todas as combinações. |
+| T23 | Parcial | Mutex comum e gravação simultânea de status por MAIN/DEV/HOM comprovados; falta stress de todas as combinações operacionais. |
 | T24 | Aprovado | Cancelamento antes da troca e durante observação. |
 | T25 | Pendente para migração online | Política atual recusa pendências; expansão/contração real precisa de homologação separada. |
 | T26 | Aprovado de forma conservadora | Qualquer pendência de migração bloqueia a candidata. |
 | T27 | Parcial | Timeout SQL real de 250 ms no cluster descartável; não há coordenador de migrations online homologado. |
 | T28 | Parcial | Falha/pendência de esquema impede publicação; falta falha de migração real em cópia com duas versões. |
-| T29 | Parcial | Guards web-only e ownership implementados; starters dos robôs corporativos não foram executados nem homologados. |
+| T29 | Parcial; bloqueio de negócio | Infraestrutura do supervisor aprovada com jobs sintéticos. Starters reais não homologados; parada herdada usa encerramento forçado e precisa de contrato de drenagem. |
 | T30 | Parcial | Assets e releases registradas protegidos; falta ensaio completo do prune com todos os supervisors de negócio reais. |
 | T31 | Aprovado para preflight | Memória insuficiente recusa o início; carga e limites do host real pendentes. |
 | T32 | Aprovado no laboratório | Queda e recuperação de proxy proprietário testadas. |

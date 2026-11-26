@@ -4,6 +4,8 @@
 
 O modo legado continua sendo o padrão. A implementação por slots, seus limites, os comandos de laboratório e o procedimento de ativação estão em [BLUEGREEN.md](BLUEGREEN.md). Resultados e pendências: [VALIDACAO_BLUEGREEN.md](VALIDACAO_BLUEGREEN.md). Não ativar apenas alterando portas.
 
+Revisão mais recente para produção: [PRONTIDAO_PRODUCAO_BLUEGREEN.md](PRONTIDAO_PRODUCAO_BLUEGREEN.md), com 85 casos distintos aprovados, dois builds limpos, ensaio entre versões e bloqueadores restantes.
+
 ## Portas por ambiente
 
 | Ambiente | Branch | Backend | Frontend | PostgreSQL |
