@@ -52,3 +52,43 @@ def test_powershell_bridge_uses_explicit_machine_configuration(laboratory):
     payload = json.loads(result.stdout)
     assert payload['ok'] and payload['state']['phase'] == 'uninitialized'
     assert not config.state_path.exists()
+
+
+@pytest.mark.parametrize('override', ['machine', 'environment', 'missing'])
+def test_ops_store_respects_explicit_configuration(tmp_path, override):
+    machine = tmp_path / 'machine.json'
+    atomic_json(machine, {'baseDir': str(tmp_path)})
+    environment = dict(os.environ, OPS_MACHINE_CONFIG=str(machine))
+    environment.pop('PPLID_OPS_STORE_PATH', None)
+    expected = tmp_path / 'ops/data/ops-store.db'
+    if override == 'environment':
+        expected = tmp_path / 'explicit.db'
+        environment['PPLID_OPS_STORE_PATH'] = str(expected)
+    if override == 'missing':
+        environment['OPS_MACHINE_CONFIG'] = str(tmp_path / 'missing.json')
+    script = "$ErrorActionPreference='Stop'; . ./lib/ops_store.ps1; Get-OpsStoreDbPath"
+    result = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+                            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=15)
+    if override == 'missing':
+        assert result.returncode != 0
+        assert 'fallback' in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert Path(result.stdout.strip()) == expected
+
+
+def test_schema_plan_reports_real_pending_migrations(laboratory, make_release):
+    config, _, _ = laboratory
+    sha = make_release(config, 'a')
+    backend = config.release(sha) / 'backend'
+    settings = backend / 'config/settings.py'
+    settings.write_text(settings.read_text() + "\nINSTALLED_APPS=['django.contrib.contenttypes']\n")
+    (backend / 'manage.py').write_text("import os,sys\nos.environ['DJANGO_SETTINGS_MODULE']='config.settings'\nfrom django.core.management import execute_from_command_line\nexecute_from_command_line(sys.argv)\n")
+    environment = dict(os.environ, READINESS_BACKEND=str(backend),
+                       READINESS_PYTHON=str(backend / '.venv/Scripts/python.exe'))
+    script = ("$ErrorActionPreference='Stop'; . ./deploy/lib/backend_deploy.ps1; "
+              "Invoke-PplidBackendMigratePlan -BackendDir $env:READINESS_BACKEND -VenvPython $env:READINESS_PYTHON")
+    result = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+                            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == '2'

@@ -74,8 +74,24 @@ class Caddy:
 
     def load(self, value):
         # The caller writes an intent journal BEFORE invoking this method.
-        request(self.url + "/load", value=value, timeout=15, origin=self.url)
-        observed = self.get()
-        if digest(observed) != digest(value):
-            raise RuntimeError("Caddy configuration could not be verified after reload")
-        return digest(value)
+        import time
+        import urllib.error
+        error = None
+        try:
+            request(self.url + "/load", value=value, timeout=15, origin=self.url)
+        except urllib.error.HTTPError:
+            raise  # An explicit rejection is not an ambiguous acknowledgement.
+        except OSError as failure:
+            error = failure
+        # On first activation Caddy can close the old administration connection
+        # after accepting /load. Reconcile by GET; never repeat the mutation.
+        deadline = time.monotonic() + 3
+        while True:
+            try:
+                if digest(self.get()) == digest(value):
+                    return digest(value)
+            except OSError as failure:
+                error = failure
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Caddy configuration could not be verified after reload") from error
+            time.sleep(.1)

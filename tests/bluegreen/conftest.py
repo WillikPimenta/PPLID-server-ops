@@ -49,6 +49,11 @@ def laboratory(tmp_path):
     manager = Manager(config)
     yield config, manager, config_root
     # Test cleanup only terminates processes whose exact identity was saved.
+    background = config.directory / 'background.json'
+    if background.exists():
+        record = json.loads(background.read_text(encoding='utf-8'))
+        if record.get('process'):
+            processes.stop(record['process'], Path(record['stopFile']), 2, force=True)
     if config.state_path.exists():
         try:
             state = manager.read()

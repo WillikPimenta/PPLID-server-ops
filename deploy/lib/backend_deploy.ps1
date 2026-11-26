@@ -160,17 +160,16 @@ function Invoke-PplidBackendMigratePlan {
         [scriptblock]$Log = $null
     )
 
-    if ($Log) { & $Log "migrate --plan (pre-promote)..." }
-    $planLines = Invoke-PplidPython -Python $VenvPython -Args @(
-        "manage.py", "migrate", "--plan"
-    ) -WorkingDirectory $BackendDir -FailMessage "migrate --plan falhou."
-
-    $pending = @($planLines | Where-Object { $_ -match "\[ \]" })
+    # migrate --plan does not print [ ] markers. Those belong to
+    # showmigrations --plan; parsing the former silently reports zero pending.
+    if ($Log) { & $Log "Verificando migrations (showmigrations --plan)..." }
+    $plan = Get-PplidPendingMigrations -BackendDir $BackendDir -VenvPython $VenvPython
+    $pending = @($plan.pending)
     if ($Log) {
         if ($pending.Count -gt 0) {
-            & $Log ("migrate --plan: $($pending.Count) migration(s) pendente(s) serao aplicadas no promote.")
+            & $Log ("Migrations: $($pending.Count) migration(s) pendente(s); seguir a politica de esquema da estrategia de deploy.")
         } else {
-            & $Log "migrate --plan: schema em dia com o codigo da release."
+            & $Log "Migrations: schema em dia com o codigo da release."
         }
     }
 

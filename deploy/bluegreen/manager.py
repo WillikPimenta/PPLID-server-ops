@@ -16,7 +16,7 @@ import psutil
 from . import processes
 from .caddy import Caddy, build_config, request, verify_binary
 from .config import Config
-from .store import atomic_json, digest, read_json, utc
+from .store import atomic_json, digest, environment_lock, read_json, utc
 
 
 class Manager:
@@ -161,7 +161,6 @@ class Manager:
         state["active"] = active
         if previous_active and previous_active != active:
             state["previous"] = previous_active
-        state["intent"] = None
         self.save(state)
         if active:
             deadline = time.monotonic() + 5
@@ -175,7 +174,39 @@ class Manager:
                     time.sleep(.1)
         state["trafficSwitchMs"] = round((time.perf_counter() - convergence_started) * 1000, 2)
         state["warmupAndSwitchMs"] = round((time.perf_counter() - started) * 1000, 2)
+        state["intent"] = None
         self.save(state)
+
+    def abort_transition(self, state, old, error):
+        """Restore a verified source, including failures after the commit write.
+
+        Keep the original exception for the caller and durable diagnostics for
+        a second failure. Never assume a local flag describes actual traffic.
+        """
+        recovery_error = None
+        try:
+            if state.get("intent"):
+                self.reconcile_intent(state)
+            if state.get("active") != old:
+                self.healthy(state["slots"][old])
+                self.reload(state, old)
+            self.healthy(state["slots"][old], public=True)
+        except Exception as failure:
+            recovery_error = str(failure)
+        state["lastError"] = str(error)
+        state["recoveryError"] = recovery_error
+        state["candidate"] = None
+        if not recovery_error:
+            state["lastGoodSha"] = state["slots"][old]["sha"]
+            if state.get("history") and state["history"][-1].get("to") != state["lastGoodSha"]:
+                state["history"][-1]["result"] = "rolled-back"
+        self.save(state, "recovery-required" if recovery_error else "failed")
+        if not recovery_error:
+            try:
+                self.sync_legacy(state)
+            except Exception as failure:
+                state["recoveryError"] = str(failure)
+                self.save(state, "recovery-required")
 
     def start_slot(self, state, name, sha):
         self.resources()
@@ -268,6 +299,12 @@ class Manager:
         processes.assert_free(slot["backendPort"])
         processes.assert_free(slot["frontendPort"])
         del state["slots"][name]
+        for reference in ("previous", "candidate"):
+            if state.get(reference) == name:
+                state[reference] = None
+        # Persist reference removal together with slot removal so recovery
+        # cannot try to restart a release which has already been retired.
+        self.save(state)
         self.reload(state, state["active"])
 
     def observe(self, state, slot):
@@ -301,12 +338,18 @@ class Manager:
         self.healthy(state["slots"]["A"])
         processes.assert_free(self.config.backend_port, self.config.bind)
         processes.assert_free(self.config.frontend_port, self.config.bind)
-        self.reload(state, "A")
-        self.healthy(state["slots"]["A"], public=True)
-        state["candidate"] = None
-        state["lastGoodSha"] = state["slots"]["A"]["sha"]
-        self.save(state, "idle")
-        self.sync_legacy(state)
+        try:
+            self.reload(state, "A")
+            state["candidate"] = None
+            state["lastGoodSha"] = state["slots"]["A"]["sha"]
+            self.save(state, "idle")
+            self.sync_legacy(state)
+        except Exception as error:
+            # No old blue-green slot exists on first activation. Preserve the
+            # journal for recovery / the reviewed return-to-legacy procedure.
+            state["lastError"] = str(error)
+            self.save(state, "recovery-required")
+            raise
         return state
 
     def promote(self, sha, run_id=""):
@@ -322,8 +365,8 @@ class Manager:
             self.retire(state, target)
         state["runId"] = run_id or "promote-" + secrets.token_hex(6)
         state["lastError"] = None
+        state["recoveryError"] = None
         self.save(state, "preparing")
-        switched = False
         try:
             self.cancelled()
             slot = self.start_slot(state, target, sha)
@@ -332,7 +375,6 @@ class Manager:
             self.save(state, "switching")
             self.cancelled()
             self.reload(state, target)
-            switched = True
             state["previous"] = old
             state["switchedAt"] = utc()
             self.save(state, "observing")
@@ -344,19 +386,7 @@ class Manager:
             self.sync_legacy(state)
             return state
         except Exception as error:
-            # A response lost after /load is ambiguous. Reconcile the intent
-            # against the real proxy before deciding whether A is still active.
-            if state.get("intent"):
-                self.reconcile_intent(state)
-                switched = state.get("active") == target
-            if switched:
-                self.healthy(state["slots"][old])
-                self.reload(state, old)
-                state["previous"] = target
-            state["lastError"] = str(error)
-            state["candidate"] = None
-            self.save(state, "failed")
-            self.sync_legacy(state)
+            self.abort_transition(state, old, error)
             # Preserve registered failed candidates until explicit recovery or
             # the next deployment; never kill an in-flight old request here.
             raise
@@ -420,16 +450,24 @@ class Manager:
             raise RuntimeError("Requested rollback SHA is not the warm previous release")
         self.healthy(slot)
         old = state["active"]
-        self.reload(state, previous)
-        state["previous"] = old
-        state["lastGoodSha"] = slot["sha"]
-        state["candidate"] = None
-        self.save(state, "idle")
-        self.sync_legacy(state)
+        try:
+            self.reload(state, previous)
+            state["previous"] = old
+            state["lastGoodSha"] = slot["sha"]
+            state["candidate"] = None
+            self.save(state, "idle")
+            self.sync_legacy(state)
+        except Exception as error:
+            self.abort_transition(state, old, error)
+            raise
         return state
 
     def recover(self):
         state = self.read()
+        # Identity writes may be lost for a candidate referenced only by an
+        # interrupted intent, as well as for active/previous slots.
+        for slot in state["slots"].values():
+            self.reconcile_slot_process(slot)
         if state.get("proxyStarting"):
             verify_binary(self.config)
             path = str(self.config.directory / "proxy-start.json")
@@ -448,7 +486,8 @@ class Manager:
             self.save(state)
         # Restart registered web-only instances from immutable physical paths;
         # never call legacy bootstrap or apply migrations during recovery.
-        restart_names = list(dict.fromkeys(name for name in (state.get("active"), state.get("previous")) if name))
+        restart_names = list(dict.fromkeys(name for name in (state.get("active"), state.get("previous"))
+                                          if name in state["slots"]))
         if not restart_names and "A" in state["slots"]:
             restart_names = ["A"]
         for name in restart_names:
@@ -481,6 +520,7 @@ class Manager:
             self.reload(state, active)
             state["candidate"] = None
             state["lastGoodSha"] = state["slots"][active]["sha"]
+            state["recoveryError"] = None
             self.save(state, "idle")
             self.sync_legacy(state)
         else:
@@ -506,13 +546,16 @@ class Manager:
         atomic_json(marker, {"sha": slot["sha"], "shaFull": slot["shaFull"], "deployedSha": slot["sha"],
                              "deployedShaFull": slot["shaFull"], "deployedAt": utc()})
         status_path = self.config.base / "logs/deploy-status.json"
-        status = read_json(status_path) if status_path.exists() else {"environments": {}}
-        entry = status.setdefault("environments", {}).setdefault(self.config.environment, {})
-        entry.update(phase="failed" if state["phase"] == "failed" else "healthy",
-                     deployedSha=slot["sha"], deployedShaFull=slot["shaFull"],
-                     lastDeployFinishedAt=utc(), lastDeployResult="failed" if state["phase"] == "failed" else "success",
-                     lastDeployMessage=state.get("lastError") or "", updatePending=False)
-        atomic_json(status_path, status)
+        # Same machine-wide mutex used by scripts/deploy/lib.ps1. Separate
+        # environment locks do not serialize this shared read/modify/write.
+        with environment_lock("Status", self.config.base, timeout_seconds=30):
+            status = read_json(status_path) if status_path.exists() else {"environments": {}}
+            entry = status.setdefault("environments", {}).setdefault(self.config.environment, {})
+            entry.update(phase="failed" if state["phase"] == "failed" else "healthy",
+                         deployedSha=slot["sha"], deployedShaFull=slot["shaFull"],
+                         lastDeployFinishedAt=utc(), lastDeployResult="failed" if state["phase"] == "failed" else "success",
+                         lastDeployMessage=state.get("lastError") or "", updatePending=False)
+            atomic_json(status_path, status)
         if os.name == "nt":
             # Junctions are compatibility pointers only. Use literal cmdlets
             # with arguments passed as environment values, never shell text.
@@ -532,18 +575,24 @@ class Manager:
         path = self.config.directory / "background.json"
         if path.exists():
             previous = read_json(path)
+            self.reconcile_background_process(previous)
             if previous.get("process") and processes.owned(previous["process"]):
+                if previous["sha"] != sha or Path(previous["stopFile"]).exists():
+                    raise RuntimeError("Stop the owned background supervisor before changing its release")
+                self.wait_background(previous)
+                previous["phase"] = "running"
+                atomic_json(path, previous)
                 return previous
-            raise RuntimeError("Background record exists; inspect it before replacing business workers")
+            if previous.get("phase") != "stopped":
+                raise RuntimeError("Background exit is unconfirmed; inspect orphan jobs before replacing business workers")
         release = self.config.release(sha)
         self.contract(release, sha)
-        directory = self.config.directory / "background"
+        instance = uuid.uuid4().hex
+        directory = self.config.directory / "background" / instance
         directory.mkdir(parents=True, exist_ok=True)
-        spec = {"release": str(release), "sha": sha, "environment": self.config.environment,
+        spec = {"release": str(release), "sha": sha, "environment": self.config.environment, "instanceId": instance,
                 "stopFile": str(directory / "stop"), "shaFile": str(directory / "deployed.json"),
                 "readyFile": str(directory / "ready.json")}
-        if Path(spec["stopFile"]).exists():
-            raise RuntimeError("Previous background stop marker exists; review before restarting")
         spec_path = directory / "spec.json"
         atomic_json(spec_path, spec)
         python = str(release / "backend/.venv/Scripts/python.exe")
@@ -554,16 +603,51 @@ class Manager:
                                      creationflags=subprocess.CREATE_NO_WINDOW)
         if checked.returncode:
             raise RuntimeError("Background schema preflight failed; no business jobs started")
+        # Durable launch intent allows recovery of the lost PID-write window.
+        record = {**spec, "process": None, "phase": "starting", "startedAt": utc()}
+        atomic_json(path, record)
         process = processes.launch([python, str(Path(__file__).with_name("background_worker.py")),
                                     "--spec", str(spec_path), "--pplid-supervised"], directory / "worker.log")
-        record = {**spec, "process": processes.identity(process.pid), "startedAt": utc()}
+        record["process"] = processes.identity(process.pid)
         atomic_json(path, record)
+        self.wait_background(record)
+        record["phase"] = "running"
+        atomic_json(path, record)
+        return record
+
+    def reconcile_background_process(self, record):
+        if record.get("process") and processes.owned(record["process"]):
+            return
+        python = str(Path(record["release"]) / "backend/.venv/Scripts/python.exe")
+        expected = [python, str(Path(__file__).with_name("background_worker.py")),
+                    "--spec", str(Path(record["stopFile"]).parent / "spec.json"), "--pplid-supervised"]
+        matches = []
+        for process in psutil.process_iter(["exe", "cmdline"]):
+            try:
+                if (process.info["exe"] and os.path.normcase(process.info["exe"]) == os.path.normcase(python)
+                        and process.info["cmdline"] == expected):
+                    matches.append(processes.identity(process.pid))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if len(matches) > 1:
+            raise RuntimeError("Ambiguous background ownership; processes preserved")
+        if matches:
+            record["process"] = matches[0]
+            atomic_json(self.config.directory / "background.json", record)
+
+    def wait_background(self, record):
         deadline = time.monotonic() + self.config.timeouts["startupSeconds"]
         while time.monotonic() < deadline:
-            if process.poll() is not None:
+            if not record.get("process") or not processes.owned(record["process"]):
                 raise RuntimeError("Background supervisor exited; inspect worker.log")
-            if Path(spec["readyFile"]).exists():
-                return record
+            ready_path = Path(record["readyFile"])
+            if ready_path.exists():
+                ready = read_json(ready_path)
+                if (ready.get("ready") is True and ready.get("sha") == record["sha"]
+                        and ready.get("instanceId") == record.get("instanceId")
+                        and processes.owns_pid(record["process"], ready.get("pid"))):
+                    return
+                raise RuntimeError("Background readiness identity mismatch")
             time.sleep(.2)
         raise RuntimeError("Background supervisor readiness timed out; inspect worker.log before retrying")
 
@@ -591,7 +675,13 @@ class Manager:
     def workers_stop(self):
         path = self.config.directory / "background.json"
         record = read_json(path)
+        self.reconcile_background_process(record)
+        if record.get("phase") == "stopped":
+            return record
+        if not record.get("process") or not processes.owned(record["process"]):
+            raise RuntimeError("Cannot confirm background shutdown; inspect orphan jobs before restarting")
         processes.stop(record["process"], Path(record["stopFile"]), self.config.timeouts["commandSeconds"])
         record["stoppedAt"] = utc()
+        record["phase"] = "stopped"
         atomic_json(path, record)
         return record

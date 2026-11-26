@@ -46,12 +46,20 @@ def digest(value: dict) -> str:
 
 
 @contextmanager
-def environment_lock(environment: str, root: Path):
+def environment_lock(environment: str, root: Path, *, timeout_seconds=0):
     if os.name != "nt":
         import fcntl
         root.mkdir(parents=True, exist_ok=True)
         with (root / "bluegreen.lock").open("a") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("Deploy lock busy")
+                    time.sleep(.05)
             yield
         return
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -65,7 +73,7 @@ def environment_lock(environment: str, root: Path):
         raise ctypes.WinError(ctypes.get_last_error())
     acquired = False
     try:
-        result = kernel.WaitForSingleObject(handle, 0)
+        result = kernel.WaitForSingleObject(handle, int(timeout_seconds * 1000))
         if result not in (0, 0x80):  # WAIT_OBJECT_0 / WAIT_ABANDONED
             raise RuntimeError("Deploy lock busy")
         acquired = True

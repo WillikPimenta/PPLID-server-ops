@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 import time
 
-from slot_worker import load_environment
+from slot_worker import load_environment, write_json
 
 
 def main():
@@ -31,9 +31,12 @@ def main():
     with background_lock(spec["environment"]):
         import django
         django.setup()
-        Path(spec["readyFile"]).write_text(json.dumps({"ready": True, "sha": spec["sha"]}), encoding="utf-8")
         from django.core.management import call_command
         from django.db import close_old_connections
+        # This confirms Django's startup hooks completed, not business-level
+        # health of every asynchronous job. Validate those in HOM separately.
+        write_json(Path(spec["readyFile"]), {"ready": True, "sha": spec["sha"],
+                   "instanceId": spec["instanceId"], "pid": os.getpid()})
         try:
             while not Path(spec["stopFile"]).exists():
                 close_old_connections()

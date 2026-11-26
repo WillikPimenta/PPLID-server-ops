@@ -2,8 +2,12 @@ $script:OpsStoreScript = Join-Path $PSScriptRoot "ops_store.py"
 $script:OpsStoreDbPath = $null
 
 function Get-OpsStoreDbPath {
+    if ($env:PPLID_OPS_STORE_PATH) { return $env:PPLID_OPS_STORE_PATH }
     if ($script:OpsStoreDbPath) { return $script:OpsStoreDbPath }
-    $cfgPath = "C:\PPLID\machine.config.json"
+    $cfgPath = if ($env:OPS_MACHINE_CONFIG) { $env:OPS_MACHINE_CONFIG } else { "C:\PPLID\machine.config.json" }
+    if ($env:OPS_MACHINE_CONFIG -and -not (Test-Path -LiteralPath $cfgPath)) {
+        throw 'OPS_MACHINE_CONFIG explicito inexistente; fallback de ops_store recusado.'
+    }
     if (Test-Path $cfgPath) {
         try {
             $raw = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -11,7 +15,14 @@ function Get-OpsStoreDbPath {
                 $script:OpsStoreDbPath = [string]$raw.opsStore.path
                 return $script:OpsStoreDbPath
             }
-        } catch { }
+            if ($raw.baseDir) {
+                $script:OpsStoreDbPath = Join-Path ([string]$raw.baseDir) 'ops\data\ops-store.db'
+                return $script:OpsStoreDbPath
+            }
+            if ($env:OPS_MACHINE_CONFIG) { throw 'Configuracao explicita sem baseDir/opsStore.path.' }
+        } catch {
+            if ($env:OPS_MACHINE_CONFIG) { throw }
+        }
     }
     $script:OpsStoreDbPath = "C:\PPLID\ops\data\ops-store.db"
     return $script:OpsStoreDbPath

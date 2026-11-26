@@ -97,3 +97,42 @@ def test_third_release_retires_only_inactive_slot_and_keeps_assets(laboratory, m
     assert stopped['phase'] == 'stopped' and not stopped['slots']
     processes.assert_free(config.backend_port)
     processes.assert_free(config.frontend_port)
+
+
+@pytest.mark.parametrize('point', ['pid-write', 'before-switch', 'after-switch'])
+def test_recover_orchestrator_interruption_boundaries(laboratory, make_release, monkeypatch, point):
+    config, manager, _ = laboratory
+    first = make_release(config, 'a')
+    second = make_release(config, 'b')
+    manager.prepare(first)
+    manager.activate()
+    with monkeypatch.context() as patch:
+        if point == 'pid-write':
+            launch = processes.launch
+            def crash_after_launch(*args, **kwargs):
+                process = launch(*args, **kwargs)
+                raise SystemExit('orchestrator lost after child launch')
+            patch.setattr(processes, 'launch', crash_after_launch)
+        elif point == 'before-switch':
+            save = manager.save
+            def crash_before_switch(state, phase=None):
+                save(state, phase)
+                if phase == 'switching':
+                    raise SystemExit('orchestrator lost before traffic switch')
+            patch.setattr(manager, 'save', crash_before_switch)
+        else:
+            reload = manager.reload
+            def crash_after_switch(state, active):
+                reload(state, active)
+                if active == 'B':
+                    raise SystemExit('orchestrator lost after verified traffic switch')
+            patch.setattr(manager, 'reload', crash_after_switch)
+        with pytest.raises(SystemExit, match='orchestrator lost'):
+            manager.promote(second)
+    state = manager.recover()
+    expected = second if point == 'after-switch' else first
+    assert state['phase'] == 'idle'
+    assert state['slots']['B'].get('process')
+    assert request(f'http://127.0.0.1:{config.backend_port}/api/echo')['sha'] == expected
+    again = manager.recover()
+    assert again['slots']['B']['instanceId'] == state['slots']['B']['instanceId']

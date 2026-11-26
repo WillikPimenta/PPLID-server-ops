@@ -12,7 +12,7 @@ if (Test-Path $opsStorePs1) {
 $script:MirrorFileLogs = $true
 
 function Get-OpsStoreConfig {
-    $cfgPath = "C:\PPLID\machine.config.json"
+    $cfgPath = if ($env:OPS_MACHINE_CONFIG) { $env:OPS_MACHINE_CONFIG } else { "C:\PPLID\machine.config.json" }
     if (-not (Test-Path $cfgPath)) { return @{ mirrorFileLogs = $true } }
     try {
         $raw = Get-Content $cfgPath -Raw | ConvertFrom-Json
