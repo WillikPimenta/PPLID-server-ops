@@ -148,6 +148,37 @@ def test_supervisor_timeout_preserves_job_and_requires_clean_receipt(laboratory,
         processes.stop(record['process'], Path(record['stopFile']), 5, force=True)
 
 
+def test_supervisor_retries_receipt_after_temporary_write_failure(laboratory, make_release):
+    from deploy.bluegreen.worker_control import controller
+    config, manager, _ = laboratory
+    sha = make_release(config, 'c')
+    install_synthetic_jobs(config, sha)
+    record = manager.workers_start(sha)
+    receipt = Path(record['stoppedFile'])
+    receipt.mkdir()  # Force atomic receipt replacement to fail.
+    control = controller(record['release'], record['workerControlDir'])
+    try:
+        control.request(record['instanceId'])
+        log = receipt.parent / 'worker.log'
+        deadline = time.monotonic() + 15
+        while 'Drain is unconfirmed' not in log.read_text(encoding='utf-8', errors='replace'):
+            assert time.monotonic() < deadline
+            time.sleep(.05)
+        assert control.status()['phase'] == 'stopped'
+        assert processes.owned(record['process'])
+        receipt.rmdir()
+        deadline = time.monotonic() + 10
+        while not receipt.is_file():
+            assert time.monotonic() < deadline
+            time.sleep(.05)
+        assert manager.workers_stop()['phase'] == 'stopped'
+        assert read_json(receipt)['drained'] is True
+    finally:
+        if receipt.is_dir():
+            receipt.rmdir()
+        processes.stop(record['process'], Path(record['stopFile']), 5, force=True)
+
+
 def test_retiring_web_slot_preserves_admitted_child_and_independent_worker(laboratory, make_release):
     from deploy.bluegreen.caddy import request
     config, manager, _ = laboratory

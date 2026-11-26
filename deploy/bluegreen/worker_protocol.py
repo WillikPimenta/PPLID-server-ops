@@ -227,7 +227,7 @@ class Controller:
     def confirm_stopped(self, instance):
         with self.lock():
             state = self.read()
-            if state['instanceId'] != instance or state['phase'] != 'quiescing':
+            if state['instanceId'] != instance or state['phase'] not in ('quiescing', 'stopped'):
                 raise RuntimeError('Worker generation cannot confirm shutdown')
             if list(self.units.glob('*.json')):
                 raise RuntimeError('Work is still running or orphaned; shutdown unconfirmed')

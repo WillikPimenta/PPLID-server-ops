@@ -42,6 +42,8 @@ def test_admission_closes_before_drain_and_generation_restart(control):
     assert control.status()['units'][0]['ownerAlive']
     lease.close()
     control.confirm_stopped('first')
+    # Retrying after a failed receipt write must not strand a drained owner.
+    control.confirm_stopped('first')
     control.initialize('second')
     control.open('second')
     assert not control.requested()
