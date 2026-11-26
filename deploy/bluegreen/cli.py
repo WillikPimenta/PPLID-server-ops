@@ -29,6 +29,7 @@ def pipeline(config, manager, sha, run_id):
     # Rebuilding a running directory could change imports underneath its process.
     if any(s["shaFull"] == full for s in state["slots"].values()):
         return manager.promote(sha, run_id)
+    manager.resources()
     run_id = run_id or "bg-" + str(int(time.time()))
     script = Path(__file__).parents[1] / "bluegreen_prepare.ps1"
     log = config.root / "logs/runs" / run_id / "bluegreen-prepare.log"
@@ -39,6 +40,9 @@ def pipeline(config, manager, sha, run_id):
     result_state = None
     try:
         environment = dict(os.environ)
+        if not getattr(config, 'machine_path', None):
+            raise RuntimeError('Build requires an explicit loaded machine configuration')
+        environment['OPS_MACHINE_CONFIG'] = str(config.machine_path)
         # Build with destination configuration. A dist compiled in DEV may
         # embed DEV API URLs and must not be blindly reused in HOM/MAIN.
         environment.pop("PPLID_PROMOTE_SOURCE", None)

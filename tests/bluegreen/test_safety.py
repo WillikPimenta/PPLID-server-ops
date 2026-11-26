@@ -107,6 +107,94 @@ def test_resources_reject_before_launch(laboratory, monkeypatch):
         manager.resources()
 
 
+def test_commit_exhaustion_blocks_workers_and_build_before_launch(laboratory, monkeypatch):
+    from types import SimpleNamespace
+    from deploy.bluegreen.cli import pipeline
+    config, manager, _ = laboratory
+    monkeypatch.setattr('deploy.bluegreen.manager.psutil.virtual_memory',
+                        lambda: SimpleNamespace(available=8 * 1024**3))
+    monkeypatch.setattr('deploy.bluegreen.manager.available_commit_bytes', lambda: 0)
+    monkeypatch.setattr('deploy.bluegreen.manager.processes.launch',
+                        lambda *a, **k: pytest.fail('Resource rejection must precede process launch'))
+    with pytest.raises(RuntimeError, match='commit headroom'):
+        manager.workers_start('a' * 8)
+    assert not (config.directory / 'background.json').exists()
+    assert not config.state_path.exists()
+    original = {'phase': 'idle', 'active': 'A', 'slots': {'A': {'shaFull': 'b' * 40},
+                                                       'B': {'shaFull': 'c' * 40}}}
+    monkeypatch.setattr(manager, 'read', lambda: original)
+    monkeypatch.setattr(manager, 'retire', lambda *a: pytest.fail('Warm rollback must be preserved'))
+    with pytest.raises(RuntimeError, match='commit headroom'):
+        manager.promote('a' * 8)
+    assert original['phase'] == 'idle' and set(original['slots']) == {'A', 'B'}
+    monkeypatch.setattr('deploy.bluegreen.cli.subprocess.check_output', lambda *a, **k: 'a' * 40)
+    monkeypatch.setattr('deploy.bluegreen.cli.subprocess.run',
+                        lambda *a, **k: pytest.fail('Resource rejection must precede build'))
+    with pytest.raises(RuntimeError, match='commit headroom'):
+        pipeline(config, manager, 'a' * 8, 'guarded-build')
+    assert not (config.root / 'logs/runs/guarded-build').exists()
+
+
+def test_disk_exhaustion_is_rejected(laboratory, monkeypatch):
+    from types import SimpleNamespace
+    _, manager, _ = laboratory
+    monkeypatch.setattr('deploy.bluegreen.manager.psutil.virtual_memory',
+                        lambda: SimpleNamespace(available=8 * 1024**3))
+    monkeypatch.setattr('deploy.bluegreen.manager.available_commit_bytes', lambda: 8 * 1024**3)
+    monkeypatch.setattr('deploy.bluegreen.manager.shutil.disk_usage', lambda path: SimpleNamespace(free=0))
+    with pytest.raises(RuntimeError, match='disk space'):
+        manager.resources()
+
+
+def test_native_commit_reading_and_optional_configuration(laboratory):
+    from deploy.bluegreen.resources import available_commit_bytes
+    config, _, root = laboratory
+    assert available_commit_bytes() > 0
+    assert config.minimum_commit_mb == config.bg['minimumAvailableMb']
+    for invalid in (True, '2048', 0, -1):
+        changed = deepcopy(root)
+        changed['MAIN']['blueGreen']['minimumCommitMb'] = invalid
+        with pytest.raises(ValueError, match='minimumCommitMb'):
+            Config(config.base, changed, 'MAIN')
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows junction compatibility pointer')
+def test_junction_failure_preserves_diagnostic(laboratory, monkeypatch):
+    from types import SimpleNamespace
+    config, manager, _ = laboratory
+    monkeypatch.setattr('deploy.bluegreen.manager.subprocess.run', lambda *a, **k:
+                        SimpleNamespace(returncode=17, stderr=b'synthetic junction diagnostic'))
+    state = {'active': 'A', 'phase': 'active', 'slots': {'A': {
+        'sha': 'a' * 8, 'shaFull': 'a' * 40, 'release': str(config.release('a' * 8))}}}
+    with pytest.raises(RuntimeError, match=r'exit 17.*synthetic junction diagnostic'):
+        manager.sync_legacy(state)
+
+
+def test_build_propagates_selected_machine_config(laboratory, monkeypatch):
+    from types import SimpleNamespace
+    from deploy.bluegreen.cli import pipeline
+    config, manager, root = laboratory
+    machine = config.base / 'explicit-machine.json'
+    env_path = config.base / 'explicit-environments.json'
+    atomic_json(machine, {'baseDir': str(config.base), 'envConfigPath': str(env_path)})
+    atomic_json(env_path, root)
+    loaded = Config.load(machine, 'MAIN')
+    manager.config = loaded
+    state = {'active': 'A', 'slots': {'A': {'shaFull': 'b' * 40, 'sha': 'b' * 8}}}
+    monkeypatch.setattr(manager, 'read', lambda: state)
+    monkeypatch.setattr(manager, 'resources', lambda: None)
+    monkeypatch.setattr(manager, 'promote', lambda *args: state)
+    monkeypatch.setattr('deploy.bluegreen.cli.subprocess.check_output', lambda *a, **k: 'a' * 40)
+    monkeypatch.setenv('OPS_MACHINE_CONFIG', 'unrelated-inherited-configuration.json')
+    calls = []
+    def build(*args, **kwargs):
+        calls.append(kwargs['env']['OPS_MACHINE_CONFIG'])
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr('deploy.bluegreen.cli.subprocess.run', build)
+    assert pipeline(loaded, manager, 'a' * 8, 'explicit-config-build') == state
+    assert calls == [str(machine.resolve())]
+
+
 def test_application_patch_is_idempotent_and_preserves_other_content(tmp_path):
     common = tmp_path / 'backend/apps/common/apps.py'
     auto = tmp_path / 'backend/apps/automacoes/apps.py'

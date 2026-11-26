@@ -52,8 +52,11 @@ class Config:
         if any(not 0 < value <= 3600 for value in self.timeouts.values()):
             raise ValueError("Timeouts must be positive and at most 3600 seconds")
         for key in ("minimumAvailableMb", "minimumDiskMb"):
-            if not isinstance(self.bg.get(key), int) or self.bg[key] < 128:
+            if type(self.bg.get(key)) is not int or self.bg[key] < 128:
                 raise ValueError(f"{key} must be explicitly configured (>=128)")
+        self.minimum_commit_mb = self.bg.get('minimumCommitMb', self.bg['minimumAvailableMb'])
+        if type(self.minimum_commit_mb) is not int or self.minimum_commit_mb < 128:
+            raise ValueError('minimumCommitMb must be an integer >=128')
         self.caddy = Path(self.bg["caddyPath"]).resolve()
         self.caddy_hash = self.bg["caddySha256"]
         if not re.fullmatch(r"[0-9a-f]{64}", self.caddy_hash):
@@ -91,6 +94,9 @@ class Config:
 
     @classmethod
     def load(cls, machine_path: Path, environment: str):
+        machine_path = machine_path.resolve()
         machine = read_json(machine_path)
         base = Path(machine["baseDir"])
-        return cls(base, read_json(Path(machine.get("envConfigPath", base / "ops/config/env.config.json"))), environment)
+        config = cls(base, read_json(Path(machine.get("envConfigPath", base / "ops/config/env.config.json"))), environment)
+        config.machine_path = machine_path
+        return config

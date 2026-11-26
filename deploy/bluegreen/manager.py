@@ -16,6 +16,7 @@ import psutil
 from . import processes
 from .caddy import Caddy, build_config, request, verify_binary
 from .config import Config
+from .resources import available_commit_bytes
 from .store import atomic_json, digest, environment_lock, read_json, utc
 
 
@@ -62,6 +63,8 @@ class Manager:
         self.config.directory.mkdir(parents=True, exist_ok=True)
         if psutil.virtual_memory().available < self.config.bg["minimumAvailableMb"] * 1024**2:
             raise RuntimeError("Insufficient available memory; active instance preserved")
+        if available_commit_bytes() < self.config.minimum_commit_mb * 1024**2:
+            raise RuntimeError("Insufficient commit headroom; active instance preserved")
         if shutil.disk_usage(self.config.directory).free < self.config.bg["minimumDiskMb"] * 1024**2:
             raise RuntimeError("Insufficient disk space")
 
@@ -362,6 +365,8 @@ class Manager:
         state = self.read()
         if state["phase"] not in ("idle", "failed") or state.get("intent") or not state.get("active"):
             raise RuntimeError("Recover or complete initial activation before promoting")
+        # Refuse before retiring the warm rollback slot or mutating the journal.
+        self.resources()
         old = state["active"]
         self.healthy(state["slots"][old], public=True)
         target = "B" if old == "A" else "A"
@@ -573,7 +578,9 @@ class Manager:
                                        env=environment, capture_output=True, timeout=30,
                                        creationflags=subprocess.CREATE_NO_WINDOW)
             if completed.returncode:
-                raise RuntimeError("Traffic is active but current junction reconciliation failed; run recover")
+                detail = completed.stderr.decode('utf-8', errors='replace').strip()[-2000:]
+                raise RuntimeError(f"Traffic is active but current junction reconciliation failed "
+                                   f"(exit {completed.returncode}); run recover. {detail}")
 
     def workers_start(self, sha):
         from .worker_control import controller, verify_stopped
@@ -599,6 +606,7 @@ class Manager:
             if previous.get("phase") != "stopped":
                 raise RuntimeError("Background exit is unconfirmed; inspect orphan jobs before replacing business workers")
             verify_stopped(previous)
+        self.resources()
         release = self.config.release(sha)
         self.contract(release, sha)
         control = controller(release, self.config.directory / "worker-control")
