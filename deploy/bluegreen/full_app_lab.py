@@ -147,6 +147,10 @@ def run(application: Path, pg_bin: Path, caddy: Path, workspace: Path, resume=No
         os.environ['PYTHONPATH'] = str(release / 'automacoes')
         os.environ['PPLID_BASE_DIR'] = str(lab)
         atomic_json(release / 'meta.json', {'built': True, 'sha': head[:8], 'shaFull': head})
+        atomic_json(config.directory / 'builds' / (head[:8] + '.json'), {
+            'schemaVersion': 1, 'phase': 'complete', 'success': True, 'treeEmpty': True,
+            'shaFull': head, 'release': str(release),
+            'fixture': 'synthetic source-copy laboratory; not a clean production build'})
         manager = Manager(config)
         manager.prepare(head[:8])
         manager.activate()

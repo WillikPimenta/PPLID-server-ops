@@ -12,6 +12,9 @@ def transaction(monkeypatch):
     state = {'phase': 'idle', 'active': 'A', 'previous': None, 'candidate': None,
              'intent': None, 'history': [], 'slots': {'A': {'sha': 'a'}}}
     calls = []
+    # This fixture isolates routing failures. Real resource refusal is exercised
+    # by test_safety before any slot/journal mutation.
+    monkeypatch.setattr(manager, 'resources', lambda: None)
     monkeypatch.setattr(manager, 'read', lambda **kw: state)
     monkeypatch.setattr(manager, 'healthy', lambda *a, **kw: None)
     def save(value, phase=None):

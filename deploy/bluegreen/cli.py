@@ -11,6 +11,7 @@ import re
 
 from .config import Config
 from .manager import Manager
+from .build_process import run_build
 from .store import atomic_json, environment_lock, utc, read_json
 
 
@@ -29,6 +30,30 @@ def pipeline(config, manager, sha, run_id):
     # Rebuilding a running directory could change imports underneath its process.
     if any(s["shaFull"] == full for s in state["slots"].values()):
         return manager.promote(sha, run_id)
+    background_path = config.directory / 'background.json'
+    if background_path.exists():
+        try:
+            background = read_json(background_path)
+            background_sha = background['sha']
+            pinned = config.release(background_sha)
+            if Path(background['release']).resolve() != pinned.resolve():
+                raise ValueError('Background release path does not match its SHA')
+            if background.get('environment') != config.environment:
+                raise ValueError('Background environment mismatch')
+            metadata = read_json(pinned / 'meta.json')
+            pinned_full = metadata['shaFull']
+            if not re.fullmatch('[0-9a-f]{40}', pinned_full) or not pinned_full.startswith(background_sha):
+                raise ValueError('Background release full SHA is inconsistent')
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise RuntimeError('Independent supervisor pin is ambiguous; no build started') from error
+        # Even a stopped generation remains pinned until an explicit rotation.
+        # Reuse a validated immutable artifact; never bootstrap/rebuild it.
+        if pinned.resolve() == config.release(sha).resolve() or pinned_full == full:
+            try:
+                manager.contract(config.release(sha), sha)
+            except Exception as error:
+                raise RuntimeError(f'Independent supervisor pins this release; rebuild refused: {error}') from error
+            return manager.promote(sha, run_id)
     manager.resources()
     run_id = run_id or "bg-" + str(int(time.time()))
     script = Path(__file__).parents[1] / "bluegreen_prepare.ps1"
@@ -47,11 +72,15 @@ def pipeline(config, manager, sha, run_id):
         # embed DEV API URLs and must not be blindly reused in HOM/MAIN.
         environment.pop("PPLID_PROMOTE_SOURCE", None)
         with log.open("ab") as stream:
-            result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+            def check_build():
+                manager.cancelled()
+                manager.resources()
+            result = run_build(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
                                      "-Environment", config.environment, "-TargetSha", sha, "-TargetShaFull", full, "-RunId", run_id],
-                                    stdout=stream, stderr=subprocess.STDOUT, env=environment,
+                                    stdout=stream, env=environment,
                                     timeout=config.timeouts["commandSeconds"],
-                                    creationflags=subprocess.CREATE_NO_WINDOW)
+                                    receipt=config.directory / 'builds' / (sha + '.json'),
+                                    release=config.release(sha), sha_full=full, check_alive=check_build)
         if result.returncode:
             raise RuntimeError(f"Build/validation failed; active version preserved. See {log}")
         result_state = manager.promote(sha, run_id)

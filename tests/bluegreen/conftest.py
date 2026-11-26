@@ -126,6 +126,9 @@ def application(environ, start_response):
         (release / "frontend/dist/index.html").write_text(f"<!doctype html><title>{sha[:8]}</title><p>{sha[:8]}</p>")
         (release / f"frontend/dist/assets/{sha[:8]}.js").write_text(f"window.release='{sha[:8]}';")
         atomic_json(release / "meta.json", {"sha": sha[:8], "shaFull": sha, "built": True})
+        atomic_json(config.directory / 'builds' / (sha[:8] + '.json'), {
+            'schemaVersion': 1, 'phase': 'complete', 'success': True, 'treeEmpty': True,
+            'shaFull': sha, 'release': str(release), 'fixture': 'synthetic test release; not a production build'})
         atomic_json(release / "scripts/deploy/bluegreen-contract.json", {
             "schemaVersion": 1, "webOnlyFlag": "PPLID_WEB_ONLY", "backgroundWorkers": "independent"})
         protocol_dir = release / 'automacoes/app/core'

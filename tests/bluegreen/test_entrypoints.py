@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from deploy.bluegreen.cli import pipeline
+from deploy.bluegreen.config import Config
 from deploy.bluegreen.store import atomic_json, read_json
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,18 +16,25 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.mark.parametrize('exit_code', [0, 1])
 def test_pipeline_destination_build_and_result_journal(laboratory, monkeypatch, exit_code):
-    config, _, _ = laboratory
+    config, real_manager, root = laboratory
+    env_path, machine_path = config.base / 'env.json', config.base / 'machine.json'
+    atomic_json(env_path, root)
+    atomic_json(machine_path, {'baseDir': str(config.base), 'envConfigPath': str(env_path)})
+    config = Config.load(machine_path, 'MAIN')
     before = {'active': 'A', 'slots': {'A': {'sha': 'a' * 8, 'shaFull': 'a' * 40}}}
     promoted = []
-    manager = SimpleNamespace(read=lambda: before, promote=lambda sha, run: promoted.append(sha) or {'phase': 'idle'})
+    manager = SimpleNamespace(read=lambda: before, resources=real_manager.resources,
+                              cancelled=real_manager.cancelled,
+                              promote=lambda sha, run: promoted.append(sha) or {'phase': 'idle'})
     monkeypatch.setenv('PPLID_PROMOTE_SOURCE', 'DEV')
     monkeypatch.setattr(subprocess, 'check_output', lambda *args, **kwargs: 'b' * 40 + '\n')
     def preparation(command, **kwargs):
         assert command[0] == 'powershell.exe'
         assert 'PPLID_PROMOTE_SOURCE' not in kwargs['env']
+        assert kwargs['env']['OPS_MACHINE_CONFIG'] == str(machine_path)
         atomic_json(config.root / 'logs/runs/test-run/steps.json', [{'id': 'prepare', 'status': 'pending'}])
         return SimpleNamespace(returncode=exit_code)
-    monkeypatch.setattr(subprocess, 'run', preparation)
+    monkeypatch.setattr('deploy.bluegreen.cli.run_build', preparation)
     if exit_code:
         with pytest.raises(RuntimeError, match='preserved'):
             pipeline(config, manager, 'b' * 8, 'test-run')
@@ -52,6 +60,33 @@ def test_powershell_bridge_uses_explicit_machine_configuration(laboratory):
     payload = json.loads(result.stdout)
     assert payload['ok'] and payload['state']['phase'] == 'uninitialized'
     assert not config.state_path.exists()
+
+
+@pytest.mark.parametrize('valid_receipt', [True, False])
+def test_pipeline_never_rebuilds_a_release_pinned_only_by_the_independent_supervisor(
+        laboratory, make_release, monkeypatch, valid_receipt):
+    config, real_manager, _ = laboratory
+    sha = make_release(config, 'b')
+    release = config.release(sha)
+    before_env = (release / 'backend/.env').read_bytes()
+    atomic_json(config.directory / 'background.json', {
+        'sha': sha, 'release': str(release), 'environment': 'MAIN', 'phase': 'stopped'})
+    if not valid_receipt:
+        (config.directory / 'builds' / (sha + '.json')).unlink()
+    promoted = []
+    manager = SimpleNamespace(read=lambda: {'active': 'A', 'slots': {'A': {'shaFull': 'a' * 40}}},
+                              contract=real_manager.contract,
+                              promote=lambda target, run: promoted.append(target) or {'phase': 'idle'})
+    monkeypatch.setattr('deploy.bluegreen.cli.subprocess.check_output', lambda *a, **k: 'b' * 40)
+    monkeypatch.setattr('deploy.bluegreen.cli.run_build', lambda *a, **k: pytest.fail('Pinned release must never rebuild'))
+    if valid_receipt:
+        assert pipeline(config, manager, sha, 'pinned-reuse')['phase'] == 'idle'
+        assert promoted == [sha]
+    else:
+        with pytest.raises(RuntimeError, match='pins this release.*receipt'):
+            pipeline(config, manager, sha, 'pinned-reuse')
+        assert not promoted
+    assert (release / 'backend/.env').read_bytes() == before_env
 
 
 @pytest.mark.parametrize('override', ['machine', 'environment', 'missing'])

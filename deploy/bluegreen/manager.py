@@ -73,6 +73,8 @@ class Manager:
         full = meta.get("shaFull", meta.get("sha", ""))
         if meta.get("built") is not True or not full.startswith(sha) or len(full) != 40:
             raise RuntimeError("Release must be built and identify its full SHA")
+        from .build_process import require_receipt
+        require_receipt(self.config.directory, release, full)
         contract = read_json(release / "scripts/deploy/bluegreen-contract.json")
         if contract != {"schemaVersion": 1, "webOnlyFlag": "PPLID_WEB_ONLY", "backgroundWorkers": "independent"}:
             raise RuntimeError("Application web-only contract v1 is required")

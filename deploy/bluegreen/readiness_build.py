@@ -9,15 +9,20 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import uuid
 
 from .full_app_lab import free_ports
 from .store import atomic_json
+from .resources import available_commit_bytes
+from .build_process import run_build
+import psutil
 
 
-def run(source: Path, pg_bin: Path, workspace: Path, *, resume=None, constraints=None):
+def run(source: Path, pg_bin: Path, workspace: Path, *, resume=None, constraints=None,
+        minimum_free_disk_mb=6144, minimum_commit_mb=6144):
     if constraints and not Path(constraints).is_file():
         raise ValueError('Constraints file does not exist')
     workspace = workspace.resolve()
@@ -30,6 +35,15 @@ def run(source: Path, pg_bin: Path, workspace: Path, *, resume=None, constraints
     lab.mkdir(parents=True, exist_ok=bool(resume))
     flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     report = {'laboratory': str(lab), 'productionTouched': False, 'checks': [], 'ok': False}
+    def resource_preflight():
+        values = {'freeDiskMb': shutil.disk_usage(workspace).free // 1024**2,
+                  'availableCommitMb': available_commit_bytes() // 1024**2,
+                  'availablePhysicalMb': psutil.virtual_memory().available // 1024**2}
+        report.setdefault('resourcePreflights', []).append(values)
+        if (values['freeDiskMb'] < minimum_free_disk_mb
+                or values['availableCommitMb'] < minimum_commit_mb
+                or values['availablePhysicalMb'] < 2048):
+            raise RuntimeError('Insufficient laboratory build resources; no new build started')
     started = False
     def command(args, *, env=None, timeout=1200, check=True):
         with (lab / 'commands.log').open('ab') as output:
@@ -39,8 +53,9 @@ def run(source: Path, pg_bin: Path, workspace: Path, *, resume=None, constraints
             raise RuntimeError(f'{Path(str(args[0])).name} exited {result.returncode}; see commands.log')
         return result.returncode
     try:
-        if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain', '-uno'], text=True).strip():
-            raise RuntimeError('Source must have no tracked working changes')
+        resource_preflight()
+        if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain', '--untracked-files=normal'], text=True).strip():
+            raise RuntimeError('Source must have no tracked or untracked working changes')
         head = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
         report['sourceHead'] = head
         report['sourceIncludesWorkingChanges'] = False
@@ -84,14 +99,25 @@ def run(source: Path, pg_bin: Path, workspace: Path, *, resume=None, constraints
         shared.mkdir(exist_ok=True)
         (shared / 'backend.env').write_text(''.join(f'{k}={v}\n' for k, v in backend_env.items()), encoding='utf-8')
         (shared / 'frontend.env').write_text(f'VITE_API_BASE_URL=http://127.0.0.1:{backend_port}\n', encoding='utf-8')
-        environment = {**os.environ, **backend_env, 'OPS_MACHINE_CONFIG': str(lab / 'machine.config.json'),
+        # Keep executable discovery and package transport settings, never
+        # inherit application credentials, database URLs or worker control.
+        keep = {'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'SYSTEMDRIVE',
+                'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS', 'USERNAME', 'USERDOMAIN',
+                'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'ALLUSERSPROFILE',
+                'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE',
+                'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS'}
+        inherited = {key: value for key, value in os.environ.items() if key.upper() in keep}
+        environment = {**inherited, **backend_env, 'OPS_MACHINE_CONFIG': str(lab / 'machine.config.json'),
             'PPLID_BACKEND_ENV_FILE': str(shared / 'backend.env'), 'PPLID_BASE_DIR': str(lab),
             'PPLID_OPS_STORE_PATH': str(lab / 'ops-store.db'),
-            'PIP_CACHE_DIR': str(lab.parent / 'pip-cache'), 'npm_config_cache': str(lab.parent / 'npm-cache')}
+            'PIP_CACHE_DIR': str(lab.parent / 'pip-cache'), 'npm_config_cache': str(lab.parent / 'npm-cache'),
+            'NODE_OPTIONS': '--max-old-space-size=4096'}
         # Application imports can create AppData / OneDrive default folders.
         # Give subprocesses a disposable profile, never the operator's profile.
         for variable, relative in [('USERPROFILE', 'profile'), ('APPDATA', 'profile/AppData/Roaming'),
-                                   ('LOCALAPPDATA', 'profile/AppData/Local'), ('TEMP', 'tmp'), ('TMP', 'tmp')]:
+                                   ('LOCALAPPDATA', 'profile/AppData/Local'), ('TEMP', 'tmp'), ('TMP', 'tmp'),
+                                   ('OneDrive', 'profile/OneDrive'), ('OneDriveCommercial', 'profile/OneDrive'),
+                                   ('OneDriveConsumer', 'profile/OneDrive')]:
             directory = lab / relative
             directory.mkdir(parents=True, exist_ok=True)
             environment[variable] = str(directory)
@@ -105,10 +131,19 @@ def run(source: Path, pg_bin: Path, workspace: Path, *, resume=None, constraints
         environment.pop('PYTHONPATH', None)
         environment.pop('PPLID_PROMOTE_SOURCE', None)
         report['checks'].append('clean-source-and-isolated-postgresql')
+        resource_preflight()
         run_id = 'readiness-' + head[:8]
-        result = command(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-            workspace / 'deploy/bluegreen_prepare.ps1', '-Environment', 'MAIN', '-TargetSha', head[:8],
-            '-TargetShaFull', head, '-RunId', run_id], env=environment, timeout=3600, check=False)
+        def build_resources():
+            if (shutil.disk_usage(workspace).free < 1024 * 1024**2
+                    or available_commit_bytes() < 768 * 1024**2
+                    or psutil.virtual_memory().available < 768 * 1024**2):
+                raise RuntimeError('Laboratory resource reserve reached; contained build stopped')
+        with (lab / 'commands.log').open('ab') as output:
+            result = run_build(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                workspace / 'deploy/bluegreen_prepare.ps1', '-Environment', 'MAIN', '-TargetSha', head[:8],
+                '-TargetShaFull', head, '-RunId', run_id], stdout=output, env=environment, timeout=3600,
+                receipt=root / 'bluegreen/builds' / (head[:8] + '.json'),
+                release=root / 'releases' / head[:8], sha_full=head, check_alive=build_resources).returncode
         report['pipelineExitCode'] = result
         python = root / 'releases' / head[:8] / 'backend/.venv/Scripts/python.exe'
         if python.exists():
@@ -147,8 +182,11 @@ if __name__ == '__main__':
     parser.add_argument('--pg-bin', type=Path, required=True)
     parser.add_argument('--resume', type=Path)
     parser.add_argument('--constraints', type=Path)
+    parser.add_argument('--minimum-free-disk-mb', type=int, default=6144)
+    parser.add_argument('--minimum-commit-mb', type=int, default=6144)
     args = parser.parse_args()
     result = run(args.source.resolve(), args.pg_bin.resolve(), Path(__file__).resolve().parents[2],
-                 resume=args.resume, constraints=args.constraints)
+                 resume=args.resume, constraints=args.constraints,
+                 minimum_free_disk_mb=args.minimum_free_disk_mb, minimum_commit_mb=args.minimum_commit_mb)
     print(json.dumps(result, indent=2))
     sys.exit(0 if result['ok'] else 1)

@@ -190,7 +190,7 @@ def test_build_propagates_selected_machine_config(laboratory, monkeypatch):
     def build(*args, **kwargs):
         calls.append(kwargs['env']['OPS_MACHINE_CONFIG'])
         return SimpleNamespace(returncode=0)
-    monkeypatch.setattr('deploy.bluegreen.cli.subprocess.run', build)
+    monkeypatch.setattr('deploy.bluegreen.cli.run_build', build)
     assert pipeline(loaded, manager, 'a' * 8, 'explicit-config-build') == state
     assert calls == [str(machine.resolve())]
 
