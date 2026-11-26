@@ -231,4 +231,6 @@ Atualizar `deploy/VALIDACAO_BLUEGREEN.md`, preservando o histórico, e reclassif
 
 Estado detalhado e evidências por etapa: [PRONTIDAO_PRODUCAO_BLUEGREEN.md](deploy/PRONTIDAO_PRODUCAO_BLUEGREEN.md). Builds limpos e testes locais não fecham os requisitos de robôs, dependências, carga real e instalação no servidor.
 
+Atualização posterior: a [etapa 1 de workers e dependências](deploy/ETAPA_1_WORKERS_DEPENDENCIAS.md) implementou admissão/drenagem com confirmação, corrigiu as seis entradas de dependências de produção e preparou a candidata `6ab3f747`. Homologação de negócio, triagem residual, carga representativa e piloto corporativo permanecem pendentes.
+
 **Decisão:** liberar somente com todos os itens obrigatórios aprovados. Item não aplicável exige justificativa explícita; item bloqueado ou não executado não equivale a aprovação. Até lá, manter MAIN no modo legado.

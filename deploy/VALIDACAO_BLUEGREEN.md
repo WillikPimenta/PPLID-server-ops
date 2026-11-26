@@ -115,7 +115,7 @@ Essas 605 migrações ocorreram em banco novo e isolado. Não comprovam compatib
 | T26 | Aprovado de forma conservadora | Qualquer pendência de migração bloqueia a candidata. |
 | T27 | Parcial | Timeout SQL real de 250 ms no cluster descartável; não há coordenador de migrations online homologado. |
 | T28 | Parcial | Falha/pendência de esquema impede publicação; falta falha de migração real em cópia com duas versões. |
-| T29 | Parcial; bloqueio de negócio | Infraestrutura do supervisor aprovada com jobs sintéticos. Starters reais não homologados; parada herdada usa encerramento forçado e precisa de contrato de drenagem. |
+| T29 | Parcial; homologação de negócio pendente | Contrato de drenagem implementado: timeout/queda preservam jobs, recibo confirma parada, subprocessos e descendentes acompanhados. Protocolo e supervisor aprovados com jobs sintéticos; quatro testes de entrypoints reais com callbacks controlados aprovados. Faltam workloads reais e integração painel/supervisor. Ver etapa 1. |
 | T30 | Parcial | Assets e releases registradas protegidos; falta ensaio completo do prune com todos os supervisors de negócio reais. |
 | T31 | Aprovado para preflight | Memória insuficiente recusa o início; carga e limites do host real pendentes. |
 | T32 | Aprovado no laboratório | Queda e recuperação de proxy proprietário testadas. |

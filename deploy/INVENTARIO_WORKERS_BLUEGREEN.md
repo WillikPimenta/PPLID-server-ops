@@ -1,5 +1,17 @@
 # Workers: inventário e condições de migração
 
+## Atualização da etapa 1 — 26/11/2026
+
+A candidata `6ab3f747` implementa o protocolo comum de admissão, drenagem e subprocessos descrito em [etapa 1](ETAPA_1_WORKERS_DEPENDENCIAS.md). O supervisor de operações deixou de chamar `stop_all()` no encerramento de deploy. Ciclos ativos terminam naturalmente; timeout mantém a execução e bloqueia sua substituição; parada confirmada exige recibo, identidade e ausência de unidades/descendentes. A retirada web espera somente o grupo do slot retirado, preservando o supervisor independente.
+
+Os entrypoints listados abaixo receberam gates de admissão, ciclos e esperas cooperativas, com guards vinculados ao PID do supervisor. Subprocessos acompanhados usam Job Objects Windows sem encerramento ao fechar o handle. O serviço SLA tem exclusividade global; comandos/estado do painel e retomada de sessões reais ainda exigem homologação da arquitetura com o supervisor independente.
+
+Doze testes do protocolo, cinco de infraestrutura do supervisor/retirada web, quatro dos entrypoints reais com callbacks controlados e 30 de regressão selecionada passaram. Os testes não executaram tarefas corporativas reais. A validação de agendas, credenciais, arquivos, efeitos únicos e recuperação de negócio continua obrigatória.
+
+As observações seguintes documentam a revisão anterior `b683f027`; a chamada de encerramento forçado descrita no histórico foi removida do caminho de deploy supervisionado. Botões legados de parada explícita conservam semântica própria.
+
+## Inventário e histórico da revisão anterior
+
 Revisão estática em 26/11/2026, aplicação em `b683f027`. Nenhum starter corporativo foi executado para produzir este documento. Caminhos abaixo são relativos ao repositório da aplicação.
 
 | Grupo | Ponto de entrada | Dependências e verificação necessária |

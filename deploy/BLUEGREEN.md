@@ -128,6 +128,10 @@ Antes de ativar a camada web, inventariar e transferir os robôs/agendamentos do
 
 Há um entrypoint independente para os starters existentes. Seu start é **explícito**, separado do deploy, exige `workersOwnershipConfirmed: true` e um preflight de esquema. O mutex de background é adquirido antes do `django.setup()` e dos efeitos de inicialização. O processo é fixado na release escolhida e sua release fica protegida contra retenção.
 
+A release deve declarar `scripts/deploy/bluegreen-workers-contract.json` e conter a cópia compatível do protocolo de admissão. `workers-stop` fecha novos despachos e espera ciclos, subprocessos e descendentes terminarem; não chama o encerramento forçado do robot manager. Timeout mantém a geração em `draining` e bloqueia substituição. A confirmação exige recibo de parada, identidade da instância e nenhuma unidade pendente; um PID morto sozinho não basta. Consultar [contrato, testes e condições de recuperação](ETAPA_1_WORKERS_DEPENDENCIAS.md). A retirada de um slot web fecha apenas o grupo dessa instância, preservando o supervisor independente.
+
+Preparar duas releases com o protocolo compatível antes de transferir os workers. O start confere todos os slots registrados; depois de registrar o supervisor, releases web sem o novo contrato são recusadas também no rollback. Um supervisor legado não é convertido automaticamente.
+
 ```powershell
 .\deploy\bluegreen.ps1 -Action workers-start -Environment DEV -Sha <release-homologada> -MachineConfig C:\PPLID\machine.config.json
 .\deploy\bluegreen.ps1 -Action workers-stop -Environment DEV -MachineConfig C:\PPLID\machine.config.json

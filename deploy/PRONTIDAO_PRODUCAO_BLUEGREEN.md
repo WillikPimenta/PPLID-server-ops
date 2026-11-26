@@ -2,6 +2,8 @@
 
 **Decisão atual: NÃO LIBERADO.** As correções de infraestrutura avançaram e os testes locais foram ampliados. A execução do [plano](../PLANO_PRONTIDAO_PRODUCAO_BLUE_GREEN.md) não deve ser confundida com aprovação dos requisitos que ainda dependem do produto e do servidor.
 
+**Atualização posterior — etapa 1:** foi implementada drenagem cooperativa com confirmação, identificação de subprocessos e preservação em timeout/queda, removendo `stop_all()` do encerramento de deploy. A candidata da aplicação é `6ab3f747`; a auditoria de dependências de produção caiu de seis entradas altas para zero. A consolidação passou a **100 testes distintos de operações aprovados**, além dos testes selecionados da aplicação. Há falhas preexistentes na suíte do frontend e sete alertas em ferramentas de desenvolvimento. Consultar [entrega, evidências e limites da etapa 1](ETAPA_1_WORKERS_DEPENDENCIAS.md). Os resultados anteriores abaixo permanecem como histórico; ainda faltam workloads/integração painel-supervisor, carga representativa e piloto no servidor.
+
 ## Escopo autorizado e ambientes
 
 O usuário autorizou usar MAIN e informou pico de 150 usuários. Aplicação nesta máquina: `C:\Users\c93123a\PPLID`; instalação no servidor: `C:\PPLID`. Na inspeção local não havia os arquivos padrão `machine.config.json` nem listeners nas portas 8000, 5173 e 5190. Um checkout da aplicação não comprova uma instalação operacional equivalente à do servidor.
@@ -21,7 +23,7 @@ Testes de falha, builds, bancos e carga foram executados em `.local/bluegreen-*`
 - Relatório de migrações usa os marcadores de `showmigrations --plan`. O código anterior procurava `[ ]` na saída de `migrate --plan` e podia informar falsamente zero pendências. O bloqueio do slot continua usando `MigrationExecutor`.
 - Administração do Caddy reconcilia leitura/resposta perdida após `/load` verificando o hash real da configuração, sem repetir o POST. Rejeição HTTP explícita continua sendo erro.
 
-Código e testes: branch `feat/bluegreen-deploy-20261126`, commit `566a0bb`, worktree `.local/bluegreen-review-ops`. A aplicação principal de revisão continua em `b683f027`. A versão anterior de teste recebeu os mesmos guards em `3232216c`, branch `test/bluegreen-r1-20261126`, baseada no código funcional `8cda7a82`.
+Na rodada anterior, código e testes estavam na branch `feat/bluegreen-deploy-20261126`, commit `566a0bb`, worktree `.local/bluegreen-review-ops`, e a aplicação de revisão estava em `b683f027`. A versão anterior de teste recebeu os mesmos guards em `3232216c`, branch `test/bluegreen-r1-20261126`, baseada no código funcional `8cda7a82`. Os commits atuais estão no relatório da etapa 1.
 
 ## Situação por etapa do plano
 
@@ -29,8 +31,8 @@ Código e testes: branch `feat/bluegreen-deploy-20261126`, commit `566a0bb`, wor
 |---|---|
 | A — Rollback | Concluída nos casos definidos e cobertos. |
 | B — Interrupções/concorrência | Parcial; cenários adicionais aprovados, matriz completa de build/manutenção ainda aberta. |
-| C — Releases limpas | Dois builds e troca real aprovados; falta cadeia completa dos gatilhos na instalação de destino e repetir sobre a versão final após resolver dependências. |
-| D — Workers | Infraestrutura sintética aprovada; drenagem e workloads de negócio bloqueiam liberação. |
+| C — Releases limpas | Builds anteriores e troca real aprovados; candidata final `6ab3f747` construída em venv nova com constraints e `pip check` aprovado. Falta validar fluxos/gatilhos sobre a candidata final na instalação de destino. |
+| D — Workers | Drenagem implementada e validada localmente na etapa 1; workloads reais e integração painel/supervisor ainda pendentes. |
 | E — Aplicação | Autenticação, sessão, CSRF e assets aprovados entre versões; matriz funcional completa pendente. |
 | F — Capacidade | Ensaio curto de transporte com 150 clientes aprovado; baseline/carga representativa pendentes. |
 | G — Piloto corporativo | Não executado; a inspeção desta máquina não equivale ao servidor em `C:\PPLID`. |
@@ -42,7 +44,7 @@ Suíte principal: **78 aprovados**, em 589,30 s, incluindo regressão do console
 
 Os ensaios adicionais incluem contagem real de migrações pendentes, interrupção antes da gravação de PID e antes/depois da troca, recovery repetido, falha de rollback e leitura administrativa transitória. Consultar os XMLs para os resultados finais; não somar reexecuções como casos novos.
 
-**Total consolidado: 85 casos distintos aprovados** — 78 na suíte principal, um de contagem real de migrations, três pontos de interrupção e três casos do controle administrativo. Reexecuções direcionadas de casos já contados não aumentam esse total. Após o último ajuste da fase do supervisor, sete casos pertinentes foram reexecutados e passaram.
+**Total consolidado da rodada anterior: 85 casos distintos aprovados** — 78 na suíte principal, um de contagem real de migrations, três pontos de interrupção e três casos do controle administrativo. Reexecuções direcionadas de casos já contados não aumentam esse total. Após o ajuste da fase do supervisor naquela rodada, sete casos pertinentes foram reexecutados e passaram. A etapa 1 ampliou o conjunto para 100 casos distintos.
 
 Histórico de falhas preservado:
 
@@ -90,8 +92,8 @@ Na primeira tentativa de build, o pip recusou o certificado TLS e o logger tento
 
 | Requisito | O que falta |
 |---|---|
-| Parada/atualização dos robôs | A rotina herdada usa `taskkill /T /F`; falta quiescência, drenagem, identidade dos subprocessos e recuperação de jobs reais. Ver [inventário](INVENTARIO_WORKERS_BLUEGREEN.md). |
-| Dependências da aplicação | Auditoria de produção reportou seis entradas de severidade alta; revisar/corrigir e recompilar o pacote final. Ver [relatório](PENDENCIAS_DEPENDENCIAS_BLUEGREEN.md). |
+| Parada/atualização dos robôs | Quiescência, drenagem e identidade implementadas; falta homologar jobs reais, retomada e interação painel/supervisor. Ver [inventário](INVENTARIO_WORKERS_BLUEGREEN.md). |
+| Dependências e regressão da aplicação | Auditoria de produção zerada na etapa 1; revisar sete entradas de desenvolvimento e falhas preexistentes de testes. Ver [relatório](PENDENCIAS_DEPENDENCIAS_BLUEGREEN.md). |
 | Capacidade representativa | Baseline e carga prolongada com telas/consultas/dados/jobs reais, 150 usuários e memória/disco do servidor. |
 | Aplicação completa | Matriz funcional de `/falhas/`, arquivos nos limites reais, contratos das APIs usadas por abas antigas e navegação lazy real. |
 | Recuperação abrangente | Interrupção de build e subprocessos pip/npm, todas as combinações concorrentes de manutenção e recuperação após queda de jobs de negócio; gatilhos completos watcher/console com nova release em instalação equivalente à do servidor. |
@@ -103,4 +105,4 @@ O limite máximo real de upload e os tempos aceitáveis de primeira ativação, 
 
 ## Próxima sequência necessária
 
-Fechar dependências e o contrato de parada dos robôs; repetir os testes afetados no pacote final e executar o piloto autorizado em MAIN com os limites e procedimentos concretos do servidor. A autorização de uso de MAIN já foi dada; o impedimento atual é técnico e de evidência operacional.
+Concluir a homologação de workloads e aplicação sobre a candidata da etapa 1, tratar a triagem residual e executar o piloto autorizado em MAIN com os limites e procedimentos concretos do servidor. A autorização de uso de MAIN já foi dada; o impedimento atual é técnico e de evidência operacional.
