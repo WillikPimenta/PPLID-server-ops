@@ -1,0 +1,7 @@
+{
+  "version": "2.11.9",
+  "platform": "windows_amd64",
+  "url": "https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_windows_amd64.zip",
+  "archiveSha512": "98753d5d42650383d00619ac70917a217141f9e92314185bf6c1b8b439cfcfdf8393da0ebb4675c8cb3b23d29a19aabe99dc5aca64fa1bfc3a1ba22509b06871",
+  "executableSha256": "2622e239c79df700b0eb92cbd950d1edee365e155a7859f358f0e55f002df591"
+}

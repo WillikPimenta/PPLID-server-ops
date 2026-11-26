@@ -11,6 +11,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'lib\bluegreen.ps1')
+if (Test-PplidBlueGreen -Environment $Environment) {
+    $runtimePath = Join-Path (Get-PplidBaseDir) "deploy\$Environment\bluegreen\state.json"
+    if (Test-Path -LiteralPath $runtimePath) {
+        $runtime = Get-Content -LiteralPath $runtimePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($property in $runtime.slots.PSObject.Properties) {
+            if ($property.Value.sha -eq $TargetSha) { throw 'Rebuild de release registrada em slot recusado; use redeploy sem rebuild.' }
+        }
+    }
+}
 . (Join-Path $PSScriptRoot "lib\deploy_paths.ps1")
 . (Join-Path $PSScriptRoot "lib\deploy_state.ps1")
 . (Join-Path $PSScriptRoot "lib\env_spec.ps1")
@@ -177,7 +187,7 @@ function Remove-ReleaseWorktree {
     foreach ($releasePath in @($toRemove | Select-Object -Unique)) {
         LogInfo "Limpando release/worktree: $releasePath"
         try {
-            Remove-PplidReleaseDir -Environment $Environment -ReleaseDir $releasePath
+            Remove-PplidReleaseDir -Environment $Environment -ReleaseDir $releasePath -AllowBuildTarget
         } catch {
             LogWarn "Remove-PplidReleaseDir: $($_.Exception.Message)"
         }

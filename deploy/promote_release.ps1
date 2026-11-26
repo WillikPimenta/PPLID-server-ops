@@ -9,6 +9,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'lib\bluegreen.ps1')
+if (Test-PplidBlueGreen -Environment $Environment) {
+    Invoke-PplidBlueGreen -Action promote -Environment $Environment -Sha $TargetSha -RunId $RunId
+    exit 0
+}
 . (Join-Path $PSScriptRoot "lib\deploy_paths.ps1")
 . (Join-Path $PSScriptRoot "lib\deploy_state.ps1")
 . (Join-Path $PSScriptRoot "lib\junction.ps1")

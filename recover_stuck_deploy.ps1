@@ -37,6 +37,11 @@ function Write-RecoveryLog {
 }
 
 foreach ($env in $envList) {
+    . (Join-Path $opsRoot 'deploy\lib\bluegreen.ps1')
+    if (Test-PplidBlueGreen -Environment $env) {
+        Invoke-PplidBlueGreen -Action recover -Environment $env
+        continue
+    }
     Write-RecoveryLog -LogEnvironment $env -Message "=== Recover $env ==="
 
     $state = Get-DeployState -Environment $env

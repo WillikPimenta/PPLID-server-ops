@@ -111,6 +111,33 @@ function Set-ProcessSnapshot {
     foreach ($process in $script:raw) {
         if (Test-IsApprovedProcess $process) { $script:approvedPids[[int]$process.ProcessId] = $true }
     }
+    # A registered slot can be a candidate or a draining previous release.
+    # Its descendants must not become orphans merely because current changed.
+    foreach ($environment in @('MAIN','DEV','HOM')) {
+        $runtimePath = Join-Path $BaseDir "deploy\$environment\bluegreen\state.json"
+        $backgroundPath = Join-Path $BaseDir "deploy\$environment\bluegreen\background.json"
+        $records = @()
+        if (Test-Path -LiteralPath $runtimePath) {
+            $runtime = Get-Content -LiteralPath $runtimePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            foreach ($property in $runtime.slots.PSObject.Properties) { $records += $property.Value.process }
+        }
+        if (Test-Path -LiteralPath $backgroundPath) {
+            $records += (Get-Content -LiteralPath $backgroundPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop).process
+        }
+        foreach ($record in $records) {
+            if (-not $record -or -not $script:byPid.ContainsKey([int]$record.pid)) { continue }
+            $candidate = $script:byPid[[int]$record.pid]
+            $created = ([datetime]$candidate.CreationDate).ToUniversalTime()
+            $epoch = [datetime]::SpecifyKind([datetime]'1970-01-01', [DateTimeKind]::Utc)
+            $delta = [Math]::Abs(($created - $epoch).TotalSeconds - [double]$record.created)
+            $commandArguments = @($record.cmdline)
+            $anchor = if ($commandArguments.Count) { [string]$commandArguments[-1] } else { '' }
+            if ($delta -lt 0.01 -and (Get-Text $candidate.ExecutablePath) -eq [string]$record.exe -and
+                $anchor -and (Get-Text $candidate.CommandLine).Contains($anchor)) {
+                $script:approvedPids[[int]$record.pid] = $true
+            }
+        }
+    }
     try {
         $machine = Get-Content -LiteralPath (Join-Path $BaseDir 'machine.config.json') -Raw | ConvertFrom-Json
         $ports = @($machine.MAIN.backendPort,$machine.DEV.backendPort,$machine.HOM.backendPort) | Where-Object { $_ }

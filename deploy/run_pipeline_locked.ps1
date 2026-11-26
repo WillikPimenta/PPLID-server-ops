@@ -17,6 +17,11 @@ param(
 #>
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'lib\bluegreen.ps1')
+if (Test-PplidBlueGreen -Environment $Environment) {
+    Invoke-PplidBlueGreen -Action pipeline -Environment $Environment -Sha $TargetSha -RunId $RunId
+    exit 0
+}
 . (Join-Path $PSScriptRoot "lib\deploy_lock.ps1")
 . (Join-Path $PSScriptRoot "lib\deploy_paths.ps1")
 . (Join-Path (Split-Path $PSScriptRoot -Parent) "lib\ops_store.ps1")

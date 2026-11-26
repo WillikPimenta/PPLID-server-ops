@@ -15,4 +15,6 @@ ops-console/automation-native/backend/tmp/
 ops-console/automation-native/**/*.egg-info/
 debug-*.log
 lib/__pycache__/
+deploy/**/__pycache__/
+tests/**/__pycache__/
 _debug_*.ps1

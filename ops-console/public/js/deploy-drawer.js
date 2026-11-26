@@ -219,6 +219,10 @@
     const sha = OC.resolveCommitSha ? OC.resolveCommitSha(data) : data.deployState?.targetSha || "—";
     const prevSha = data.deployState?.activeSha || data.deployedSha || "—";
     const summary = data.deploySummary || {};
+    const blueGreen = data.blueGreen;
+    const blueGreenMeta = blueGreen
+      ? `<p>Publicação: <strong>${OC.escapeHtml(blueGreen.phase || "—")}</strong> · Versão ativa: <code>${OC.escapeHtml(blueGreen.activeSha || "—")}</code>${blueGreen.candidateSha ? ` · Candidata: <code>${OC.escapeHtml(blueGreen.candidateSha)}</code>` : ""}</p>`
+      : "";
     const progressPct = cached.progressPct ?? data.deployProgress?.progressPct ?? summary.progressPct ?? 0;
     const isFailed = (data.displayPhase || data.phase) === "failed" || data.pipelineStatus === "failed";
 
@@ -246,6 +250,7 @@
 
     body.innerHTML = `
       <div class="deploy-drawer-summary">
+        ${blueGreenMeta}
         <p class="deploy-drawer-message">${OC.escapeHtml(summary.message || (isFailed ? "Deploy falhou." : "Deploy em andamento."))}</p>
         <div class="deploy-drawer-meta">
           <span>Branch: <code>${OC.escapeHtml(branch)}</code></span>

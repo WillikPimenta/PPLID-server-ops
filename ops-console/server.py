@@ -967,6 +967,7 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
             )
             environments[env_name] = {
                 "enabled": env_enabled,
+                "blueGreen": server_ops.bluegreen_status(config, env_name),
                 "phase": stored_phase,
                 "displayPhase": display_phase,
                 "pipelineStatus": pipeline_status,
@@ -1123,6 +1124,7 @@ def build_overview(config: dict[str, Any], *, lite: bool = False) -> dict[str, A
 
         environments[env_name] = {
             **stored,
+            "blueGreen": server_ops.bluegreen_status(config, env_name),
             "enabled": env_enabled,
             "phase": stored_phase,
             "displayPhase": display_phase,

@@ -5,6 +5,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'lib\bluegreen.ps1')
+if (Test-PplidBlueGreen -Environment $Environment) {
+    Invoke-PplidBlueGreen -Action recover -Environment $Environment
+    exit 0
+}
 $opsRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $opsRoot "lib\paths.ps1")
 . (Join-Path $PSScriptRoot "lib\deploy_paths.ps1")

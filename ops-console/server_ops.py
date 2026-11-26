@@ -25,6 +25,40 @@ BUSY_STATUSES = frozenset({"building", "validating", "promoting", "watching"})
 ENV_DISABLED_ERROR = "Ambiente desativado. Ative-o antes de executar esta acao."
 
 
+def uses_bluegreen(config: dict[str, Any], env_name: str) -> bool:
+    return ((config.get(env_name) or {}).get("deployStrategy", "legacy") == "blueGreen"
+            or (get_base_dir(config) / "deploy" / env_name / "bluegreen/state.json").exists())
+
+
+def bluegreen_status(config: dict[str, Any], env_name: str) -> dict[str, Any] | None:
+    if not uses_bluegreen(config, env_name):
+        return None
+    path = get_base_dir(config) / "deploy" / env_name / "bluegreen/state.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8-sig"))
+        slots = state["slots"]
+        return {"strategy": "blueGreen", "phase": state["phase"], "activeSlot": state.get("active"),
+                "candidateSlot": state.get("candidate"), "previousSlot": state.get("previous"),
+                "activeSha": slots.get(state.get("active"), {}).get("sha"),
+                "candidateSha": slots.get(state.get("candidate"), {}).get("sha"),
+                "switchedAt": state.get("switchedAt"), "lastError": state.get("lastError"),
+                "updatedAt": state.get("updatedAt"), "proxyConfigured": bool(state.get("proxy"))}
+    except (OSError, ValueError, KeyError):
+        return {"strategy": "blueGreen", "phase": "unavailable", "error": "Estado blue-green indisponivel; use recovery."}
+
+
+def bluegreen_operation(config: dict[str, Any], env_name: str, action: str, *, sha: str = "") -> dict[str, Any]:
+    script = get_base_dir(config) / "ops/deploy/bluegreen.ps1"
+    args = ["-Action", action, "-Environment", env_name]
+    if sha:
+        args += ["-Sha", sha]
+    return run_powershell(script, args, timeout=300)
+
+
+def bluegreen_maintenance_block() -> dict[str, Any]:
+    return {"ok": False, "error": "Ambiente blue-green: use o runbook para alterar portas ou desativar; parada por porta bloqueada."}
+
+
 def is_env_enabled(config: dict[str, Any], env_name: str) -> bool:
     """Missing enabled field defaults to True (backward compatible)."""
     env_cfg = config.get(env_name)
@@ -105,7 +139,7 @@ def _resolve_origin_branch_sha(base_dir: Path, env_name: str) -> tuple[str, str]
         return "", ""
     ref = f"origin/{branch}"
     try:
-        _run_hidden(
+        fetch_result = _run_hidden(
             _git_command(mirror, "fetch", "origin"),
             capture_output=True,
             text=True,
@@ -829,6 +863,9 @@ def action_disable_environment(
     if env_name not in ENV_ORDER:
         return {"ok": False, "error": "Ambiente invalido."}
 
+    if uses_bluegreen(config, env_name):
+        return bluegreen_maintenance_block()
+
     auth_block = _can_disable_auth_env(config, env_name)
     if auth_block:
         return auth_block
@@ -887,6 +924,9 @@ def action_enable_environment(
     if env_name not in ENV_ORDER:
         return {"ok": False, "error": "Ambiente invalido."}
 
+    if uses_bluegreen(config, env_name):
+        return {"ok": False, "error": "Ative o ambiente e recupere os slots pelo runbook blue-green; start legado bloqueado."}
+
     base_dir = get_base_dir(config)
     if is_deploy_busy(base_dir, env_name):
         return {"ok": False, "error": "Deploy em andamento neste ambiente."}
@@ -936,6 +976,15 @@ def action_restart_service(
     service = service.lower()
     if service not in ("backend", "frontend", "all"):
         return {"ok": False, "error": "Servico invalido (backend|frontend|all)."}
+
+    if uses_bluegreen(config, env_name):
+        state = load_deploy_state(base_dir, env_name)
+        sha = str(state.get("activeSha") or "")
+        if not sha:
+            return {"ok": False, "error": "Sem release ativa para reinicio blue-green."}
+        # A slot is a coherent frontend/backend release. Restart by replacing
+        # the web slot; never kill the public proxy listener or robot tree.
+        return bluegreen_operation(config, env_name, "promote", sha=sha)
 
     cleanup = run_orphan_bot_cleanup(config, log_name=f"restart-{env_name.lower()}.log")
 
@@ -1297,6 +1346,7 @@ def build_infra_payload(config: dict[str, Any], env_name: str) -> dict[str, Any]
     frontend_port = int(env_cfg.get("frontendPort") or 0)
     return {
         "environment": env_name,
+        "blueGreen": bluegreen_status(config, env_name),
         "backendPort": backend_port,
         "frontendPort": frontend_port,
         "configPath": str(get_env_config_path(config)),
@@ -1361,6 +1411,8 @@ def update_infra_ports(
     *,
     config_path: Path | None = None,
 ) -> dict[str, Any]:
+    if uses_bluegreen(config, env_name):
+        raise ValueError(bluegreen_maintenance_block()["error"])
     disabled = require_env_enabled(config, env_name)
     if disabled:
         raise ValueError(disabled["error"])
@@ -1428,6 +1480,8 @@ def apply_infra_ports(
 
     restart: 'changed' | 'backend' | 'frontend' | 'all'
     """
+    if uses_bluegreen(config, env_name):
+        return bluegreen_maintenance_block()
     disabled = require_env_enabled(config, env_name)
     if disabled:
         return disabled

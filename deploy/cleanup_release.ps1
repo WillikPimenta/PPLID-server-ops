@@ -11,6 +11,9 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\release_cleanup.ps1")
 . (Join-Path $PSScriptRoot "lib\legacy_deploy_status.ps1")
 
+Enter-PplidReleaseMaintenanceLock -Environment $Environment
+try {
+
 $paths = Get-PplidDeployEnvPaths -Environment $Environment
 
 if ($Sha) {
@@ -27,3 +30,4 @@ foreach ($dir in $dirs) {
 
 Sync-DeployStateFromLegacy -Environment $Environment | Out-Null
 Write-Host "Cleanup concluido para $Environment."
+} finally { Exit-PplidReleaseMaintenanceLock }

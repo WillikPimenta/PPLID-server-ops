@@ -4,6 +4,13 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== PPLID Stop All ==="
 
+. (Join-Path $PSScriptRoot 'deploy\lib\bluegreen.ps1')
+foreach ($checkEnvironment in @("MAIN", "DEV", "HOM")) {
+    if (Test-PplidBlueGreen -Environment $checkEnvironment) {
+        throw "Stop-all legado bloqueado para $checkEnvironment em blue-green; use procedimento de parada controlada."
+    }
+}
+
 foreach ($env in @("MAIN", "DEV", "HOM")) {
     $repoName = "PPLID_$env"
     $repoDir = Get-PplidRepoDir -Name $repoName

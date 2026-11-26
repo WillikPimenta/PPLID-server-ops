@@ -12,6 +12,9 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "lib\release_cleanup.ps1")
 . (Join-Path $PSScriptRoot "lib\legacy_deploy_status.ps1")
 
+Enter-PplidReleaseMaintenanceLock -Environment $Environment
+try {
+
 $paths = Get-PplidDeployEnvPaths -Environment $Environment
 if (-not (Test-Path $paths.Releases)) {
     Write-Host "Nenhuma release em $($paths.Releases)"
@@ -60,3 +63,4 @@ Write-Host "Prune $Environment concluido. Mantidas: $($toKeep.Count), removidas:
 if ($removed.Count) {
     Write-Host ("Removidas: " + ($removed -join ", "))
 }
+} finally { Exit-PplidReleaseMaintenanceLock }
