@@ -10,8 +10,11 @@ function Get-PplidMachineConfigCandidates {
 function Get-PplidMachineConfigPath {
     # Prefer the explicit override used by start_ops_console.ps1 -Local so
     # detached workers share the same baseDir/logDir as the Python server.
-    if ($env:OPS_MACHINE_CONFIG -and (Test-Path $env:OPS_MACHINE_CONFIG)) {
-        return $env:OPS_MACHINE_CONFIG
+    if ($env:OPS_MACHINE_CONFIG) {
+        if (-not (Test-Path -LiteralPath $env:OPS_MACHINE_CONFIG -PathType Leaf)) {
+            throw 'OPS_MACHINE_CONFIG explicito ausente; fallback de instalacao bloqueado.'
+        }
+        return [IO.Path]::GetFullPath($env:OPS_MACHINE_CONFIG)
     }
     foreach ($path in (Get-PplidMachineConfigCandidates)) {
         if (Test-Path $path) {
@@ -48,7 +51,15 @@ function Get-LanIPv4 {
 function Get-PplidMachineConfig {
     $path = Get-PplidMachineConfigPath
     if (Test-Path $path) {
-        return Get-Content $path -Raw | ConvertFrom-Json
+        $machine = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($env:OPS_MACHINE_CONFIG) {
+            $base = [string]$machine.baseDir
+            if ([string]::IsNullOrWhiteSpace($base) -or
+                -not ($base -match '^[A-Za-z]:[\\/]' -or $base.StartsWith('\\'))) {
+                throw 'OPS_MACHINE_CONFIG exige baseDir absoluto; fallback de instalacao bloqueado.'
+            }
+        }
+        return $machine
     }
 
     return [PSCustomObject]@{
@@ -123,8 +134,11 @@ function Get-PplidEnvConfigPath {
     )
 
     $machine = Get-PplidMachineConfig
-    if ($machine.envConfigPath -and (Test-Path $machine.envConfigPath)) {
-        return $machine.envConfigPath
+    if ($machine.envConfigPath) {
+        if (-not (Test-Path -LiteralPath $machine.envConfigPath -PathType Leaf)) {
+            throw 'envConfigPath configurado ausente; fallback de ambiente bloqueado.'
+        }
+        return [IO.Path]::GetFullPath($machine.envConfigPath)
     }
 
     $default = Join-Path (Get-PplidOpsDir -ScriptRoot $ScriptRoot) "config\env.config.json"
