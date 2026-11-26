@@ -157,7 +157,10 @@ class Manager:
             desired = build_config(self.config, state["slots"], active)
             self.proxy.load(desired)
             state["proxyHash"] = digest(desired)
+        previous_active = state.get("active")
         state["active"] = active
+        if previous_active and previous_active != active:
+            state["previous"] = previous_active
         state["intent"] = None
         self.save(state)
         if active:
@@ -248,6 +251,7 @@ class Manager:
 
     def retire(self, state, name):
         slot = state["slots"][name]
+        self.reconcile_slot_process(slot)
         if name == state.get("active"):
             raise RuntimeError("Refusing to retire the active slot")
         # After removal of frontend routes Caddy may still be proxying long
@@ -379,9 +383,30 @@ class Manager:
         atomic_json(self.config.directory / "traffic.json", chosen)
         time.sleep(1.1)
         state["active"] = selected
+        if selected != intent["before"]:
+            state["previous"] = intent["before"]
         state["trafficHash"] = digest(chosen)
         state["intent"] = None
         self.save(state, "recovering")
+
+    def reconcile_slot_process(self, slot):
+        if slot.get("process") and processes.owned(slot["process"]):
+            return
+        python = str(Path(slot["release"]) / "backend/.venv/Scripts/python.exe")
+        spec = str(Path(slot["stopFile"]).parent / "spec.json")
+        expected = [python, str(Path(__file__).with_name("slot_worker.py")), "--spec", spec]
+        matches = []
+        for process in psutil.process_iter(["exe", "cmdline"]):
+            try:
+                if (process.info["exe"] and os.path.normcase(process.info["exe"]) == os.path.normcase(python)
+                        and process.info["cmdline"] == expected):
+                    matches.append(processes.identity(process.pid))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if len(matches) > 1:
+            raise RuntimeError("Ambiguous slot launch; processes preserved")
+        if matches:
+            slot["process"] = matches[0]
 
     def rollback(self, sha=""):
         state = self.read()
@@ -428,6 +453,7 @@ class Manager:
             restart_names = ["A"]
         for name in restart_names:
             slot = state["slots"][name]
+            self.reconcile_slot_process(slot)
             if not slot.get("process") or not processes.owned(slot["process"]):
                 sha = slot["sha"]
                 try:
@@ -438,8 +464,6 @@ class Manager:
         if not state.get("proxy") or not processes.owned(state["proxy"]):
             # Only restart if no unknown listener owns the admin port. Start
             # with internal routes; publish only after readiness succeeds.
-            if state.get("intent"):
-                raise RuntimeError("Proxy died during a pending switch; manual diagnosis required")
             self.start_proxy(state, build_config(self.config, state["slots"], None))
             state["proxyHash"] = digest(self.proxy.get())
             self.save(state)
