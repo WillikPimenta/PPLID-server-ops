@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -24,10 +25,15 @@ class RecoveryStore:
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS code_requests (id TEXT PRIMARY KEY, browser TEXT, code TEXT, username TEXT, ip TEXT, created REAL, expires REAL, state TEXT, attempts INTEGER, session_until REAL)")
 
+    @contextmanager
     def connect(self):
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     @staticmethod
     def code_digest(browser, code):
