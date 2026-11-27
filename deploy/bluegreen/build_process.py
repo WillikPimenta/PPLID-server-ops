@@ -226,6 +226,17 @@ class _BuildProcess:
                 setattr(self, name, None)
 
 
+def current_session_id():
+    """Local\\ Job Object names belong to this Windows session, not the host."""
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.ProcessIdToSessionId.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+    kernel.ProcessIdToSessionId.restype = ctypes.c_int
+    session = ctypes.c_uint32()
+    if not kernel.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return session.value
+
+
 def verify_previous(receipt):
     """Never overwrite an uncertain launch, even after its owner disappears."""
     if not receipt.exists():
@@ -244,6 +255,16 @@ def verify_previous(receipt):
         pass
     except psutil.AccessDenied as error:
         raise RuntimeError('BUILD_RECOVERY_REQUIRED: previous build owner liveness is unknown') from error
+    # A missing Local\\ job in another logon/session says nothing about its
+    # original generation. Reboot/logon recovery requires explicit review.
+    if type(previous.get('sessionId')) is not int:
+        raise RuntimeError('BUILD_RECOVERY_REQUIRED: previous Windows session identity is missing')
+    try:
+        session = current_session_id()
+    except OSError as error:
+        raise RuntimeError('BUILD_RECOVERY_REQUIRED: current Windows session identity is unknown') from error
+    if previous['sessionId'] != session:
+        raise RuntimeError('BUILD_RECOVERY_REQUIRED: previous build belongs to a different Windows session')
     if not previous.get('jobName') or _BuildJob.existing_active(previous['jobName']) != 0:
         raise RuntimeError('BUILD_RECOVERY_REQUIRED: previous build tree has not been confirmed empty')
     atomic_json(receipt.with_name(receipt.stem + '.recovered-' + uuid.uuid4().hex[:8] + '.json'), previous)
@@ -278,10 +299,12 @@ def run_build(command, *, stdout, env, timeout, receipt: Path, release: Path, sh
     environment.update(PPLID_WEB_ONLY='1', BI_SYNC_SCHEDULER_AUTOSTART='False')
     if check_alive:
         check_alive()
+    session = current_session_id()
+    owner = processes.identity(os.getpid())
     job = _BuildJob()
     record = {'schemaVersion': 1, 'phase': 'building', 'success': False, 'treeEmpty': False,
               'shaFull': sha_full, 'release': str(release), 'jobName': job.name,
-              'generation': uuid.uuid4().hex, 'owner': processes.identity(os.getpid()), 'startedAt': utc()}
+              'generation': uuid.uuid4().hex, 'owner': owner, 'sessionId': session, 'startedAt': utc()}
     process = None
     outcome = None
     try:

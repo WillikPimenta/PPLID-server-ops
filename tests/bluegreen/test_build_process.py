@@ -195,7 +195,7 @@ with open(sys.argv[5],'ab') as stream:
                 owner.wait(timeout=10)
 
 
-@pytest.mark.parametrize('owner_state', ['alive', 'unknown'])
+@pytest.mark.parametrize('owner_state', ['alive', 'unknown', 'create-time-denied'])
 def test_rebuild_refuses_a_live_or_uninspectable_previous_owner(tmp_path, monkeypatch, owner_state):
     receipt = tmp_path / 'builds/aaaaaaaa.json'
     atomic_json(receipt, {'phase': 'building', 'treeEmpty': False, 'owner': processes.identity(os.getpid()),
@@ -204,8 +204,42 @@ def test_rebuild_refuses_a_live_or_uninspectable_previous_owner(tmp_path, monkey
         def denied(*args):
             raise build_process.psutil.AccessDenied()
         monkeypatch.setattr(build_process.psutil, 'Process', denied)
+    elif owner_state == 'create-time-denied':
+        class InaccessibleOwner:
+            def create_time(self):
+                raise build_process.psutil.AccessDenied()
+        monkeypatch.setattr(build_process.psutil, 'Process', lambda _: InaccessibleOwner())
     with pytest.raises(RuntimeError, match='BUILD_RECOVERY_REQUIRED'):
         build_process.verify_previous(receipt)
+
+
+@pytest.mark.parametrize('previous_session', [None, 'different'])
+def test_rebuild_never_queries_a_local_job_from_an_unknown_or_different_session(
+        tmp_path, monkeypatch, previous_session):
+    receipt = tmp_path / 'builds/aaaaaaaa.json'
+    current = build_process.current_session_id()
+    record = {'phase': 'building', 'treeEmpty': False, 'owner': {'pid': 12345, 'created': 1.0},
+              'jobName': 'Local\\PPLID-Build-' + 'a' * 32}
+    if previous_session is not None:
+        record['sessionId'] = current + 1
+    atomic_json(receipt, record)
+    before = receipt.read_bytes()
+    def gone(_):
+        raise build_process.psutil.NoSuchProcess(12345)
+    monkeypatch.setattr(build_process.psutil, 'Process', gone)
+    monkeypatch.setattr(build_process._BuildJob, 'existing_active',
+                        lambda _: pytest.fail('Cannot query another/unknown session Local Job Object'))
+    with pytest.raises(RuntimeError, match='BUILD_RECOVERY_REQUIRED:.*session'):
+        build_process.verify_previous(receipt)
+    assert receipt.read_bytes() == before
+
+
+def test_confirmed_empty_receipt_remains_usable_from_a_different_session(tmp_path, monkeypatch):
+    receipt = tmp_path / 'builds/aaaaaaaa.json'
+    atomic_json(receipt, {'phase': 'complete', 'success': True, 'treeEmpty': True, 'sessionId': -1})
+    monkeypatch.setattr(build_process._BuildJob, 'existing_active',
+                        lambda _: pytest.fail('Confirmed empty generations need no Local Job query'))
+    build_process.verify_previous(receipt)
 
 
 @pytest.mark.parametrize('kind', ['missing', 'building', 'failed', 'other-sha', 'other-release'])
