@@ -2,10 +2,55 @@
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
+import time
 
 import pytest
 
 from deploy.bluegreen.application_load import stage
+
+
+def test_queued_users_never_exceed_configured_in_flight_limit(tmp_path):
+    lock = threading.Lock()
+    active = peak = 0
+    observed = set()
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                observed.add(self.headers.get('Cookie'))
+            try:
+                time.sleep(.03)
+                body = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            finally:
+                with lock:
+                    active -= 1
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f'http://127.0.0.1:{server.server_port}'
+    try:
+        result = stage(backend=url, frontend=url, cookies=[str(i) for i in range(15)],
+                       cookie_name='synthetic', journeys=[{'name': 'controlled', 'path': '/', 'jsonEquals': {'ok': True}}],
+                       users=15, duration=1, output=tmp_path, name='queued-users', think_seconds=.01, max_in_flight=3)
+        assert result['ok'] and peak == result['peakInFlight'] == 3
+        assert result['peakQueued'] > 0 and result['servedUsers'] == len(observed) == 15
+        assert result['queueWaitP95Ms'] > 0
+        rows = [json.loads(line) for line in (tmp_path / 'queued-users-requests.jsonl').read_text().splitlines()]
+        assert all(row['requestAt'] < 1 and row['ms'] == row['responseMs'] for row in rows)
+        assert all(row['totalMs'] + .02 >= row['queueMs'] + row['responseMs'] for row in rows)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
 
 
 def test_load_distinguishes_independent_sessions_and_detects_lost_authentication(tmp_path):

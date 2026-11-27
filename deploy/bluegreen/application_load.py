@@ -30,7 +30,7 @@ def percentile(values, q):
 
 def stage(*, backend, frontend, cookies, cookie_name, journeys, users, duration,
           output: Path, name, roots=(), events=(), think_seconds=5, minimum_available_mb=768,
-          minimum_commit_mb=768, minimum_disk_mb=1024, sample_extra=None):
+          minimum_commit_mb=768, minimum_disk_mb=1024, sample_extra=None, max_in_flight=None):
     """events = [(seconds, label, callback)]; callbacks run outside client threads."""
     for address in (backend, frontend):
         parsed = urlparse(address)
@@ -38,6 +38,8 @@ def stage(*, backend, frontend, cookies, cookie_name, journeys, users, duration,
             raise ValueError('Load is restricted to unprivileged loopback HTTP listeners')
     if not 1 <= users <= len(cookies) or duration <= 0 or think_seconds < 0:
         raise ValueError('Invalid load parameters')
+    if max_in_flight is not None and (type(max_in_flight) is not int or max_in_flight < 1):
+        raise ValueError('max_in_flight must be a positive integer or None')
     if len(set(cookies[:users])) != users:
         raise ValueError('Each virtual user requires an independent authenticated session')
     if (not journeys or any(not j.get('path', '').startswith('/') or j['path'].startswith('//')
@@ -54,6 +56,10 @@ def stage(*, backend, frontend, cookies, cookie_name, journeys, users, duration,
     host = []
     timeline = []
     sequence = 0
+    gate = threading.BoundedSemaphore(max_in_flight) if max_in_flight is not None else None
+    in_flight = queued = peak_in_flight = peak_queued = 0
+    queue_waits = []
+    served_users = set()
     completed_at = []
     saturation = []
     abort_reasons = []
@@ -61,7 +67,7 @@ def stage(*, backend, frontend, cookies, cookie_name, journeys, users, duration,
     deadline = started + duration
     weights = [j.get('weight', 1) for j in journeys]
     def client(index):
-        nonlocal sequence
+        nonlocal sequence, in_flight, queued, peak_in_flight, peak_queued
         rng = random.Random(1701 + index)
         session = requests.Session()
         session.trust_env = False
@@ -75,7 +81,37 @@ def stage(*, backend, frontend, cookies, cookie_name, journeys, users, duration,
                 journey = rng.choices(journeys, weights=weights, k=1)[0]
                 base = frontend if journey.get('origin') == 'frontend' else backend
                 path = journey['path'].replace('{variant}', str(index % 5 + 1))
+                queued_at = time.monotonic()
+                acquired = False
+                if gate:
+                    acquired = gate.acquire(blocking=False)
+                    if not acquired:
+                        with lock:
+                            queued += 1
+                            peak_queued = max(peak_queued, queued)
+                        try:
+                            while not stop.is_set() and time.monotonic() < deadline:
+                                remaining = deadline - time.monotonic()
+                                if remaining <= 0:
+                                    break
+                                if gate.acquire(timeout=min(.1, remaining)):
+                                    acquired = True
+                                    break
+                        finally:
+                            with lock:
+                                queued -= 1
+                    if not acquired:
+                        break
+                if stop.is_set() or time.monotonic() >= deadline:
+                    if acquired:
+                        gate.release()
+                    break
                 begin = time.monotonic()
+                queue_ms = (begin - queued_at) * 1000
+                with lock:
+                    in_flight += 1
+                    peak_in_flight = max(peak_in_flight, in_flight)
+                    served_users.add(index)
                 status, problem = 0, None
                 response = None
                 try:
@@ -96,10 +132,18 @@ def stage(*, backend, frontend, cookies, cookie_name, journeys, users, duration,
                 except (ValueError, TypeError, AttributeError):
                     problem = 'Invalid response JSON'
                 finally:
-                    if response is not None:
-                        response.close()
+                    try:
+                        if response is not None:
+                            response.close()
+                    finally:
+                        with lock:
+                            in_flight -= 1
+                        if acquired:
+                            gate.release()
                 elapsed = (time.monotonic() - begin) * 1000
+                total_ms = (time.monotonic() - queued_at) * 1000
                 with lock:
+                    queue_waits.append(queue_ms)
                     samples[journey['name']].append(elapsed)
                     statuses[f"{journey['name']}:{status}"] += 1
                     if problem:
@@ -108,7 +152,9 @@ def stage(*, backend, frontend, cookies, cookie_name, journeys, users, duration,
                     completed_at.append(time.monotonic() - started)
                     raw.write(json.dumps({'at': round(time.monotonic() - started, 3),
                                           'journey': journey['name'], 'status': status,
-                                          'ms': round(elapsed, 2), 'error': problem}) + '\n')
+                                          'ms': round(elapsed, 2), 'responseMs': round(elapsed, 2),
+                                          'queueMs': round(queue_ms, 2), 'totalMs': round(total_ms, 2),
+                                          'requestAt': round(begin - started, 6), 'error': problem}) + '\n')
                 stop.wait(think_seconds * rng.uniform(.8, 1.2))
         finally:
             session.close()
@@ -210,6 +256,10 @@ def stage(*, backend, frontend, cookies, cookie_name, journeys, users, duration,
     report = {'name': name, 'users': users, 'plannedSeconds': duration,
               'actualSeconds': round(time.monotonic() - started, 2), 'thinkSeconds': think_seconds,
               'requests': sequence, 'errors': dict(errors), 'statuses': dict(statuses),
+              'maxInFlight': max_in_flight, 'peakInFlight': peak_in_flight,
+              'peakQueued': peak_queued, 'servedUsers': len(served_users),
+              'queueWaitP50Ms': percentile(queue_waits, .5), 'queueWaitP95Ms': percentile(queue_waits, .95),
+              'queueWaitMaxMs': round(max(queue_waits), 2) if queue_waits else None,
               'p50Ms': percentile(all_values, .5), 'p95Ms': percentile(all_values, .95),
               'p99Ms': percentile(all_values, .99), 'maxMs': round(max(all_values), 2) if all_values else None,
               'maxCompletionGapSeconds': round(max(gaps), 3) if gaps else None,

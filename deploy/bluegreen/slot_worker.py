@@ -20,6 +20,41 @@ import time
 CONNECTION_LIMIT = 256
 
 
+class HealthTaskDispatcher:
+    """Reserve two threads for exact health requests, reclassifying every task.
+
+    Waitress 3.0.2 HTTPChannel.service processes one request and redispatches
+    the channel. A following pipelined business request must return to the
+    original business pool, never inherit the health request's priority.
+    """
+    def __init__(self, business):
+        from waitress.task import ThreadedTaskDispatcher
+        self.business = business
+        self.health = ThreadedTaskDispatcher()
+        self.health.set_thread_count(2)
+
+    def add_task(self, task):
+        try:
+            request = task.requests[0]
+            health = (not getattr(request, 'error', True)
+                      and request.command in ('GET', 'HEAD')
+                      and request.path in ('/__pplid/traffic', '/__pplid/ready')
+                      and not request.query and not request.fragment)
+        except (AttributeError, IndexError, TypeError):
+            health = False
+        (self.health if health else self.business).add_task(task)
+
+    def set_thread_count(self, count):
+        self.business.set_thread_count(count)
+
+    def shutdown(self, cancel_pending=True, timeout=5):
+        try:
+            result = self.business.shutdown(cancel_pending=cancel_pending, timeout=timeout)
+        finally:
+            health_result = self.health.shutdown(cancel_pending=cancel_pending, timeout=timeout)
+        return result and health_result
+
+
 def write_json(path: Path, value: dict):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value), encoding="utf-8")
@@ -188,6 +223,7 @@ def main():
     server = create_server(wrapped, host="127.0.0.1", port=spec["backendPort"],
                            threads=spec.get("threads", 16), channel_timeout=600,
                            connection_limit=CONNECTION_LIMIT, map={})
+    server.task_dispatcher = HealthTaskDispatcher(server.task_dispatcher)
     frontend = WebApplication(frontend_application(spec), spec, ready, draining, check)
     frontend_server = create_server(frontend, host="127.0.0.1", port=spec["frontendPort"],
                                     threads=4, channel_timeout=600, connection_limit=CONNECTION_LIMIT, map={})

@@ -18,7 +18,8 @@ from .supervisor_control import _protect
 from .local_mixed_job import run as mixed_business_job
 
 
-def exercise(context, *, phase_seconds=300, sustain_seconds=1800, think_seconds=5, quick=False, reuse_seed=False):
+def exercise(context, *, phase_seconds=300, sustain_seconds=1800, think_seconds=5, quick=False, reuse_seed=False,
+             max_in_flight=None):
     manager, config, lab = context['manager'], context['config'], context['lab']
     expected = Path(__file__).resolve().parents[2] / '.local/bluegreen-readiness'
     if (lab.resolve().parent != expected or not lab.name.startswith('build-')
@@ -168,16 +169,30 @@ def exercise(context, *, phase_seconds=300, sustain_seconds=1800, think_seconds=
             report.update(scope='short-deployment-check', sustainedCapacityValidated=False,
                           legacyComparisonExecuted=False, p95GatePassed=None,
                           mixedBusinessJobExecuted=False)
+            report['operationalProfile'] = {'activeSessions': 150, 'maxConcurrentHttpRequests': max_in_flight,
+                                            'excessRequests': 'client-side queue measured separately'}
             probe_thread = threading.Thread(target=probe, daemon=True)
             probe_thread.start()
-            events = [(10, 'promote-r1', lambda: manager.promote(first)),
-                      (50, 'rollback-r2', manager.rollback),
-                      (90, 'retire-inactive', lambda: manager.retire(manager.read(), manager.read()['previous']))]
+            def transition(label, operation):
+                operation()
+                state = manager.read()
+                report.setdefault('transitionDetails', []).append({
+                    'action': label, 'active': state.get('active'), 'phase': state.get('phase'),
+                    'trafficSwitchMs': state.get('trafficSwitchMs'),
+                    'warmupAndSwitchMs': state.get('warmupAndSwitchMs')})
+            events = [(10, 'promote-r1', lambda: transition('promote-r1', lambda: manager.promote(first))),
+                      (50, 'rollback-r2', lambda: transition('rollback-r2', manager.rollback)),
+                      (90, 'retire-inactive', lambda: transition('retire-inactive',
+                          lambda: manager.retire(manager.read(), manager.read()['previous'])))]
             result = stage(backend=backend, frontend=frontend, cookies=private['cookies'],
                            cookie_name=private['cookieName'], journeys=journeys, users=150,
                            duration=120, output=output, name='bluegreen-150-short', roots=roots,
-                           think_seconds=think_seconds, events=events, sample_extra=database_sample)
+                           think_seconds=think_seconds, events=events, sample_extra=database_sample,
+                           max_in_flight=max_in_flight)
             report['stages'].append({k: v for k, v in result.items() if k != 'host'})
+            state = manager.read()
+            manager.healthy(state['slots'][state['active']], public=True)
+            report['deploymentRecovered'] = True
             report['ok'] = bool(result['ok'] and len(result['events']) == 3
                                 and all(event.get('ok') for event in result['events'])
                                 and processes.owned(worker['process']))
@@ -330,11 +345,12 @@ if __name__ == '__main__':
     parser.add_argument('--browser', action='store_true')
     parser.add_argument('--quick', action='store_true', help='120-second deployment check; no sustained capacity claim')
     parser.add_argument('--resume-stopped', action='store_true', help='Reuse a reviewed stopped runtime and its existing synthetic seed')
+    parser.add_argument('--max-in-flight', type=int, help='Bound concurrent HTTP requests; sessions above this limit wait in a measured queue')
     args = parser.parse_args()
     result = smoke(args.lab.resolve(), args.first, args.second, args.pg_bin.resolve(), args.caddy.resolve(),
                    browser_test=args.browser and not args.resume_stopped, resume_stopped=args.resume_stopped,
                    exercise=lambda c: exercise(c, phase_seconds=args.phase_seconds,
                          sustain_seconds=args.sustain_seconds, think_seconds=args.think_seconds,
-                         quick=args.quick, reuse_seed=args.resume_stopped))
+                         quick=args.quick, reuse_seed=args.resume_stopped, max_in_flight=args.max_in_flight))
     print(json.dumps(result, indent=2))
     raise SystemExit(0 if result['ok'] else 1)
