@@ -20,7 +20,7 @@ from .manager import Manager
 from .store import atomic_json, read_json
 
 
-def run(lab, first, second, pg_bin, caddy, *, browser_test=False):
+def run(lab, first, second, pg_bin, caddy, *, browser_test=False, exercise=None):
     lab = lab.resolve()
     expected = Path(__file__).resolve().parents[2] / '.local/bluegreen-readiness'
     if lab.parent != expected or not lab.name.startswith('build-'):
@@ -36,7 +36,7 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False):
     report = {'ok': False, 'releases': [first, second], 'checks': [], 'productionTouched': False}
     manager = None
     started = False
-    runtime = browser = context = None
+    runtime = browser = context = session = None
     original_environment = dict(os.environ)
     def command(args, *, cwd=None, timeout=600, check=True):
         with (lab / 'smoke-commands.log').open('ab') as output:
@@ -65,15 +65,56 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False):
                  f'PPLID_FRONTEND_URL={frontend}\nSESSION_COOKIE_NAME=readiness_lab_session\n')
         shared.write_text(text, encoding='utf-8')
         settings = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+        # Keep OS executable discovery, not ambient application paths, task
+        # ownership, connection strings or corporate feature switches.
+        inherited = {key: value for key, value in original_environment.items()
+                     if key.upper() in {'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC',
+                                        'PROGRAMFILES', 'PROGRAMFILES(X86)', 'COMMONPROGRAMFILES',
+                                        'COMMONPROGRAMFILES(X86)', 'NUMBER_OF_PROCESSORS',
+                                        'PROCESSOR_ARCHITECTURE', 'OS'}}
+        os.environ.clear()
+        os.environ.update(inherited)
+        os.environ.update(PYTHONIOENCODING='utf-8', PYTHONNOUSERSITE='1')
+        # Disable every scheduler before the first Django import/migration. The
+        # independent supervisor is exercised only with synthetic idle modes.
+        settings.update({name: 'False' for name in ('STATUS_TIMEOUT_ENABLED', 'DAILY_STATUS_RESET_ENABLED',
+                         'PLANTAO_INTERVALO_CLEAR_ENABLED', 'SUPORTE_OP_QUEUE_TIMEOUT_SCHEDULER_ENABLED',
+                         'BI_SYNC_SCHEDULER_AUTOSTART', 'FALHAS_REPORT_SCHEDULER_ENABLED',
+                         'VACATION_RENEWAL_SCHEDULER_ENABLED')})
+        settings.update(FALHAS_FAILURE_SOURCE='legacy', ROBOT_RUNTIME_DIR=str(lab / 'robot-runtime'),
+                        ROBOT_LOGS_DIR=str(lab / 'robot-logs'),
+                        ROTINA_IMPORT_STORAGE_DIR=str(lab / 'data/rotina-import'), ROTINA_IMPORT_OUTPUT_DIRS='{}')
+        text += ''.join(f'{key}={value}\n' for key, value in settings.items())
+        shared.write_text(text, encoding='utf-8')
         os.environ.update(settings)
         os.environ.update(OPS_MACHINE_CONFIG=str(lab / 'machine.config.json'), PPLID_BASE_DIR=str(lab),
                           PPLID_BACKEND_ENV_FILE=str(shared), PPLID_WEB_ONLY='1')
-        os.environ.pop('PYTHONPATH', None)
         for variable, relative in [('USERPROFILE', 'profile'), ('APPDATA', 'profile/AppData/Roaming'),
-                                   ('LOCALAPPDATA', 'profile/AppData/Local'), ('TEMP', 'tmp'), ('TMP', 'tmp')]:
+                                   ('LOCALAPPDATA', 'profile/AppData/Local'), ('TEMP', 'tmp'), ('TMP', 'tmp'),
+                                   ('OneDrive', 'profile/OneDrive'), ('OneDriveCommercial', 'profile/OneDrive'),
+                                   ('OneDriveConsumer', 'profile/OneDrive')]:
             path = lab / relative
             path.mkdir(parents=True, exist_ok=True)
             os.environ[variable] = str(path)
+        guard = lab / 'network-guard'
+        guard.mkdir(exist_ok=True)
+        (guard / 'sitecustomize.py').write_text('''import socket
+def allowed(address):
+    if isinstance(address,tuple) and address[0] not in ('127.0.0.1','localhost','::1'):
+        raise RuntimeError('External network disabled in local homologation')
+for name in ('connect','connect_ex'):
+    original=getattr(socket.socket,name)
+    def wrapped(self,address,_original=original):
+        allowed(address); return _original(self,address)
+    setattr(socket.socket,name,wrapped)
+original_lookup=socket.getaddrinfo
+def lookup(host,*args,**kwargs):
+    if host not in ('127.0.0.1','localhost','::1',None):
+        raise RuntimeError('External DNS disabled in local homologation')
+    return original_lookup(host,*args,**kwargs)
+socket.getaddrinfo=lookup
+''', encoding='utf-8')
+        os.environ['PYTHONPATH'] = str(guard)
         for sha in (first, second):
             (config.release(sha) / 'backend/.env').write_text(text, encoding='utf-8')
         command([pg_bin / 'pg_ctl.exe', '-D', lab / 'pgdata', '-l', lab / 'postgres.log',
@@ -87,8 +128,14 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False):
         # The user/password exist only in this disposable DB; redact from logs.
         os.environ['READINESS_PASSWORD'] = password
         code = ("import os; from django.contrib.auth import get_user_model; "
+                "from django.contrib.auth.models import Group; "
+                "from apps.access.constants import ROLE_ADM_PORTAL,role_group_name; "
+                "from apps.falhas_criticas.constants import GROUP_GLOBAL; "
                 "u,_=get_user_model().objects.get_or_create(username='readiness_lab'); "
-                "u.set_password(os.environ['READINESS_PASSWORD']); u.is_active=True; u.save()")
+                "u.set_password(os.environ['READINESS_PASSWORD']); u.is_active=True; "
+                "u.is_staff=True; u.is_superuser=True; u.must_change_password=False; u.save(); "
+                "u.groups.add(Group.objects.get_or_create(name=role_group_name(ROLE_ADM_PORTAL))[0],"
+                "Group.objects.get_or_create(name=GROUP_GLOBAL)[0])")
         command([python, 'manage.py', 'shell', '-c', code], cwd=backend)
         manager = Manager(config)
         manager.prepare(first)
@@ -116,6 +163,8 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False):
                     route.abort()
             context.route('**/*', local_only)
             page = context.new_page()
+            report['browserJavaScriptErrors'] = []
+            page.on('pageerror', lambda error: report['browserJavaScriptErrors'].append(str(error)[:500]))
             page.goto(frontend, wait_until='networkidle', timeout=60000)
             page.wait_for_function("document.querySelector('#app')?.children.length > 0", timeout=20000)
             browser_token = page.evaluate('''async password => {
@@ -124,12 +173,24 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False):
                 'X-CSRFToken':csrf.csrfToken},body:JSON.stringify({username:'readiness_lab',password})});
                 if(!r.ok) throw new Error('login '+r.status); return (await r.json()).csrfToken;
             }''', password)
+            # Hydrate the ordinary session/access stores while still on R1.
+            # Later navigation must keep this document and its original imports.
+            page.goto(frontend + '/home', wait_until='networkidle', timeout=60000)
+            marker = secrets.token_hex(8)
+            page.evaluate('marker => {window.__localBlueGreenDocument = marker}', marker)
+            script_requests = []
+            def record_script(response):
+                if response.request.resource_type == 'script':
+                    script_requests.append({'path': urlparse(response.url).path, 'status': response.status})
+            page.on('response', record_script)
             page.screenshot(path=str(lab / 'clean-browser-before.png'), full_page=True)
-            report['checks'].append('clean-vue-browser-mount-and-login')
-        old_assets = set(path.name for path in (config.release(first) / 'frontend/dist/assets').glob('*.js'))
-        new_assets = set(path.name for path in (config.release(second) / 'frontend/dist/assets').glob('*.js'))
+            report['checks'].append('clean-vue-browser-mount-and-login-with-synthetic-admin')
+        old_root = config.release(first) / 'frontend/dist/assets'
+        new_root = config.release(second) / 'frontend/dist/assets'
+        old_assets = {path.relative_to(old_root).as_posix() for path in old_root.rglob('*') if path.is_file()}
+        new_assets = {path.relative_to(new_root).as_posix() for path in new_root.rglob('*') if path.is_file()}
         report['differentAssetNames'] = len(old_assets ^ new_assets)
-        for action in (lambda: manager.promote(second), manager.rollback):
+        for index, action in enumerate((lambda: manager.promote(second), manager.rollback, lambda: manager.promote(second))):
             state = action()
             usage = {}
             for name, slot in state['slots'].items():
@@ -142,14 +203,52 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False):
             assert response.json()['authenticated']
             if page:
                 assert page.evaluate("async()=> (await (await fetch('/api/v1/auth/me/')).json()).authenticated")
-        report['checks'].append('distinct-clean-release-promotion-rollback-and-session')
+                route = ('/secao/indicadores/gerador-falhas', '/secao/indicadores/falhas', '/home')[index]
+                before_scripts = len(script_requests)
+                # Exercise the installed router with the R1 document: creating
+                # an anchor or page.goto here would silently reload R2's index.
+                page.evaluate('''async route => {
+                    const app = document.querySelector('#app').__vue_app__;
+                    await app.config.globalProperties.$router.push(route);
+                }''', route)
+                page.wait_for_url(frontend + route, timeout=20000)
+                if index == 0:
+                    page.wait_for_selector('.generator-page h1', timeout=20000)
+                    lazy = script_requests[before_scripts:]
+                    assert any('FalhasReportGeneratorView-' in item['path'] and item['status'] == 200 for item in lazy), lazy
+                    report['lazyRouteScriptsAfterFirstPromotion'] = lazy
+                if index == 1:
+                    page.wait_for_selector('.falhas-hero h1', timeout=20000)
+                assert page.evaluate('window.__localBlueGreenDocument') == marker, 'Original page was unexpectedly reloaded'
+        report['checks'].append('distinct-clean-release-r1-r2-r1-r2-and-session')
         # Verify chunks from the old page remain fetchable after both transitions.
-        for name in old_assets - new_assets:
+        verified_assets = []
+        for name in sorted(old_assets - new_assets):
             response = session.get(frontend + '/assets/' + name, timeout=20)
             response.raise_for_status()
-            expected_hash = hashlib.sha256((config.release(first) / 'frontend/dist/assets' / name).read_bytes()).digest()
+            expected_hash = hashlib.sha256((old_root / name).read_bytes()).digest()
             assert hashlib.sha256(response.content).digest() == expected_hash
+            assert 'immutable' in response.headers.get('Cache-Control', '')
+            content_type = response.headers.get('Content-Type', '').split(';')[0]
+            if name.endswith('.js'):
+                assert content_type in ('text/javascript', 'application/javascript')
+            if name.endswith('.css'):
+                assert content_type == 'text/css'
+            verified_assets.append({'name': name, 'sha256': expected_hash.hex(), 'contentType': content_type})
+            response.close()
+        report['oldAssetsVerified'] = verified_assets
         report['checks'].append('old-release-assets-retained-with-original-hashes')
+        if page:
+            assert not report['browserJavaScriptErrors'], report['browserJavaScriptErrors']
+            report['browserScope'] = ('synthetic administrator: R1 document retained across three transitions; '
+                                      'lazy report-generator route after R2, Falhas after rollback, home and logout; '
+                                      'not an exhaustive business/role navigation matrix')
+        if exercise:
+            report['extended'] = exercise({'manager': manager, 'config': config, 'command': command,
+                                           'lab': lab, 'first': first, 'second': second,
+                                           'session': session, 'frontend': frontend, 'python': python})
+            if report['extended'].get('ok') is not True:
+                raise RuntimeError('Extended application checks did not meet the recorded criteria')
         logout = session.post(frontend + '/api/v1/auth/logout/', json={},
                               headers={'X-CSRFToken': token, 'Origin': frontend}, timeout=20)
         logout.raise_for_status()
@@ -158,7 +257,7 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False):
                 headers:{'Content-Type':'application/json','X-CSRFToken':token},body:'{}'})).status''', browser_token)
             assert status == 200
             page.screenshot(path=str(lab / 'clean-browser-after.png'), full_page=True)
-        report['checks'].append('original-csrf-token-valid-after-two-version-transitions')
+        report['checks'].append('original-csrf-token-valid-after-three-version-transitions')
         session.close()
         report['ok'] = True
     except Exception as error:
@@ -171,6 +270,8 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False):
                 except Exception as error:
                     report['browserCleanupError'] = str(error)
                     report['ok'] = False
+        if session:
+            session.close()
         if manager and config.state_path.exists():
             try:
                 manager.shutdown()
