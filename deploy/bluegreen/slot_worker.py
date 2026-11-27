@@ -15,6 +15,11 @@ import threading
 import time
 
 
+# Keep 150 independent user channels plus proxy/health headroom below the
+# Windows select() 512-socket set size. Thread counts and deadlines stay fixed.
+CONNECTION_LIMIT = 256
+
+
 def write_json(path: Path, value: dict):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value), encoding="utf-8")
@@ -181,10 +186,11 @@ def main():
     ready, draining = threading.Event(), threading.Event()
     wrapped = WebApplication(app, spec, ready, draining, check)
     server = create_server(wrapped, host="127.0.0.1", port=spec["backendPort"],
-                           threads=spec.get("threads", 16), channel_timeout=600, map={})
+                           threads=spec.get("threads", 16), channel_timeout=600,
+                           connection_limit=CONNECTION_LIMIT, map={})
     frontend = WebApplication(frontend_application(spec), spec, ready, draining, check)
     frontend_server = create_server(frontend, host="127.0.0.1", port=spec["frontendPort"],
-                                    threads=4, channel_timeout=600, map={})
+                                    threads=4, channel_timeout=600, connection_limit=CONNECTION_LIMIT, map={})
     threading.Thread(target=frontend_server.run, daemon=True).start()
     ready.set()
     def retire():
