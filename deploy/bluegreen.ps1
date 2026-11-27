@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('prepare','activate','pipeline','promote','rollback','recover','status','cancel','shutdown','workers-start','workers-stop')][string]$Action,
+    [ValidateSet('build','prepare','activate','pipeline','promote','rollback','recover','status','cancel','shutdown','workers-start','workers-stop')][string]$Action,
     [Parameter(Mandatory = $true)][ValidateSet('MAIN','DEV','HOM')][string]$Environment,
     [string]$Sha = '',
     [string]$RunId = '',

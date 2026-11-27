@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,83 @@ from deploy.bluegreen.config import Config
 from deploy.bluegreen.store import atomic_json, read_json
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_initial_build_cli_creates_valid_receipt_without_activating_any_runtime(
+        laboratory, make_release, monkeypatch, capsys):
+    from deploy.bluegreen import cli
+    config, manager, root = laboratory
+    machine, environment_path = config.base / 'machine.json', config.base / 'environments.json'
+    atomic_json(environment_path, root)
+    atomic_json(machine, {'baseDir': str(config.base), 'envConfigPath': str(environment_path)})
+    config = Config.load(machine, 'MAIN')
+    manager.config = config
+    assert not config.state_path.exists()
+    for name in ('prepare', 'activate', 'promote', 'workers_start'):
+        monkeypatch.setattr(manager, name, lambda *a, **k: pytest.fail('Build must never change runtime'))
+    monkeypatch.setattr(cli, 'Manager', lambda _: manager)
+    monkeypatch.setattr(cli.subprocess, 'check_output', lambda *a, **k: 'b' * 40)
+    held = []
+    @contextmanager
+    def locked(environment, root):
+        held.append(True)
+        try:
+            yield
+        finally:
+            held.pop()
+    monkeypatch.setattr(cli, 'environment_lock', locked)
+    def preparation(command, **kwargs):
+        assert held and kwargs['sha_full'] == 'b' * 40
+        assert kwargs['receipt'] == config.directory / 'builds/bbbbbbbb.json'
+        make_release(config, 'b')
+        atomic_json(kwargs['receipt'], {'schemaVersion': 1, 'phase': 'complete', 'success': True,
+                    'treeEmpty': True, 'shaFull': kwargs['sha_full'], 'release': str(kwargs['release'])})
+        atomic_json(config.root / 'logs/runs/initial-build/steps.json', [{'id': 'promote', 'status': 'pending'}])
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(cli, 'run_build', preparation)
+    monkeypatch.setattr(sys, 'argv', ['bluegreen', 'build', '--machine-config', str(machine),
+                        '--environment', 'MAIN', '--sha', 'b' * 8, '--run-id', 'initial-build'])
+    assert cli.main() == 0
+    result = json.loads(capsys.readouterr().out)['state']
+    assert result['built'] and not result['reused'] and result['shaFull'] == 'b' * 40
+    assert manager.contract(config.release('b' * 8), 'b' * 8) == 'b' * 40
+    assert not config.state_path.exists() and not (config.directory / 'background.json').exists()
+    assert read_json(config.root / 'logs/runs/initial-build/run-summary.json')['fromSha'] is None
+    assert read_json(config.root / 'logs/runs/initial-build/steps.json')[0]['status'] == 'pending'
+    assert not held
+
+
+@pytest.mark.parametrize('pin', ['slot', 'background'])
+def test_build_only_reuses_pinned_artifact_without_build_promotion_or_env_changes(
+        laboratory, make_release, monkeypatch, pin):
+    config, manager, _ = laboratory
+    sha = make_release(config, 'b')
+    release = config.release(sha)
+    before = (release / 'backend/.env').read_bytes()
+    state = {'active': None, 'slots': {}}
+    if pin == 'slot':
+        state.update(active='A', slots={'A': {'sha': sha, 'shaFull': 'b' * 40}})
+    else:
+        atomic_json(config.directory / 'background.json',
+                    {'sha': sha, 'release': str(release), 'environment': 'MAIN', 'phase': 'stopped'})
+    monkeypatch.setattr(manager, 'read', lambda **kwargs: state)
+    monkeypatch.setattr(manager, 'promote', lambda *a: pytest.fail('Build must never promote'))
+    monkeypatch.setattr('deploy.bluegreen.cli.subprocess.check_output', lambda *a, **k: 'b' * 40)
+    monkeypatch.setattr('deploy.bluegreen.cli.run_build', lambda *a, **k: pytest.fail('Pinned release must never rebuild'))
+    result = pipeline(config, manager, sha, 'reuse-only', build_only=True)
+    assert result['built'] and result['reused'] and result['shaFull'] == 'b' * 40
+    assert (release / 'backend/.env').read_bytes() == before
+
+
+def test_powershell_bridge_accepts_build_without_invoking_the_action():
+    script = ("$command = Get-Command -Name $env:PPLID_TEST_BRIDGE; "
+              "$command.Parameters['Action'].Attributes | Where-Object { $_ -is [Management.Automation.ValidateSetAttribute] } | "
+              "ForEach-Object { $_.ValidValues } | ConvertTo-Json -Compress")
+    result = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+                            env=dict(os.environ, PPLID_TEST_BRIDGE=str(ROOT / 'deploy/bluegreen.ps1')),
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert 'build' in json.loads(result.stdout)
 
 
 @pytest.mark.parametrize('exit_code', [0, 1])

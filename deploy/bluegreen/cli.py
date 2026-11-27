@@ -15,20 +15,28 @@ from .build_process import run_build
 from .store import atomic_json, environment_lock, utc, read_json
 
 
-def pipeline(config, manager, sha, run_id):
+def pipeline(config, manager, sha, run_id, *, build_only=False):
     """Keep ONE Python-owned named mutex over build, validation and promotion."""
     if not sha:
         raise ValueError("A target SHA is required")
     config.release(sha)
-    state = manager.read()
-    if not state.get("active"):
+    state = manager.read(missing=True) if build_only else manager.read()
+    if not state.get("active") and not build_only:
         raise RuntimeError("Initial prepare/activate must be completed before automatic deployment")
     full = subprocess.check_output(["git", "-C", str(config.root / "mirror"), "rev-parse", "--verify", sha + "^{commit}"],
                                    text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0).strip()
     if len(full) != 40 or not full.startswith(sha):
         raise ValueError("Target commit is not present in the environment mirror")
+    def built_result(*, reused):
+        release = config.release(sha)
+        if manager.contract(release, sha) != full:
+            raise RuntimeError('Built artifact does not identify the requested full commit')
+        return {'built': True, 'reused': reused, 'sha': sha, 'shaFull': full,
+                'release': str(release), 'metadata': read_json(release / 'meta.json')}
     # Rebuilding a running directory could change imports underneath its process.
     if any(s["shaFull"] == full for s in state["slots"].values()):
+        if build_only:
+            return built_result(reused=True)
         return manager.promote(sha, run_id)
     background_path = config.directory / 'background.json'
     if background_path.exists():
@@ -50,6 +58,8 @@ def pipeline(config, manager, sha, run_id):
         # Reuse a validated immutable artifact; never bootstrap/rebuild it.
         if pinned.resolve() == config.release(sha).resolve() or pinned_full == full:
             try:
+                if build_only:
+                    return built_result(reused=True)
                 manager.contract(config.release(sha), sha)
             except Exception as error:
                 raise RuntimeError(f'Independent supervisor pins this release; rebuild refused: {error}') from error
@@ -83,6 +93,8 @@ def pipeline(config, manager, sha, run_id):
                                     release=config.release(sha), sha_full=full, check_alive=check_build)
         if result.returncode:
             raise RuntimeError(f"Build/validation failed; active version preserved. See {log}")
+        if build_only:
+            return built_result(reused=False)
         result_state = manager.promote(sha, run_id)
         return result_state
     except Exception as failure:
@@ -90,10 +102,11 @@ def pipeline(config, manager, sha, run_id):
         raise
     finally:
         finished = utc()
-        summary = {"environment": config.environment, "runId": run_id, "fromSha": state["slots"][state["active"]]["sha"],
+        summary = {"environment": config.environment, "runId": run_id,
+                   "fromSha": state["slots"][state["active"]]["sha"] if state.get('active') else None,
                    "toSha": sha, "result": "failed" if error else "success", "startedAt": started_at,
                    "finishedAt": finished, "durationSec": round(time.monotonic() - started, 3),
-                   "lastError": error, "trigger": "blue-green"}
+                   "lastError": error, "trigger": "blue-green-build" if build_only else "blue-green"}
         atomic_json(log.parent / "run-summary.json", summary)
         path = config.root / "deploy-state.json"
         legacy = read_json(path) if path.exists() else {}
@@ -101,7 +114,7 @@ def pipeline(config, manager, sha, run_id):
                       lastError=error, finishedAt=finished)
         atomic_json(path, legacy)
         steps_path = log.parent / "steps.json"
-        if steps_path.exists() and not error:
+        if steps_path.exists() and not error and not build_only:
             steps = json.loads(steps_path.read_text(encoding="utf-8-sig"))
             for step in steps:
                 if step.get("status") in ("pending", "running"):
@@ -111,7 +124,7 @@ def pipeline(config, manager, sha, run_id):
 
 def main():
     parser = argparse.ArgumentParser(description="Opt-in blue-green operations; never installs services")
-    parser.add_argument("action", choices=("prepare", "activate", "pipeline", "promote", "rollback", "recover", "status", "cancel", "shutdown", "workers-start", "workers-stop"))
+    parser.add_argument("action", choices=("build", "prepare", "activate", "pipeline", "promote", "rollback", "recover", "status", "cancel", "shutdown", "workers-start", "workers-stop"))
     parser.add_argument("--machine-config", type=Path, default=os.environ.get("OPS_MACHINE_CONFIG"))
     parser.add_argument("--environment", choices=("MAIN", "DEV", "HOM"), required=True)
     parser.add_argument("--sha", default="")
@@ -133,7 +146,9 @@ def main():
             result = {"cancelRequested": True}
         else:
             with environment_lock(args.environment, config.root):
-                if args.action == "prepare":
+                if args.action == "build":
+                    result = pipeline(config, manager, args.sha, args.run_id, build_only=True)
+                elif args.action == "prepare":
                     result = manager.prepare(args.sha)
                 elif args.action == "activate":
                     result = manager.activate()
