@@ -1,4 +1,4 @@
-> Atualização de 27/11/2026: builds e verificações funcionais locais aprovados, mas a carga de 150 sessões falhou. Produção continua bloqueada. O resultado atual está em [RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md](../RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md); os números abaixo são históricos.
+> Resultado local de 27/11/2026: promoção e rollback passaram com 150 sessões preparadas e até 16 requisições HTTP concorrentes. Foram 98 HTTP 200 e 20 timeouts em 118 requisições, sem HTTP 503; 80 usuários enviaram requisições antes do aborto pelo critério estrito. O usuário aceita perdas ocasionais com troca rápida. O perfil completo permanece sem homologação integral. Laboratório encerrado e produção inalterada. Próximo passo: piloto controlado no servidor. Ver [relatório atual](../RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md); os resultados abaixo são históricos.
 
 # Etapa 1 — workers, dependências e release candidata
 
