@@ -18,7 +18,7 @@ from .supervisor_control import _protect
 from .local_mixed_job import run as mixed_business_job
 
 
-def exercise(context, *, phase_seconds=300, sustain_seconds=1800, think_seconds=5, quick=False):
+def exercise(context, *, phase_seconds=300, sustain_seconds=1800, think_seconds=5, quick=False, reuse_seed=False):
     manager, config, lab = context['manager'], context['config'], context['lab']
     expected = Path(__file__).resolve().parents[2] / '.local/bluegreen-readiness'
     if (lab.resolve().parent != expected or not lab.name.startswith('build-')
@@ -89,24 +89,46 @@ def exercise(context, *, phase_seconds=300, sustain_seconds=1800, think_seconds=
         for sha in (first, second):
             (config.release(sha) / 'backend/.env').write_text(text, encoding='utf-8')
         os.environ.update(flags)
-        seed = Path(__file__).with_name('load_seed.py')
-        command([python, 'manage.py', 'shell', '-c', f'import runpy; runpy.run_path({str(seed)!r})'],
-                cwd=config.release(second) / 'backend', timeout=600)
+        if not reuse_seed:
+            seed = Path(__file__).with_name('load_seed.py')
+            command([python, 'manage.py', 'shell', '-c', f'import runpy; runpy.run_path({str(seed)!r})'],
+                    cwd=config.release(second) / 'backend', timeout=600)
+        elif not all((output / name).is_file() for name in ('seed-report.json', 'private-sessions.dpapi')):
+            raise RuntimeError('Seed reuse requires the existing report and encrypted independent sessions')
         private = json.loads(_protect((output / 'private-sessions.dpapi').read_bytes(), decrypt=True))
         data = json.loads((output / 'seed-report.json').read_text())
-        if data['failureSource'] != 'legacy':
-            raise RuntimeError('Capacity seed requires the explicitly recorded legacy Failure data source')
+        if (data.get('failureSource') != 'legacy' or data.get('users') != 150
+                or data.get('legacyFailureRows') != 20000 or data.get('agents') != 500
+                or os.environ.get('FALHAS_FAILURE_SOURCE') != 'legacy'):
+            raise RuntimeError('Capacity seed requires 150 users, 20000 Failure rows, 500 agents and explicit legacy source')
+        cookies = private.get('cookies', [])
+        if len(cookies) != 150 or len(set(cookies)) != 150 or not private.get('adminCookie') or not private.get('cookieName'):
+            raise RuntimeError('Seed reuse requires 150 distinct encrypted authenticated sessions')
         query = f"start_date={data['from']}&end_date={data['to']}&oficial=false"
         import psycopg
+        if int(os.environ['POSTGRES_PORT']) < 12000:
+            raise RuntimeError('Unexpected capacity database port')
         database = psycopg.connect(host='127.0.0.1', port=os.environ['POSTGRES_PORT'],
                                   dbname='readiness_lab', user='readiness_lab', connect_timeout=3,
                                   autocommit=True, options='-c statement_timeout=3000')
+        with database.cursor() as cursor:
+            cursor.execute("SELECT current_setting('data_directory')")
+            if Path(cursor.fetchone()[0]).resolve() != lab.resolve() / 'pgdata':
+                raise RuntimeError('Capacity PostgreSQL data directory does not belong to this laboratory')
+            cursor.execute('SELECT (SELECT count(*) FROM falhas_failure), '
+                           '(SELECT count(*) FROM falhas_agent), '
+                           '(SELECT count(*) FROM auth_user WHERE username LIKE %s)', ['c98%'])
+            counts = cursor.fetchone()
+        if tuple(counts) != (20000, 500, 150):
+            raise RuntimeError('Existing capacity seed database counts do not match its approved fixture')
+        report.update(seedReused=bool(reuse_seed),
+                      seedDatabaseCounts={'failures': counts[0], 'agents': counts[1], 'users': counts[2]})
         journeys = [
             {'name': 'session', 'path': '/api/v1/auth/me/', 'weight': 15, 'jsonEquals': {'authenticated': True}},
             {'name': 'falhas-profile', 'path': '/api/v1/falhas/me/', 'weight': 10, 'jsonKey': 'scope'},
             {'name': 'alerts', 'path': '/api/v1/falhas/alerts/?' + query, 'weight': 15, 'jsonKey': 'alerts'},
-            {'name': 'cases', 'path': '/api/v1/falhas/cases/?' + query + '&page={variant}', 'weight': 25, 'jsonKey': 'results'},
-            {'name': 'reincidence', 'path': '/api/v1/falhas/reincidence/?' + query, 'weight': 20, 'jsonKey': 'results'},
+            {'name': 'cases', 'path': '/api/v1/falhas/cases/?' + query + '&limit=50', 'weight': 25, 'jsonKey': 'items'},
+            {'name': 'reincidence', 'path': '/api/v1/falhas/reincidence/?' + query + '&page={variant}', 'weight': 20, 'jsonKey': 'results'},
             {'name': 'csv-export', 'path': '/api/v1/falhas/export/failures.csv?' + query,
              'weight': 2, 'contentType': 'text/csv'},
             {'name': 'portal', 'path': '/secao/indicadores/falhas', 'weight': 13,
@@ -128,10 +150,13 @@ def exercise(context, *, phase_seconds=300, sustain_seconds=1800, think_seconds=
                     raise RuntimeError('Actual HTTP control did not reach the expected supervisor generation')
                 checks.append({'path': path, 'status': response.status_code, 'generation': worker['instanceId']})
                 response.close()
+            report['httpControl'] = checks
             response = admin.get(backend + '/api/v1/falhas/cases/?' + query, timeout=30)
             response.raise_for_status()
             payload = response.json()
-            if not payload.get('results'):
+            report['datasetProbe'] = {'count': payload.get('count'), 'returned': payload.get('returned'),
+                                      'items': len(payload.get('items') or [])}
+            if not payload.get('items') or payload.get('count', 0) <= 0:
                 raise RuntimeError('Representative dataset produced no failure rows; load refused')
             response.close()
         finally:
@@ -304,9 +329,12 @@ if __name__ == '__main__':
     parser.add_argument('--think-seconds', type=float, default=5)
     parser.add_argument('--browser', action='store_true')
     parser.add_argument('--quick', action='store_true', help='120-second deployment check; no sustained capacity claim')
+    parser.add_argument('--resume-stopped', action='store_true', help='Reuse a reviewed stopped runtime and its existing synthetic seed')
     args = parser.parse_args()
     result = smoke(args.lab.resolve(), args.first, args.second, args.pg_bin.resolve(), args.caddy.resolve(),
-                   browser_test=args.browser, exercise=lambda c: exercise(c, phase_seconds=args.phase_seconds,
-                         sustain_seconds=args.sustain_seconds, think_seconds=args.think_seconds, quick=args.quick))
+                   browser_test=args.browser and not args.resume_stopped, resume_stopped=args.resume_stopped,
+                   exercise=lambda c: exercise(c, phase_seconds=args.phase_seconds,
+                         sustain_seconds=args.sustain_seconds, think_seconds=args.think_seconds,
+                         quick=args.quick, reuse_seed=args.resume_stopped))
     print(json.dumps(result, indent=2))
     raise SystemExit(0 if result['ok'] else 1)

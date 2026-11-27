@@ -20,7 +20,7 @@ from .manager import Manager
 from .store import atomic_json, read_json
 
 
-def run(lab, first, second, pg_bin, caddy, *, browser_test=False, exercise=None):
+def run(lab, first, second, pg_bin, caddy, *, browser_test=False, exercise=None, resume_stopped=False):
     lab = lab.resolve()
     expected = Path(__file__).resolve().parents[2] / '.local/bluegreen-readiness'
     if lab.parent != expected or not lab.name.startswith('build-'):
@@ -34,6 +34,22 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False, exercise=None)
             raise RuntimeError('Both releases require successful clean build reports')
     flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     report = {'ok': False, 'releases': [first, second], 'checks': [], 'productionTouched': False}
+    if resume_stopped:
+        previous_path = lab / 'smoke-report.json'
+        previous = read_json(previous_path)
+        required = {'distinct-clean-release-r1-r2-r1-r2-and-session',
+                    'old-release-assets-retained-with-original-hashes'}
+        if (previous.get('releases') != [first, second] or previous.get('productionTouched') is not False
+                or previous.get('postgresStopped') is not True
+                or not required.issubset(previous.get('checks', []) + previous.get('reusedChecks', []))
+                or previous.get('browserJavaScriptErrors')):
+            raise RuntimeError('Resume requires the recorded successful transition/asset checks and stopped laboratory')
+        archive = lab / ('smoke-report-before-resume-' + secrets.token_hex(4) + '.json')
+        atomic_json(archive, previous)
+        report.update(previousVerifiedReport=str(archive),
+                      previousVerifiedReportSha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+                      reusedChecks=list(dict.fromkeys(previous.get('checks', []) + previous.get('reusedChecks', []))))
+        browser_test = False
     manager = None
     started = False
     runtime = browser = context = session = None
@@ -48,7 +64,8 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False, exercise=None)
     try:
         if command([pg_bin / 'pg_ctl.exe', '-D', lab / 'pgdata', 'status'], check=False) == 0:
             raise RuntimeError('Laboratory cluster must be stopped before this run')
-        if (lab / 'deploy/MAIN/bluegreen/state.json').exists():
+        journal = lab / 'deploy/MAIN/bluegreen/state.json'
+        if journal.exists() and not resume_stopped:
             raise RuntimeError('Use a fresh smoke journal; existing runtime needs explicit review')
         config_root = read_json(lab / 'env.config.json')
         bg = config_root['MAIN']['blueGreen']
@@ -57,6 +74,20 @@ def run(lab, first, second, pg_bin, caddy, *, browser_test=False, exercise=None)
                   workersOwnershipConfirmed=True, startupSeconds=120, observeSeconds=3,
                   drainSeconds=2, stopSeconds=30, commandSeconds=900)
         config = Config(lab, config_root, 'MAIN')
+        if resume_stopped:
+            stopped = Manager(config).read()
+            if (stopped.get('phase') != 'stopped' or stopped.get('slots') or stopped.get('proxy')
+                    or stopped.get('active') or stopped.get('intent')):
+                raise RuntimeError('Only an explicitly stopped, empty runtime journal may be resumed')
+            background = config.directory / 'background.json'
+            if background.exists():
+                from .worker_control import verify_stopped
+                from .processes import owned
+                record = read_json(background)
+                if record.get('phase') != 'stopped' or owned(record.get('process') or {}):
+                    raise RuntimeError('Previous laboratory supervisor has not confirmed shutdown')
+                verify_stopped(record)
+            report['checks'].append('stopped-runtime-and-worker-receipt-verified-without-deleting-journal')
         atomic_json(lab / 'env.config.json', config_root)
         frontend = f'http://127.0.0.1:{config.frontend_port}'
         shared = lab / 'deploy/MAIN/shared/backend.env'
@@ -122,8 +153,9 @@ socket.getaddrinfo=lookup
         started = True
         backend = config.release(second) / 'backend'
         python = backend / '.venv/Scripts/python.exe'
-        command([python, 'manage.py', 'migrate', '--noinput'], cwd=backend)
-        report['checks'].append('isolated-schema-prepared-from-newer-release')
+        if not resume_stopped:
+            command([python, 'manage.py', 'migrate', '--noinput'], cwd=backend)
+            report['checks'].append('isolated-schema-prepared-from-newer-release')
         password = secrets.token_urlsafe(20)
         # The user/password exist only in this disposable DB; redact from logs.
         os.environ['READINESS_PASSWORD'] = password
@@ -138,9 +170,9 @@ socket.getaddrinfo=lookup
                 "Group.objects.get_or_create(name=GROUP_GLOBAL)[0])")
         command([python, 'manage.py', 'shell', '-c', code], cwd=backend)
         manager = Manager(config)
-        manager.prepare(first)
+        manager.prepare(second if resume_stopped else first)
         manager.activate()
-        report['checks'].append('older-clean-release-activated')
+        report['checks'].append('candidate-reactivated-from-stopped-journal' if resume_stopped else 'older-clean-release-activated')
         session = requests.Session()
         session.trust_env = False
         csrf = session.get(frontend + '/api/v1/auth/csrf/', timeout=20)
@@ -185,64 +217,65 @@ socket.getaddrinfo=lookup
             page.on('response', record_script)
             page.screenshot(path=str(lab / 'clean-browser-before.png'), full_page=True)
             report['checks'].append('clean-vue-browser-mount-and-login-with-synthetic-admin')
-        old_root = config.release(first) / 'frontend/dist/assets'
-        new_root = config.release(second) / 'frontend/dist/assets'
-        old_assets = {path.relative_to(old_root).as_posix() for path in old_root.rglob('*') if path.is_file()}
-        new_assets = {path.relative_to(new_root).as_posix() for path in new_root.rglob('*') if path.is_file()}
-        report['differentAssetNames'] = len(old_assets ^ new_assets)
-        for index, action in enumerate((lambda: manager.promote(second), manager.rollback, lambda: manager.promote(second))):
-            state = action()
-            usage = {}
-            for name, slot in state['slots'].items():
-                owner = psutil.Process(slot['process']['pid'])
-                usage[name] = round(sum(p.memory_info().rss for p in [owner, *owner.children(recursive=True)]) / 1024**2, 2)
-            report.setdefault('slotTreeRssSnapshotsMb', []).append(usage)
-            manager.healthy(state['slots'][state['active']], public=True)
-            response = session.get(frontend + '/api/v1/auth/me/', timeout=20)
-            response.raise_for_status()
-            assert response.json()['authenticated']
+        if not resume_stopped:
+            old_root = config.release(first) / 'frontend/dist/assets'
+            new_root = config.release(second) / 'frontend/dist/assets'
+            old_assets = {path.relative_to(old_root).as_posix() for path in old_root.rglob('*') if path.is_file()}
+            new_assets = {path.relative_to(new_root).as_posix() for path in new_root.rglob('*') if path.is_file()}
+            report['differentAssetNames'] = len(old_assets ^ new_assets)
+            for index, action in enumerate((lambda: manager.promote(second), manager.rollback, lambda: manager.promote(second))):
+                state = action()
+                usage = {}
+                for name, slot in state['slots'].items():
+                    owner = psutil.Process(slot['process']['pid'])
+                    usage[name] = round(sum(p.memory_info().rss for p in [owner, *owner.children(recursive=True)]) / 1024**2, 2)
+                report.setdefault('slotTreeRssSnapshotsMb', []).append(usage)
+                manager.healthy(state['slots'][state['active']], public=True)
+                response = session.get(frontend + '/api/v1/auth/me/', timeout=20)
+                response.raise_for_status()
+                assert response.json()['authenticated']
+                if page:
+                    assert page.evaluate("async()=> (await (await fetch('/api/v1/auth/me/')).json()).authenticated")
+                    route = ('/secao/indicadores/gerador-falhas', '/secao/indicadores/falhas', '/home')[index]
+                    before_scripts = len(script_requests)
+                    # Exercise the installed router with the R1 document: creating
+                    # an anchor or page.goto here would silently reload R2's index.
+                    page.evaluate('''async route => {
+                        const app = document.querySelector('#app').__vue_app__;
+                        await app.config.globalProperties.$router.push(route);
+                    }''', route)
+                    page.wait_for_url(frontend + route, timeout=20000)
+                    if index == 0:
+                        page.wait_for_selector('.generator-page h1', timeout=20000)
+                        lazy = script_requests[before_scripts:]
+                        assert any('FalhasReportGeneratorView-' in item['path'] and item['status'] == 200 for item in lazy), lazy
+                        report['lazyRouteScriptsAfterFirstPromotion'] = lazy
+                    if index == 1:
+                        page.wait_for_selector('.falhas-hero h1', timeout=20000)
+                    assert page.evaluate('window.__localBlueGreenDocument') == marker, 'Original page was unexpectedly reloaded'
+            report['checks'].append('distinct-clean-release-r1-r2-r1-r2-and-session')
+            # Verify chunks from the old page remain fetchable after both transitions.
+            verified_assets = []
+            for name in sorted(old_assets - new_assets):
+                response = session.get(frontend + '/assets/' + name, timeout=20)
+                response.raise_for_status()
+                expected_hash = hashlib.sha256((old_root / name).read_bytes()).digest()
+                assert hashlib.sha256(response.content).digest() == expected_hash
+                assert 'immutable' in response.headers.get('Cache-Control', '')
+                content_type = response.headers.get('Content-Type', '').split(';')[0]
+                if name.endswith('.js'):
+                    assert content_type in ('text/javascript', 'application/javascript')
+                if name.endswith('.css'):
+                    assert content_type == 'text/css'
+                verified_assets.append({'name': name, 'sha256': expected_hash.hex(), 'contentType': content_type})
+                response.close()
+            report['oldAssetsVerified'] = verified_assets
+            report['checks'].append('old-release-assets-retained-with-original-hashes')
             if page:
-                assert page.evaluate("async()=> (await (await fetch('/api/v1/auth/me/')).json()).authenticated")
-                route = ('/secao/indicadores/gerador-falhas', '/secao/indicadores/falhas', '/home')[index]
-                before_scripts = len(script_requests)
-                # Exercise the installed router with the R1 document: creating
-                # an anchor or page.goto here would silently reload R2's index.
-                page.evaluate('''async route => {
-                    const app = document.querySelector('#app').__vue_app__;
-                    await app.config.globalProperties.$router.push(route);
-                }''', route)
-                page.wait_for_url(frontend + route, timeout=20000)
-                if index == 0:
-                    page.wait_for_selector('.generator-page h1', timeout=20000)
-                    lazy = script_requests[before_scripts:]
-                    assert any('FalhasReportGeneratorView-' in item['path'] and item['status'] == 200 for item in lazy), lazy
-                    report['lazyRouteScriptsAfterFirstPromotion'] = lazy
-                if index == 1:
-                    page.wait_for_selector('.falhas-hero h1', timeout=20000)
-                assert page.evaluate('window.__localBlueGreenDocument') == marker, 'Original page was unexpectedly reloaded'
-        report['checks'].append('distinct-clean-release-r1-r2-r1-r2-and-session')
-        # Verify chunks from the old page remain fetchable after both transitions.
-        verified_assets = []
-        for name in sorted(old_assets - new_assets):
-            response = session.get(frontend + '/assets/' + name, timeout=20)
-            response.raise_for_status()
-            expected_hash = hashlib.sha256((old_root / name).read_bytes()).digest()
-            assert hashlib.sha256(response.content).digest() == expected_hash
-            assert 'immutable' in response.headers.get('Cache-Control', '')
-            content_type = response.headers.get('Content-Type', '').split(';')[0]
-            if name.endswith('.js'):
-                assert content_type in ('text/javascript', 'application/javascript')
-            if name.endswith('.css'):
-                assert content_type == 'text/css'
-            verified_assets.append({'name': name, 'sha256': expected_hash.hex(), 'contentType': content_type})
-            response.close()
-        report['oldAssetsVerified'] = verified_assets
-        report['checks'].append('old-release-assets-retained-with-original-hashes')
-        if page:
-            assert not report['browserJavaScriptErrors'], report['browserJavaScriptErrors']
-            report['browserScope'] = ('synthetic administrator: R1 document retained across three transitions; '
-                                      'lazy report-generator route after R2, Falhas after rollback, home and logout; '
-                                      'not an exhaustive business/role navigation matrix')
+                assert not report['browserJavaScriptErrors'], report['browserJavaScriptErrors']
+                report['browserScope'] = ('synthetic administrator: R1 document retained across three transitions; '
+                                          'lazy report-generator route after R2, Falhas after rollback, home and logout; '
+                                          'not an exhaustive business/role navigation matrix')
         if exercise:
             report['extended'] = exercise({'manager': manager, 'config': config, 'command': command,
                                            'lab': lab, 'first': first, 'second': second,
