@@ -235,8 +235,8 @@ function hideLockScreen() {
 function updateAuthBanner() {
   const banner = document.getElementById("auth-mode-banner");
   if (!banner) return;
-  if (OC.authState.authSource === "bootstrap" && !OC.authState.locked) {
-    banner.textContent = "Modo teste (bootstrap)";
+  if (["recovery", "teams_recovery"].includes(OC.authState.authSource) && !OC.authState.locked) {
+    banner.textContent = "Acesso emergencial temporario";
     banner.classList.remove("hidden");
   } else {
     banner.classList.add("hidden");
@@ -245,6 +245,7 @@ function updateAuthBanner() {
 
 OC.applyAuthState = function applyAuthState(state) {
   OC.authState = { ...OC.authState, ...state };
+  document.getElementById("btn-teams-recovery")?.classList.toggle("hidden", !OC.authState.teamsRecoveryEnabled);
   if (OC.authState.locked) showLockScreen();
   else hideLockScreen();
 };
@@ -522,6 +523,37 @@ function onFilterChange() {
 }
 
 function bindUi() {
+  let recoveryRequest = null;
+  const recoveryMessage = document.getElementById("teams-recovery-status");
+  const recoveryForm = document.getElementById("teams-recovery-form");
+  document.getElementById("btn-teams-recovery")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const username = document.getElementById("lock-username")?.value?.trim();
+    if (!username) { setLockError("Informe seu usuario antes de solicitar recuperacao."); return; }
+    button.disabled = true;
+    recoveryRequest = null;
+    recoveryForm.classList.add("hidden");
+    try {
+      recoveryRequest = await OC.fetchJson("/api/v1/auth/recovery/request", { method: "POST", timeoutMs: 20000, body: JSON.stringify({ username }) });
+      recoveryMessage.textContent = "Pedido " + recoveryRequest.requestId + ": solicite o codigo aos responsaveis no Recovery OP. Validade: 10 minutos. Mantenha esta pagina aberta.";
+      recoveryForm.reset();
+      recoveryForm.classList.remove("hidden");
+      document.getElementById("teams-recovery-code").focus();
+    } catch (error) { recoveryMessage.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+  recoveryForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!recoveryRequest) return;
+    const button = recoveryForm.querySelector("button");
+    button.disabled = true;
+    try {
+      const code = document.getElementById("teams-recovery-code").value.trim();
+      const status = await OC.fetchJson("/api/v1/auth/recovery/verify", { method: "POST", body: JSON.stringify({ ...recoveryRequest, code }) });
+      if (status.authenticated) { recoveryRequest = null; window.location.reload(); }
+    } catch (error) { recoveryMessage.textContent = "Codigo incorreto, pedido encerrado ou expirado. Sao permitidas ate 5 tentativas."; }
+    finally { button.disabled = false; }
+  });
   document.getElementById("lock-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const username = document.getElementById("lock-username")?.value?.trim() || "";
