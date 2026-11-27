@@ -24,13 +24,17 @@ Você está no servidor do PPLID. Execute a implantação controlada de MAIN des
 
 Revisões de referência:
 
-- **Candidata da aplicação:** `fac41fdd35bb07c0967c8599c4a38b8c419516e2`. A branch publicada deve resolver exatamente para esse commit; se divergir, investigue antes de executar código diferente.
-- **Base revisada de operações:** `4934da903ae578367dba3999091dd7742f43fa8a`.
+- **Candidata da aplicação:** `86fc8f67c0c9620a6f0f0f42804b90ac9bc23621`. A branch publicada deve resolver exatamente para esse commit; se divergir, investigue antes de executar código diferente.
+- **Base integrada de operações:** `96258e77f71dd1d3872bcc453f2b9a61cd8d50bd`.
 - **Correção de saúde e fila incluída nessa base:** `264ac4043a419e4c33230a212f9f04327d79678e`.
-- O commit posterior de publicação em operações acrescenta este prompt. Confira que o código executável obtido continua igual à base revisada; registre o SHA completo do HEAD recebido. Não use uma atualização posterior da branch sem revisar o delta.
+- O commit posterior de publicação em operações atualiza este prompt. Confira que o código executável obtido continua igual à base integrada; registre o SHA completo do HEAD recebido. Não use uma atualização posterior da branch sem revisar o delta.
 - **Controle R1 usado somente no laboratório:** `1cb6444748473ced40eea6b51daf5f4162424890`. Não suponha que seja a versão atualmente instalada nem o retorno correto do servidor.
 
 A candidata deriva de uma base de integração que também contém alterações funcionais anteriores ao trabalho de deploy. Compare com o SHA realmente instalado, inclusive todas as migrations pendentes. Não descreva o delta de produção como sendo apenas uma troca de infraestrutura.
+
+As branches incorporam `PPLID/main` em `549172ad9d06fc17e4b8d9ccbcb504f558bd1a81` e `PPLID-server-ops/master` em `81661064e88b8da19fde7183c53c347e7d846ad4`. Isso inclui as atualizações funcionais de Case Manager/auditoria e a autenticação reforçada do console. O merge da aplicação preservou as verificações específicas dos testes de deploy; em operações, foi corrigido o fechamento das conexões SQLite da recuperação no Windows.
+
+Verificações após a integração: **218 testes backend selecionados, 16 testes frontend em quatro arquivos e 29 testes de operações aprovados**, além de tipos e build frontend. O backend usou PostgreSQL sintético com encerramento confirmado. Essas verificações cobrem a integração; o novo SHA ainda exige build com configuração real e observação no servidor.
 
 ## 1. Descobrir e preservar antes de alterar
 
@@ -45,8 +49,8 @@ Use os clones identificados ou novos clones isolados. Faça `fetch` das branches
 
 ```powershell
 $PilotBranch = 'release/blue-green-pilot-20261127'
-$CandidateFull = 'fac41fdd35bb07c0967c8599c4a38b8c419516e2'
-$OpsValidated = '4934da903ae578367dba3999091dd7742f43fa8a'
+$CandidateFull = '86fc8f67c0c9620a6f0f0f42804b90ac9bc23621'
+$OpsValidated = '96258e77f71dd1d3872bcc453f2b9a61cd8d50bd'
 
 git -C $OpsClone fetch origin "refs/heads/${PilotBranch}:refs/remotes/origin/${PilotBranch}"
 if ($LASTEXITCODE -ne 0) { throw 'Fetch de operacoes falhou' }
@@ -54,7 +58,7 @@ git -C $AppClone fetch origin "refs/heads/${PilotBranch}:refs/remotes/origin/${P
 if ($LASTEXITCODE -ne 0) { throw 'Fetch da aplicacao falhou' }
 ```
 
-Valide URLs dos remotos, SHA da aplicação e ancestralidade da base de operações. Compare o conteúdo de operações recebido contra `$OpsValidated`, permitindo apenas a inclusão deste Markdown na publicação. Use checkout isolado e fixado no commit conferido. Não atualize um mirror pelo remoto errado e não considere que o fetch de um clone atualizou automaticamente os demais.
+Valide URLs dos remotos, SHA da aplicação e ancestralidade da base de operações. Compare o conteúdo de operações recebido contra `$OpsValidated`, permitindo apenas a atualização deste Markdown na publicação. Use checkout isolado e fixado no commit conferido. Não atualize um mirror pelo remoto errado e não considere que o fetch de um clone atualizou automaticamente os demais.
 
 Leia, na revisão baixada, `RUNBOOK_PILOTO_SERVIDOR_BLUE_GREEN.md`, `RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md`, `deploy/BLUE_GREEN.md` se existir, `deploy/SUPERVISOR_CONTROL.md`, o entrypoint e os exemplos de configuração efetivamente presentes. Use o código recebido para conferir nomes e parâmetros; não invente comandos.
 
@@ -66,7 +70,9 @@ Leia, na revisão baixada, `RUNBOOK_PILOTO_SERVIDOR_BLUE_GREEN.md`, `RELATORIO_H
 - Confira portas A/B/admin sem colisões entre ambientes, inclusive os desabilitados. Internas e administração ficam em loopback. Preserve URLs públicas, hosts/CSRF, segredo de sessão, conexão de banco, media e configuração de build reais.
 - Mantenha **16 threads de negócio**, **duas threads reservadas de saúde no backend**, frontend com quatro threads e capacidade de 256 canais. Preserve a classificação por requisição do dispatcher; não remova a correção para simplificar a instalação.
 - Confira conta operacional, permissões sobre junctions/Job Objects, diretórios, tarefas e políticas. DPAPI é vinculado à conta/máquina; o proxy, os slots e o supervisor precisam do contexto operacional correto.
+- A atualização de `master` exige `OPS_SESSION_SECRET` privado com pelo menos 32 caracteres e autenticação do console contra MAIN com papel `adm_portal`, sem exigir administrador do Windows. Preserve o segredo existente; se estiver ausente, gere e armazene localmente pelo mecanismo privado previsto na instalação, sem imprimir ou versionar. Confira como a tarefa carrega esse ambiente. Não reative o bootstrap antigo de usuário/senha nem enfraqueça a autenticação. A recuperação por Teams é opcional; não a habilite nem envie mensagens apenas para testar.
 - Confira a forma efetiva de selecionar o checkout novo de operações para CLI, console, tarefas e watchers. O download em pasta paralela não atualiza sozinho os entrypoints instalados. Planeje a troca desses apontamentos e sua reversão; impeça atuação concorrente das revisões antiga e nova sem parar genericamente toda a instalação.
+- Durante o piloto, fixe a origem das atualizações automáticas de MAIN e operações na branch/revisão aprovada, ou mantenha apenas esses gatilhos suspensos com seu estado registrado. As branches padrão ainda não contêm os commits exclusivos de blue-green. Não reative um watcher que possa substituir imediatamente a revisão implantada por `main`/`master` ou tentar iniciar a estratégia anterior.
 - Confirme backup consistente do banco/configuração e evidência de restauração utilizável. Não restaure banco de produção automaticamente por causa de erro HTTP.
 - **Antes da primeira interrupção**, produza um registro de retorno com comandos concretos e caminhos reais. Se o destino de retorno for legado, prepare também um script/procedimento `Retornar-Legado.ps1`, com identidades e pré-condições, baseado nos comandos existentes na instalação. Não basta escrever “reiniciar a versão antiga”.
 
@@ -160,9 +166,9 @@ Salve um relatório e um ponto de retomada no servidor com: caminhos reais, cont
 
 Informe claramente um dos resultados: implantado e observado; rollback executado e validado; ou bloqueado antes da troca com versão atual preservada. Registre o tempo efetivamente acompanhado e se o acesso foi validado pela rede corporativa ou apenas pela própria máquina. Deixe documentado o comando de rollback aplicável ao estado final e não remova a versão de retorno durante este piloto.
 
-Reaproveite as suítes locais já concluídas: **1.375 testes frontend, 421 backend, builds e regressões de segurança/drenagem**. Não as rode contra produção. Os helpers `readiness_build`, `readiness_smoke` e `local_capacity` são exclusivos de laboratório descartável e não devem ser apontados para `C:\PPLID`.
+Reaproveite as suítes locais já concluídas: **1.375 testes frontend, 421 backend, builds e regressões de segurança/drenagem**, que documentam a revisão anterior `fac41fdd35bb07c0967c8599c4a38b8c419516e2`. Após integrar as bases atuais, foi feita uma verificação direcionada dos arquivos afetados; consulte o resultado registrado junto à publicação. Não atribua a execução integral das suítes antigas ao novo SHA. Não as rode contra produção. Os helpers `readiness_build`, `readiness_smoke` e `local_capacity` são exclusivos de laboratório descartável e não devem ser apontados para `C:\PPLID`.
 
-Resultado local conhecido: promoção/rollback confirmados em 420,48/613,59 ms; cenário pesado sintético com 98 HTTP 200, 20 timeouts e zero 503 em 118 requisições, com 80 dos 150 usuários enviando requisições antes do aborto estrito. A mistura não representa tráfego corporativo medido. Preserve essa limitação no relatório, sem transformá-la em homologação integral nem em bloqueio por um SLA numérico que o usuário não exigiu.
+Histórico anterior à sincronização: promoção/rollback confirmados em 420,48/613,59 ms; cenário pesado sintético com 98 HTTP 200, 20 timeouts e zero 503 em 118 requisições, com 80 dos 150 usuários enviando requisições antes do aborto estrito. A mistura não representa tráfego corporativo medido. Preserve essa limitação no relatório, sem transformá-la em homologação integral nem em bloqueio por um SLA numérico que o usuário não exigiu. Os artefatos físicos antigos do laboratório não correspondem à nova candidata: construa a nova revisão com a configuração real do servidor.
 
 ---
 
