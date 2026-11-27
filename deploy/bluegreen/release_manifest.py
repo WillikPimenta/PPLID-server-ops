@@ -19,7 +19,7 @@ from .store import atomic_json, read_json, utc
 
 
 EXCLUDED_DIRECTORIES = frozenset({
-    '.git', '.local', '.venv', 'venv', 'node_modules', 'runtime',
+    '.git', '.local', '.tmp-local', '.venv', 'venv', 'node_modules', 'runtime',
     '__pycache__', '.pytest_cache', '.mypy_cache', '.vite',
 })
 FLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -183,25 +183,35 @@ def run(lab: Path, sha: str, output: Path) -> dict:
 
     artifacts = {}
     omitted = 0
+    excluded_gitlinks = {}
     entries = _git(release, 'ls-files', '--stage', '-z').split(b'\0')
     for entry in entries:
         if not entry:
             continue
         header, raw = entry.split(b'\t', 1)
-        mode, _, stage = header.split()
+        mode, object_id, stage = header.split()
         relative = _relative(raw)
         if stage != b'0':
             raise RuntimeError('Unmerged Git index cannot identify a release artifact')
         if _excluded(relative) or mode == b'120000':
+            if mode == b'160000':
+                excluded_gitlinks[relative] = object_id.decode('ascii')
             omitted += 1
             continue
         if mode not in (b'100644', b'100755'):
             raise RuntimeError('Submodules or unsupported Git entries require explicit manifest support')
         path = _physical(release / relative, release, file=True)
         artifacts[relative] = {**_hash(path), 'source': 'git-tracked'}
-    changed = [_relative(p) for p in _git(release, 'diff', '--name-only', '-z', 'HEAD', '--').split(b'\0') if p]
-    if any(not _excluded(p) for p in changed):
+    changed = [_relative(p) for p in _git(release, 'diff', '--ignore-submodules=all', '--name-only', '-z', 'HEAD', '--').split(b'\0') if p]
+    # Editable installation regenerates this already-versioned setuptools
+    # metadata. Keep its actual hashes, while still rejecting source changes.
+    generated_metadata = {'automacoes/sistematest.egg-info/' + name for name in (
+        'PKG-INFO', 'SOURCES.txt', 'requires.txt', 'dependency_links.txt',
+        'entry_points.txt', 'top_level.txt', 'not-zip-safe')}
+    if any(not _excluded(p) and p not in generated_metadata for p in changed):
         raise RuntimeError('Tracked release sources changed after the clean commit')
+    for path in generated_metadata & artifacts.keys():
+        artifacts[path]['source'] = 'generated-package-metadata'
     dist = _physical(release / 'frontend/dist', release)
     _physical(dist / 'index.html', release, file=True)
     for directory, folders, files in os.walk(dist, followlinks=False):
@@ -256,7 +266,8 @@ def run(lab: Path, sha: str, output: Path) -> dict:
         'schemaVersion': 1, 'createdAt': utc(), 'ok': True, 'productionTouched': False,
         'release': sha, 'sourceCommit': full, 'laboratory': str(lab),
         'operationsCommit': _git(workspace, 'rev-parse', 'HEAD').decode().strip(),
-        'operationsIncludesWorkingChanges': bool(_git(workspace, 'status', '--porcelain', '-uno').strip()),
+        'operationsIncludesWorkingChanges': bool(_git(workspace, 'status', '--porcelain', '-uno', '--ignore-submodules=all').strip()),
+        'generatedMetadataChanged': sorted(generated_metadata & set(changed)),
         'manifestTool': _hash(Path(__file__)),
         'cleanBuildReport': _hash(report_path), 'containedBuildReceipt': _hash(receipt_path),
         'releaseMetadata': _hash(meta_path), 'pipCheck': {**_hash(pip_path), 'exitCode': 0},
@@ -265,6 +276,7 @@ def run(lab: Path, sha: str, output: Path) -> dict:
                               'versions': dict(sorted(constraints.items())),
                               'verification': 'venv -I -S; importlib.metadata; network disabled'},
         'excluded': {'directories': sorted(EXCLUDED_DIRECTORIES),
+                     'temporaryGitlinks': excluded_gitlinks,
                      'environmentFiles': '.env*, *.env', 'trackedEntriesOmitted': omitted,
                      'symlinksAndJunctions': 'not followed; physical manifest inputs required'},
         'artifactCount': len(artifacts), 'artifactBytes': sum(a['bytes'] for a in artifacts.values()),
