@@ -1,3 +1,5 @@
+> Atualização de 27/11/2026: builds e verificações funcionais locais aprovados, mas a carga de 150 sessões falhou. Produção continua bloqueada. O resultado atual está em [RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md](../RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md); os números abaixo são históricos.
+
 # Validação do deploy blue-green
 
 > Revisão posterior do mesmo dia: correções, builds limpos e cobertura ampliada estão em [PRONTIDAO_PRODUCAO_BLUEGREEN.md](PRONTIDAO_PRODUCAO_BLUEGREEN.md). O total consolidado passou a 85 casos distintos aprovados. Os números de 65 casos e o laboratório com checkout sujo abaixo são evidências históricas da implementação inicial. A decisão de produção continua **NÃO LIBERADO**, pelos requisitos concretos abertos no relatório mais recente.

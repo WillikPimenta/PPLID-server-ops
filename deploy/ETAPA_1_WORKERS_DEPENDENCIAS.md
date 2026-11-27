@@ -1,3 +1,5 @@
+> Atualização de 27/11/2026: builds e verificações funcionais locais aprovados, mas a carga de 150 sessões falhou. Produção continua bloqueada. O resultado atual está em [RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md](../RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md); os números abaixo são históricos.
+
 # Etapa 1 — workers, dependências e release candidata
 
 Execução em 26/11/2026. Escopo solicitado: concluir o mecanismo de pausa/drenagem/confirmação de parada, corrigir os alertas das dependências de produção e gerar uma release com versões fixadas. A ativação no servidor permanece uma etapa posterior.

@@ -2,17 +2,19 @@
 
 ## Estado e condições de entrada
 
-**Procedimento preparado; piloto ainda não executado. Produção não liberada por este documento.** A autorização anterior para usar MAIN permanece válida. O destino real é `C:\PPLID`; `C:\Users\c93123a\PPLID` identifica somente a instalação desta máquina.
+**APROVAÇÃO LOCAL PARCIAL — NO_GO PARA PRODUÇÃO COM 150 USUÁRIOS.** O ensaio HTTP falhou; este runbook é um procedimento preparado para etapa posterior, não uma ordem de ativação pronta. A autorização anterior para usar MAIN permanece válida, mas não elimina o bloqueio técnico de capacidade. O destino real é `C:\PPLID`; `C:\Users\c93123a\PPLID` identifica somente a instalação desta máquina.
 
 Executar com a conta operacional comum, sem exigir administrador. A mesma conta deve ser dona do proxy, dos slots e do supervisor: o canal de controle usa DPAPI CurrentUser. Não copiar descoberta, tokens ou runtime de outra conta/máquina.
 
-As regressões locais preservadas no checkpoint passaram: 421 casos selecionados de backend, 1.375 casos Vitest em 270 arquivos, tipos/build e auditorias npm sem entradas. O ensaio local foi reduzido em 27/11, por prioridade do usuário, a uma verificação curta de 150 usuários por 60–120 segundos com transições, ainda pendente nesta atualização. Ele não comprova capacidade sustentada ou SLA; a rampa e a sustentação prolongada não fazem parte desta execução acelerada.
+As regressões locais preservadas no checkpoint passaram: 421 casos selecionados de backend, 1.375 casos Vitest em 270 arquivos, tipos/build e auditorias npm sem entradas. O ensaio local acelerado de 150 usuários foi planejado para 120 segundos e abortou em 31,66 segundos: 220 requisições, 80 HTTP 200, 84 HTTP 503, 56 timeouts e p95 de 30.016 ms. Houve 99 falhas em 202 sondas. Uma promoção para R1 aos 10,03 segundos foi recusada antes de trocar. Não se comprovou capacidade sustentada nem SLA; a rampa, o baseline prolongado, a sustentação de 30 minutos e o cenário misto de 300 segundos ficam adiados e não contam como aprovados nesta execução acelerada.
+
+Antes de usar as etapas de ativação, investigar a capacidade HTTP/pool/filas/sondas e repetir o ensaio afetado. O limite de conexões 256 passou em teste focal de keep-alive/health, mas a aplicação continuou falhando sob a mesma carga. Waitress chegou a fila de 83 com 16 threads e a sonda de um segundo compartilha essa fila. Não foi demonstrada saturação física do host ou causa exclusiva no PostgreSQL, e não houve baseline legado equivalente. Suítes verdes não removem esse bloqueio; o piloto real no servidor permanece obrigatório.
 
 Antes da primeira ativação, preencher e conferir o registro abaixo com o [relatório local](RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md). Campos pendentes impedem tratar este runbook como ordem de execução pronta.
 
 | Campo | Valor a registrar |
 |---|---|
-| Commit completo de operações | PENDENTE de congelamento da revisão final |
+| Código de operações congelado para o ensaio local | `1b5b37fad07042337c2834d30725ef6b6ee0dea4`; registrar a revisão efetivamente publicada no servidor |
 | R1: commit funcional de retorno no servidor | PENDENTE: conferir o SHA real instalado; não substituir automaticamente pelo controle de laboratório |
 | R2: commit candidato no servidor | PENDENTE de construção com configuração real e homologação compatível |
 | Diferença funcional R1/R2 | PENDENTE; ambas precisam dos mesmos contratos web, drenagem e controle |
@@ -84,11 +86,13 @@ A migration `access.0046_split_planning_performance_menu_key` altera somente a i
 
 Publicar os commits revisados pelo fluxo normal da equipe, preservando o legado até a janela de migração. Construir R1 e R2 a partir dos SHAs congelados usando configuração real de MAIN e o pipeline da revisão. Verificar lockfile, constraints Python, `pip check`, manifesto, contratos e hashes. Os helpers `readiness_build`, `readiness_smoke` e `local_capacity` aceitam laboratório descartável; não são comandos de implantação em `C:\PPLID`.
 
-O controle R1 local é `1cb6444748473ced40eea6b51daf5f4162424890`; a R2 local terá a correção do filtro de pares incompletos. Esse par não representa automaticamente o código instalado no servidor. R1 conserva o envio de órfãos, ignorados pelo backend, mesmo com a opção de ignorá-los marcada. Registrar essa limitação conhecida no ensaio de retorno; não afirmar que R1 passou os 1.375 casos que incluíam a correção de R2.
+O controle R1 local é `1cb6444748473ced40eea6b51daf5f4162424890`; a R2 local é `fac41fdd35bb07c0967c8599c4a38b8c419516e2`, com a correção do filtro de pares incompletos. Esse par não representa automaticamente o código instalado no servidor. R1 conserva o envio de órfãos, ignorados pelo backend, mesmo com a opção de ignorá-los marcada. Registrar essa limitação conhecida no ensaio de retorno; não afirmar que R1 passou os 1.375 casos que incluíam a correção de R2.
+
+Os dois builds locais passaram no laboratório `build-b3b05159`: pipeline 0, `pip check` 0 e fonte limpa. Foram criadas venvs novas com reutilização do cache pip; não clonadas de `current`/`previous`. Os manifestos registram 5.891/5.892 artefatos e 84 pins conferidos em cada release. O smoke verificou troca/rollback R1 → R2 → R1 → R2, sessão, documento e navegação lazy no navegador e 135 assets antigos; essas evidências foram preservadas e reaproveitadas. O ensaio integrado final de carga falhou. O último relatório confirma PostgreSQL e supervisor parados; conservar a prova final de identidades/processos. A restauração de snapshot sintético de outro laboratório não atende, por si, ao requisito de backup/restauração dos dados reais do servidor.
 
 Na janela controlada, depois de inventariar/suspender os gatilhos concorrentes e registrar a configuração anterior, configurar MAIN como `blueGreen` com os valores conferidos, mantendo os processos legados existentes enquanto se constrói. Alterar a flag não os encerra nem transfere ownership. A configuração deve conter o mirror com os commits disponíveis, os paths corretos e recursos para o build; o comando não busca um SHA que não esteja nesse mirror.
 
-Construir as duas releases com a nova ação `build`, que funciona antes de haver slot ativo e não executa `prepare`, promoção, ativação ou start de workers. Ela mantém o mutex e contém somente a árvore de build em Job Object; só aceita êxito com validação e recibo de árvore vazia. Se a release já estiver fixada por slot/supervisor, valida e reutiliza o artefato em vez de reconstruí-lo. A validação focal final dessa nova ação deve estar aprovada no relatório antes do uso real.
+Construir as duas releases com a nova ação `build`, que funciona antes de haver slot ativo e não executa `prepare`, promoção, ativação ou start de workers. Ela mantém o mutex e contém somente a árvore de build em Job Object; só aceita êxito com validação e recibo de árvore vazia. Se a release já estiver fixada por slot/supervisor, valida e reutiliza o artefato em vez de reconstruí-lo. A ação possui nove casos focais aprovados, conforme o relatório; o build real e a homologação dos artefatos continuam sendo requisitos separados.
 
 ```powershell
 $PilotOps = 'C:\caminho-real-do-repositorio-de-operacoes'

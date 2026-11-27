@@ -1,3 +1,5 @@
+> Atualização de 27/11/2026: builds e verificações funcionais locais aprovados, mas a carga de 150 sessões falhou. Produção continua bloqueada. O resultado atual está em [RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md](../RELATORIO_HOMOLOGACAO_LOCAL_BLUE_GREEN.md); os números abaixo são históricos.
+
 # Prontidão para produção — execução de 26/11/2026
 
 **Decisão atual: NÃO LIBERADO.** As correções de infraestrutura avançaram e os testes locais foram ampliados. A execução do [plano](../PLANO_PRONTIDAO_PRODUCAO_BLUE_GREEN.md) não deve ser confundida com aprovação dos requisitos que ainda dependem do produto e do servidor.
